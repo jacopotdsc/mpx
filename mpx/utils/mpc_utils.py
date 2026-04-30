@@ -269,6 +269,199 @@ def reference_generator_srbd(use_terrain_estimator,N,dt,n_contact,mass,foot0,t_t
 
     return jnp.concatenate([p_ref, quat_ref, dp_ref, omega_ref,contact_sequence], axis=1),jnp.concatenate([ contact_sequence,foot_ref], axis=1), liftoff , foot_ref_dot
 
+@partial(jax.jit, static_argnums=(3, 4, 5, 6, 7, 8, 9))
+def reference_generator_dfcip_offline(
+    vel_lin: float = 0.0,
+    vel_ang: float = 0.0,
+    vel_z:   float = 0.0,
+    pcom:    jax.Array = jnp.array([0.0, 0.0, 0.4]),
+    nx:      int = 13,
+    nu:      int = 9,
+    t_sec:   float = 6,
+    dt:      float = 0.002,
+    m:       float = 27.68978,
+    grav:    float = 9.81,
+) -> tuple[jax.Array, jax.Array]:
+
+        T = t_sec
+        dt_ = dt
+        N_STEP_ = int(t_sec / dt_)
+
+        x_ref = jnp.full((nx, N_STEP_), fill_value=0.0)
+        u_ref = jnp.full((nx, N_STEP_-1), fill_value=0.0)
+
+        T_const = 2 * T/3
+        T_acc = (T-T_const)/2
+
+        v_peak = vel_lin
+        omega_peak = vel_ang
+
+        a_max = v_peak / T_acc
+        alpha_max = omega_peak / T_acc
+
+        vz          = vel_z
+        v_contact_z = 0.0
+        v           = 0.0
+        omega       = 0.0
+        theta0      = 0.0
+
+        a           = 0.0
+        alpha       = 0.0
+
+        x0          = pcom[0]
+        y0          = pcom[1]
+        z0          = pcom[2]
+        z0_contact  = 0.0
+
+        z_min       = 0.25
+        z_max       = 0.42
+
+        x = x0
+        y = y0
+        z = z0
+
+        theta = theta0
+
+        def scan_step(carry, t_step):
+
+            t = t_step * dt_
+            x, y, z, theta, v_peak, omega_peak, vz, z0_contact, v_contact_z = carry
+            v_contact_z = 0.0
+
+            td = t - (T_acc + T_const)
+
+            a = jnp.where(
+                    t < T_acc,
+                    a_max,
+                                            jnp.where(
+                    t < T_acc + T_const,
+                    0.0,
+                                            jnp.where(
+                    t < T,
+                    -a_max,
+                    0.0                     )
+                                            )
+            )
+
+            v = jnp.where(
+                    t < T_acc,
+                    a_max * t,
+                                            jnp.where(
+                    t < T_acc + T_const,
+                    v_peak,
+                                            jnp.where(
+                    t < T,
+                    v_peak - a_max * td,
+                    0.0                     )
+                                            )
+            )
+
+            alpha = jnp.where(
+                    t < T_acc,
+                    alpha_max,
+                                            jnp.where(
+                    t < T_acc + T_const,
+                    0.0,
+                                            jnp.where(
+                    t < T,
+                    -alpha_max,
+                    0.0                     )
+                                            )
+            )
+
+            omega = jnp.where(
+                    t < T_acc,
+                    alpha_max * t,
+                                            jnp.where(
+                    t < T_acc + T_const,
+                    omega_peak,
+                                            jnp.where(
+                    t < T,
+                    omega_peak - alpha_max * td,
+                    0.0                     )
+                                            )
+            )
+
+
+            vx = v * jnp.cos(theta)
+            vy = v * jnp.sin(theta)
+
+            x  = x  + vx  * dt_
+            y  = y  + vy  * dt_
+            theta = theta + omega * dt_
+
+            z = jnp.clip(z + vz * dt_, z_min, z_max)
+            z_contact = z0_contact + v_contact_z * t
+
+            vz = jnp.where(
+                z <= z_min,
+                0.0,
+                jnp.where(
+                    z >= z_max,
+                    0.0,
+                    vz
+                )
+            )
+
+            #jax.debug.print("---- frame: {i}", i=t)
+            #jax.debug.print("x={x} y={y} z={z}", x=x, y=y, z=z)
+            #jax.debug.print("vx={vx} vy={vy} vz={vz}", vx=vx, vy=vy, vz=vz)
+
+            x_ref_t = jnp.array([
+
+                # CoM information
+                x,    # [0]  com_x
+                y,    # [1]  com_y
+                z,    # [2]  com_z
+                vx,    # [3]  vx
+                vy,   # [4]  vy
+                vz,   # [5]  vz
+
+                # Midle point of contact points informations
+                x,    # [6]  pc_x
+                y,    # [7]  pc_y
+                z_contact,          # [8]  pc_z
+                v_contact_z,        # [9]  v_contact_z
+
+                # Command
+                theta,      # [10] theta
+                v,          # [11] v
+                omega,      # [12] omega
+            ])
+
+            u_ref_t = jnp.array([
+                0.0,     # a
+                0.0,     # ac_z
+                0.0,
+
+                0.0,        # fl_x
+                0.0,        # fl_y
+                m*grav/2,   # fl_z
+
+                0.0,         # fl_x
+                0.0,         # fl_y
+                m*grav/2     # fl_z
+            ])
+
+            carry_new = x, y, z, theta, v_peak, omega_peak, vz, z0_contact, v_contact_z
+
+            return carry_new, (x_ref_t, u_ref_t)
+
+        v_peak = vel_lin
+        omega_peak = vel_ang
+        vz = vel_z
+        z0_contact = 0.0
+        v_contact_z = 0.0
+
+        carry = x0, y0, z0, theta, v_peak, omega_peak, vz, z0_contact, v_contact_z
+
+        _, (x_ref_T, u_ref_T) = jax.lax.scan(scan_step, carry, jnp.arange(N_STEP_))
+
+        x_ref = x_ref_T.T   # (N_STEP_, NX).T = (NX, N_STEP_)
+        u_ref = u_ref_T.T   # (N_STEP_, NU).T = (NX, N_STEP_)
+
+        return x_ref, u_ref
+
 import mujoco
 from mujoco import mjx
 
@@ -293,6 +486,8 @@ def whole_body_interface(model, mjx_model, contact_id, body_id,sim_frequency,Kp,
     RR_leg = mjx_data.geom_xpos[contact_id[3]]
 
     # Compute the Jacobians for each leg
+    # Return geometric and rotational jacobian ( joint space -> cartesian space)
+    # Each of them has shape (18, 3) 
     J_FL, _ = mjx.jac(mjx_model, mjx_data, FL_leg, body_id[0])
     J_FR, _ = mjx.jac(mjx_model, mjx_data, FR_leg, body_id[1])
     J_RL, _ = mjx.jac(mjx_model, mjx_data, RL_leg, body_id[2])
@@ -303,14 +498,51 @@ def whole_body_interface(model, mjx_model, contact_id, body_id,sim_frequency,Kp,
     # Concatenate the positions of the legs into a single vector
     current_leg = jnp.concatenate([FL_leg, FR_leg, RL_leg, RR_leg], axis=0)
     current_leg_dot = J.T @ mjx_data.qvel
+
+    '''
+    v_task = J @ qvel -> a_task = J @ qacc + J_dot @ qvel
+    qacc = J_pinv @ a_task - J_dot @ qvel -> for small movement, J_dot @ qvel can be negletted
+    J_FL actually is the mapping from joint space to task space
+    so when using J_pinv we have to use the jacobian from task to join space with J_FL^T
+    '''
+    # definition of a_task
     cartesian_space_action = Kp@(foot_ref-current_leg) + Kd@(foot_ref_dot-current_leg_dot)
+
+    # M @ qacc + n = tau + J.T @ grf -> tau = M @ qacc + n - J.T @ grf
     tau_fb_lin = D[6:] + (M @ jnp.linalg.pinv(J.T) @ (cartesian_space_action))[6:]
     tau_mpc = -(J@grf)[6:]
     tau_PD = (J @ cartesian_space_action)[6:]
     contact_mask = jnp.array([contact[0],contact[0],contact[0],contact[1],contact[1],contact[1],contact[2],contact[2],contact[2],contact[3],contact[3],contact[3]])
+    
+    # tau in contact use only
     tau = tau_mpc*contact_mask + (1-contact_mask)*(tau_PD + tau_fb_lin) 
 
     return tau , J
+
+@partial(jax.jit, static_argnums=(0))
+def whole_body_interface_wheeled_legged(model, mjx_model, contact_id, body_id,sim_frequency,Kp,Kd,qpos,qvel,grf,foot_ref,foot_ref_dot):
+
+    mjx_data = mjx.make_data(model)
+    # Update the position and velocity in the data object
+    mjx_data = mjx_data.replace(qpos=qpos, qvel=qvel)
+    # Perform forward kinematics and dynamics computations
+    mjx_data = mjx.fwd_position(mjx_model, mjx_data)
+    mjx_data = mjx.fwd_velocity(mjx_model, mjx_data)
+
+    # Get the positions of the contact points on the legs
+    L_leg = mjx_data.geom_xpos[contact_id[0]]
+    R_leg = mjx_data.geom_xpos[contact_id[1]]
+
+    # Compute the Jacobians for each leg
+    J_L, _ = mjx.jac(mjx_model, mjx_data, L_leg, body_id[0])
+    J_R, _ = mjx.jac(mjx_model, mjx_data, R_leg, body_id[1])
+
+    # Concatenate the Jacobians into a single matrix
+    J = jnp.concatenate([J_L, J_R], axis=1)
+
+    tau_mpc = -(J@grf)[6:]
+
+    return tau_mpc, J
 
 @partial(jax.jit, static_argnums=(0,1,2,3))
 def reference_barell_roll(N,dt,n_joints,n_contact,foot0,q0):

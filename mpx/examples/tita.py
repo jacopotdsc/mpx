@@ -24,12 +24,11 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 
 
 def _reset_to_initial_state(model, data):
-    if model.nkey > 0:
+    try:
         mujoco.mj_resetDataKeyframe(model, data, 0)
         data.qvel[:] = 0.0
-    else:
-        data.qpos = np.asarray(jnp.concatenate([config.p0, config.quat0, config.q0]))
-        data.qvel[:] = 0.0
+    except Exception as e:
+        print(f"Failed to reset to initial state: {e}")
     mujoco.mj_forward(model, data)
 
 
@@ -43,33 +42,78 @@ def _srbd_state(qpos, qvel):
         ]
     )
 
+def get_dfip_current_state(self, tita_state: jax.Array, theta_prev: float) -> jax.Array:
+        
+    def unwrapNear(self, theta_wrapped: float, theta_prev: float) -> float:
+        # wrapping to pi
+        a = theta_wrapped - theta_prev # input
+
+        a = (a + jnp.pi) % (2 * jnp.pi)
+        a = jnp.where(a < 0, a + 2*jnp.pi, a)
+        a = a - jnp.pi
+
+        return theta_prev + a
+
+    pcom        = tita_state[0:3]
+    vcom        = tita_state[3:6]
+    pl_world    = tita_state[6:9]
+    pr_world    = tita_state[9:12]
+    dpl_world   = tita_state[12:15]
+    dpr_world   = tita_state[15:18]
+
+    c_world     = (pl_world + pr_world) / 2.0
+    vc_world    = (dpl_world + dpr_world) / 2.0
+
+    # extract theta
+    diff = pl_world - pr_world
+    theta_wrapped = jnp.atan2( -diff[0], diff[1])
+    theta = unwrapNear(theta_wrapped, theta_prev)
+
+    R = jnp.array([
+        [ jnp.cos(theta), -jnp.sin(theta), 0.],
+        [ jnp.sin(theta),  jnp.cos(theta), 0.],
+        [ 0.,              0.,             1.]
+    ])
+
+    dpl_body = R.T @ dpl_world
+    dpr_body = R.T @ dpr_world
+
+    w = (dpr_body[0] - dpl_body[0]) / self.d # 0.1
+    v = (dpr_body[0] + dpl_body[0]) / 2.0
+
+    x0 = jnp.concatenate([
+        pcom,
+        vcom,
+        c_world,
+        jnp.array([vc_world[2]]),
+        jnp.array([theta]),
+        jnp.array([v]),
+        jnp.array([w]),
+    ])
+
+    return x0, theta
 
 def main(headless=False, steps=500, scene="flat"):
     model = mujoco.MjModel.from_xml_path(
-        dir_path + f"/../data/aliengo/scene_{scene}.xml"
+        dir_path + f"/../data/tita/tita_world.xml"
     )
     data = mujoco.MjData(model)
     sim_frequency = float(config.whole_body_frequency)
     model.opt.timestep = 1.0 / sim_frequency
-
+    
     contact_ids = sim_utils.geom_ids(model, config.contact_frame)
     command_handle = sim_utils.KeyboardVelocityCommand(vx=0.0, vy=0.0, wz=0.0)
+    # TODO: use mpc_wrapper_dfcip
     mpc = mpc_wrapper_srbd.BatchedMPCControllerWrapper(config, n_env=1)
 
     _reset_to_initial_state(model, data)
-
+    
     foot = jnp.asarray(sim_utils.geom_positions(data, contact_ids))
     x0 = _srbd_state(data.qpos, data.qvel)
     command = jnp.asarray(command_handle.mpc_input(config.robot_height))
     contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
 
     mpc.run(x0[None, :], command[None, :], foot[None, :], contact[None, :])
-    tau_warm, _ = mpc.whole_body_run(
-        jnp.asarray(data.qpos)[None, :],
-        jnp.asarray(data.qvel)[None, :],
-    )
-    tau_warm.block_until_ready()
-    mpc.reset()
 
     period = int(sim_frequency / config.mpc_frequency)
     print(f"sim_frequency: {sim_frequency} Hz, mpc_frequency: {config.mpc_frequency} Hz")
@@ -121,7 +165,11 @@ def main(headless=False, steps=500, scene="flat"):
             tic = timer()
             if overlay_text is not None:
                 viewer.set_texts((None, None, *overlay_text))
-            step_controller()
+            #step_controller()
+            data.ctrl = np.zeros(model.nu) 
+            mujoco.mj_step(model, data)
+            counter += 1
+
             toc = timer()
             if toc - tic < model.opt.timestep:
                 time.sleep(model.opt.timestep - (toc - tic))

@@ -52,25 +52,29 @@ class BatchedMPCControllerWrapper:
         self.batch_V0 = jnp.tile(V0, (n_env, 1, 1))
         
         # Define cost, hessian approximation, and dynamics functions for MPC.
-        cost = partial(mpc_objectives.quadruped_srbd_obj,
+        # TODO: write cost function
+        cost = partial(mpc_objectives.wheeled_dfcip_obj,
                             config.n_contact, config.N)
-        hessian_approx = partial(mpc_objectives.quadruped_srbd_hessian_gn,
-                                    config.n_contact)
-        dynamics = partial(mpc_dyn_model.quadruped_srbd_dynamics,
-                                config.mass, config.inertia, jnp.linalg.inv(config.inertia), config.dt)
+        # TODO: can be omitted
+        hessian_approx = None #partial(mpc_objectives.quadruped_srbd_hessian_gn, config.n_contact)
+        
+        # TODO: write dynamics function - OK
+        dynamics = partial(mpc_dyn_model.wheeled_dfcip_dynamics,
+            mjx_model=mjx_model, mass=config.mass, grav=config.grav, dt=config.dt)
 
         work = partial(optimizers.mpc, cost, dynamics, hessian_approx, False)
         
-        reference_generator = partial(mpc_utils.reference_generator_srbd,
-            config.use_terrain_estimator ,config.N, config.dt, config.n_contact , mass = config.mass, clearence_speed = config.clearence_speed, duty_factor = config.duty_factor,  step_freq= config.step_freq ,step_height=config.step_height,foot0 = config.p_legs0)
-        
-        whole_body_control = partial(mpc_utils.whole_body_interface, model, mjx_model, contact_id, body_id,config.whole_body_frequency,config.Kp,config.Kd)
+        # TODO: copy reference generator from colab - OK
+        reference_generator = partial(mpc_utils.reference_generator_dfcip_offline,
+            pcom=jax.array([0.0, 0.0, 0.4]), nx=config.nx, nu=config.nu, 
+            t_sec=6, dt=config.dt, m=config.mass, grav=config.grav)
 
-        timer_t = partial(mpc_utils.timer_run, duty_factor=config.duty_factor, step_freq=config.step_freq)
+        # TODO: write whole body control interface for 2 wheeled control
+        whole_body_control = partial(mpc_utils.whole_body_interface_wheeled_legged, model, mjx_model, contact_id, body_id,config.whole_body_frequency,config.Kp,config.Kd)
 
         self._solve = jax.jit(jax.vmap(work))
         self._ref_gen = jax.jit(jax.vmap(reference_generator))
-        self._timer_run = jax.jit(jax.vmap(mpc_utils.timer_run, in_axes=(None,None,0, None)))
+        self._reference = self._ref_gen(vel_lin=0.0, vel_ang=0.0, vel_z=0.0)
         self._whole_body_interface = jax.jit(jax.vmap(whole_body_control))
 
         self.contact_time = jnp.tile(config.timer_t, (n_env, 1))
@@ -82,37 +86,21 @@ class BatchedMPCControllerWrapper:
         self.grf = jnp.zeros((n_env, 3*config.n_contact))
         
         
-    def run(self, x0, input, foot_op,contact):
+    def run(self, x0, time_frame, horizon):
         """
         Runs one MPC update using the current state, input, and foot positions.
         
         Args:
             x0: Current system state vector.
-            input: Input 
-            foot_op: Flattened current foot positions vector.
         
         Returns:
             A tuple (X, U, V) representing the computed state trajectory, control sequence,
             and auxiliary variable trajectory.
         """
-        # Update the timer state for the gait reference.
-        
-        self.contact , self.contact_time = self._timer_run(self.config.duty_factor,self.config.step_freq,self.contact_time,1/self.mpc_frequency)
-       
         # Generate reference trajectory and additional MPC parameters.
         
-        reference, parameter, self.liftoff, foot_ref_dot = self._ref_gen(
-            t_timer = self.contact_time.copy(),
-            x = x0,
-            foot = foot_op,
-            input = input,
-            contact = contact,
-            liftoff = self.liftoff
-        )
-        
-        print("reference shape:", reference.shape)
-        print("parameter shape:", parameter.shape)
-        print("-------")
+        reference = jax.lax.dynamic_slice(self._reference, (time_frame,), (time_frame + horizon,))
+        parameter = None
         
         self.foot_ref = parameter[:,0,4:]
         self.foot_ref_dot = foot_ref_dot[:,0,:]
@@ -140,7 +128,7 @@ class BatchedMPCControllerWrapper:
 
     
     def whole_body_run(self,qpos,qvel):
-        return self._whole_body_interface(qpos,qvel,self.grf,self.foot_ref,self.foot_ref_dot,self.contact)
+        return self._whole_body_interface(qpos,qvel,self.grf)
     
     
     def reset(self):
