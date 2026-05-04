@@ -62,9 +62,10 @@ def main(headless=False, steps=500, scene="flat"):
     x0 = _srbd_state(data.qpos, data.qvel)
     command = jnp.asarray(command_handle.mpc_input(config.robot_height))
     contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
-
-    mpc.run(x0[None, :], command[None, :], foot[None, :], contact[None, :])
+    mpc_state = mpc.init_state()
+    mpc_state = mpc.run(mpc_state, x0[None, :], command[None, :], foot[None, :], contact[None, :])
     tau_warm, _ = mpc.whole_body_run(
+        mpc_state,
         jnp.asarray(data.qpos)[None, :],
         jnp.asarray(data.qvel)[None, :],
     )
@@ -76,7 +77,7 @@ def main(headless=False, steps=500, scene="flat"):
     #print(f"Controller period: {period} steps at {sim_frequency} Hz simulation frequency.")
     counter = 0
 
-    def step_controller():
+    def step_controller(mpc_state):
         nonlocal counter
 
         qpos = data.qpos.copy()
@@ -91,13 +92,13 @@ def main(headless=False, steps=500, scene="flat"):
             #print(f"Contact: {contact}")
             #print(foot)
             #print(f"Command: {command}")
-
             start = timer()
-            mpc.run(x0[None, :], command[None, :], foot[None, :], contact[None, :])
+            mpc_state = mpc.run(mpc_state, x0[None, :], command[None, :], foot[None, :], contact[None, :])
             stop = timer()
             #print(f"MPC time: {1e3 * (stop - start):.2f} ms")
 
         tau_cmd, _ = mpc.whole_body_run(
+            mpc_state,
             jnp.asarray(qpos)[None, :],
             jnp.asarray(qvel)[None, :],
         )
@@ -105,10 +106,12 @@ def main(headless=False, steps=500, scene="flat"):
         mujoco.mj_step(model, data)
         counter += 1
 
+        return mpc_state
+
     if headless:
         for _ in range(steps):
-            step_controller()
-        return
+            step_controller(mpc_state)
+        return mpc_state
 
     with mujoco.viewer.launch_passive(
         model,
@@ -121,7 +124,7 @@ def main(headless=False, steps=500, scene="flat"):
             tic = timer()
             if overlay_text is not None:
                 viewer.set_texts((None, None, *overlay_text))
-            step_controller()
+            mpc_state =step_controller(mpc_state)
             toc = timer()
             if toc - tic < model.opt.timestep:
                 time.sleep(model.opt.timestep - (toc - tic))
