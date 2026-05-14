@@ -76,8 +76,10 @@ def main(headless=False, steps=500, scene="flat"):
     print(f"sim_frequency: {sim_frequency} Hz, mpc_frequency: {config.mpc_frequency} Hz")
     #print(f"Controller period: {period} steps at {sim_frequency} Hz simulation frequency.")
     counter = 0
+    grf = jnp.zeros(config.n_contact * 3)
+    J = jnp.zeros((model.nv, config.n_contact * 3))
 
-    def step_controller(mpc_state):
+    def step_controller(mpc_state, grf, J):
         nonlocal counter
 
         qpos = data.qpos.copy()
@@ -95,22 +97,65 @@ def main(headless=False, steps=500, scene="flat"):
             start = timer()
             mpc_state = mpc.run(mpc_state, x0[None, :], command[None, :], foot[None, :], contact[None, :])
             stop = timer()
+            
+            #print(f"GRF: {np.array(grf)}")
             #print(f"MPC time: {1e3 * (stop - start):.2f} ms")
 
-        tau_cmd, _ = mpc.whole_body_run(
+        tau_cmd, J = mpc.whole_body_run(
             mpc_state,
             jnp.asarray(qpos)[None, :],
             jnp.asarray(qvel)[None, :],
         )
-        data.ctrl = np.asarray(tau_cmd[0])
+        grf = mpc_state.grf[0]
+
+        def tau_to_qdes(model, data, tau, grf, J, dt):
+            qpos = data.qpos.copy()
+            qvel = data.qvel.copy()
+
+            mujoco.mj_forward(model, data)
+            
+            bias = data.qfrc_bias.copy()
+            vec = np.zeros(model.nv)
+            J_j = J[0, 6:, :] ¯
+            vec[6:] = tau - bias[6:] + J_j@grf
+           
+            M = np.zeros((model.nv, model.nv), dtype=np.float64)
+            mujoco.mj_fullM(model, M, data.qM)
+            qacc = np.linalg.solve(M, vec)
+            qacc_joints = qacc[6:]
+
+            dq_des = qvel[6:] + qacc_joints * dt
+            q_des = qpos[7:]+ qvel[6:] * dt + qacc_joints * (dt**2) / 2
+            #print(f"tau_cmd      : {tau_ctrl}")
+        
+            return q_des, dq_des, qacc_joints
+
+        dt = model.opt.timestep
+        tau_ctrl = np.asarray(tau_cmd[0])
+        q_des, dq_des, qacc_joints = tau_to_qdes(model, data, tau_ctrl, grf, J, model.opt.timestep)
+        pd_ctrl = tau_ctrl + 50 * (q_des - qpos[7:]) + 5 * (dq_des - qvel[6:])
+        #print(config.q0)
+        #print(config.q0.shape)
+        #pd_ctrl = 50*(config.q0 - qpos[7:]) - 0 * ( - qvel[6:])
+        
+        #print(f"bias[6:]     : {data.qfrc_bias[6:]}")
+        #print(f"vec (netto)  : {tau_ctrl - data.qfrc_bias[6:]}")
+        #print(f"qacc_joints  : {qacc_joints}")
+        #print(f"q_des - q    : {q_des - data.qpos[7:]}")
+        #print(f"pd_ctrl      : {pd_ctrl}")
+        #print(f"tau_cmd[0]   : {tau_ctrl}\n-----------------------")
+
+        data.ctrl = np.asarray(pd_ctrl)
+        #data.ctrl = np.asarray(tau_ctrl)
         mujoco.mj_step(model, data)
         counter += 1
 
-        return mpc_state
+
+        return mpc_state, tau_cmd, grf, J
 
     if headless:
         for _ in range(steps):
-            step_controller(mpc_state)
+            mpc_state, tau_cmd, grf, J = step_controller(mpc_state, grf, J)
         return mpc_state
 
     with mujoco.viewer.launch_passive(
@@ -124,7 +169,7 @@ def main(headless=False, steps=500, scene="flat"):
             tic = timer()
             if overlay_text is not None:
                 viewer.set_texts((None, None, *overlay_text))
-            mpc_state =step_controller(mpc_state)
+            mpc_state, tau_cmd, grf, J = step_controller(mpc_state, grf, J)
             toc = timer()
             if toc - tic < model.opt.timestep:
                 time.sleep(model.opt.timestep - (toc - tic))
