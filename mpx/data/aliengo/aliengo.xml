@@ -1,11 +1,14 @@
 <mujoco model="aliengo_description">
     <compiler angle="radian" meshdir="./assets/" />
-    <option impratio="100"/>
+    <option impratio="1" iterations="10" ls_iterations="5" timestep="0.004" integrator="Euler">
+        <flag eulerdamp="disable"/>
+    </option>
     <default>
         <light castshadow="false" diffuse="1 1 1"/>
         <camera fovy="60"/>
         <joint damping="0.6" armature="0.01" frictionloss="0.2" />
-        
+        <!-- Globally disable all collisions; only feet re-enable them -->
+        <geom condim="1" contype="0" conaffinity="0"/>
         
         <default class="visual">
             <geom type="mesh" contype="0" conaffinity="0" group="2"/>
@@ -46,7 +49,7 @@
             
             <!-- trunk visual mesh and collision -->
             <geom type="mesh" class="visual" rgba="0.2 0.2 0.2 1" mesh="trunk"/>
-            <geom type="box" class="collision" size="0.18 0.075 0.056"/>
+            <geom type="box" class="collision" size="0.18 0.075 0.056" contype="0" conaffinity="0"/>
 
             <!-- modify this to add payload -->
             <!--body name="payload" pos="0 0 0">
@@ -68,7 +71,7 @@
                 
                 <body name="FL_thigh" pos="0 0.083 0">
                     <inertial pos="-0.005607 -0.003877 -0.048199" quat="0.717987 -0.031246 -0.0335669 0.694544" mass="0.639" diaginertia="0.0058474 0.00571186 0.000324584" />
-                    <joint name="FL_thigh_joint" pos="0 0 0" axis="0 1 0" />
+                    <joint name="FL_thigh_joint" pos="0 0 0" axis="0 1 0" limited="true" range="-0.686 4.501"/>
                     
                     <!-- FL_thigh visual mesh and collision -->
                     <geom type="mesh" class="visual" rgba="0.2 0.2 0.2 1" mesh="thigh"/>
@@ -83,7 +86,8 @@
                         <!-- <geom type="box" class="collision" size="0.125 0.0104 0.008" pos="0 0 -0.125" quat="0.707107 0 0.707107 0"/> -->
                         
                         <!-- FL_foot only collision -->
-                        <geom name="FL" class="collision" size="0.0265" pos="0 0 -0.25" />
+                        <geom name="FL" class="collision" size="0.0265" pos="0 0 -0.25" contype="0" conaffinity="1"/>
+                        <site name="FL" pos="0 0 -0.213" type="sphere" size="0.023" group="5"/>
                     </body>
                 </body>
             </body>
@@ -99,7 +103,7 @@
                 
                 <body name="FR_thigh" pos="0 -0.083 0">
                     <inertial pos="-0.005607 0.003877 -0.048199" quat="0.694544 -0.0335669 -0.031246 0.717987" mass="0.639" diaginertia="0.0058474 0.00571186 0.000324584" />
-                    <joint name="FR_thigh_joint" pos="0 0 0" axis="0 1 0" />
+                    <joint name="FR_thigh_joint" pos="0 0 0" axis="0 1 0" limited="true" range="-0.686 4.501"/>
                     
                     <!-- FR_thigh visual mesh and collision -->
                     <geom type="mesh" mesh="thigh_mirror" class="visual" rgba="0.2 0.2 0.2 1" />
@@ -114,7 +118,8 @@
                         <!-- <geom type="box" class="collision" size="0.125 0.0104 0.008" pos="0 0 -0.125" quat="0.707107 0 0.707107 0"/> -->
                         
                         <!-- FR_foot only collision -->
-                        <geom name="FR" class="collision" size="0.0265" pos="0 0 -0.25"/>
+                        <geom name="FR" class="collision" size="0.0265" pos="0 0 -0.25" contype="0" conaffinity="1"/>
+                        <site name="FR" pos="0 0 -0.213" type="sphere" size="0.023" group="5"/>
                     </body>
                 </body>
             </body>
@@ -130,7 +135,7 @@
                 
                 <body name="RL_thigh" pos="0 0.083 0">
                     <inertial pos="-0.005607 -0.003877 -0.048199" quat="0.717987 -0.031246 -0.0335669 0.694544" mass="0.639" diaginertia="0.0058474 0.00571186 0.000324584" />
-                    <joint name="RL_thigh_joint" pos="0 0 0" axis="0 1 0" />
+                    <joint name="RL_thigh_joint" pos="0 0 0" axis="0 1 0" limited="true" range="-0.686 4.501"/>
                     
                     <!-- RL_thigh visual mesh and collision -->
                     <geom type="mesh" class="visual" rgba="0.2 0.2 0.2 1" mesh="thigh"/>
@@ -145,7 +150,8 @@
                         <!-- <geom type="box" class="collision" size="0.125 0.0104 0.008" pos="0 0 -0.125" quat="0.707107 0 0.707107 0"/> -->
                         
                         <!-- RL_foot only collision -->
-                        <geom name="RL" class="collision" size="0.0265" pos="0 0 -0.25"/>
+                        <geom name="RL" class="collision" size="0.0265" pos="0 0 -0.25" contype="0" conaffinity="1"/>
+                        <site name="RL" pos="0 0 -0.213" type="sphere" size="0.023" group="5"/>
                     </body>
                 </body>
             </body>
@@ -161,7 +167,7 @@
                 
                 <body name="RR_thigh" pos="0 -0.083 0">
                     <inertial pos="-0.005607 0.003877 -0.048199" quat="0.694544 -0.0335669 -0.031246 0.717987" mass="0.639" diaginertia="0.0058474 0.00571186 0.000324584" />
-                    <joint name="RR_thigh_joint" pos="0 0 0" axis="0 1 0" />
+                    <joint name="RR_thigh_joint" pos="0 0 0" axis="0 1 0" limited="true" range="-0.686 4.501"/>
                     
                     <!-- RR_thigh visual mesh and collision -->
                     <geom type="mesh" class="visual" rgba="0.2 0.2 0.2 1" mesh="thigh_mirror"/>
@@ -176,7 +182,8 @@
                         <!-- <geom type="box" class="collision" size="0.125 0.0104 0.008" pos="0 0 -0.125" quat="0.707107 0 0.707107 0"/> -->
                         
                         <!-- RR_foot only collision -->
-                        <geom name="RR" class="collision" size="0.0265" pos="0 0 -0.25" rgba="0 0 0 0"/>
+                        <geom name="RR" class="collision" size="0.0265" pos="0 0 -0.25" rgba="0 0 0 0" contype="0" conaffinity="1"/>
+                        <site name="RR" pos="0 0 -0.213" type="sphere" size="0.023" group="5"/>
                     </body>
                 </body>
             </body>
@@ -187,7 +194,7 @@
         <motor name="FL_hip"   class="hip"    gear="1" joint="FL_hip_joint"/>
         <motor name="FL_thigh" class="thigh"  gear="1" joint="FL_thigh_joint"/>
         <motor name="FL_calf"  class="calf"   gear="1" joint="FL_calf_joint"/>
-         <motor name="FR_hip"   class="hip"    gear="1" joint="FR_hip_joint"/>
+        <motor name="FR_hip"   class="hip"    gear="1" joint="FR_hip_joint"/>
         <motor name="FR_thigh" class="thigh"  gear="1" joint="FR_thigh_joint"/>
         <motor name="FR_calf"  class="calf"   gear="1" joint="FR_calf_joint"/>
         <motor name="RL_hip"   class="hip"    gear="1" joint="RL_hip_joint"/>
@@ -200,45 +207,38 @@
 
     <sensor>
 
-        <jointpos name="FL_hip_pos"     joint="FL_hip_joint"/>
-        <jointpos name="FL_thigh_pos"   joint="FL_thigh_joint"/>
-        <jointpos name="FL_calf_pos"    joint="FL_calf_joint"/>
-        <jointpos name="FR_hip_pos"     joint="FR_hip_joint"/>
-        <jointpos name="FR_thigh_pos"   joint="FR_thigh_joint"/>
-        <jointpos name="FR_calf_pos"    joint="FR_calf_joint"/>
-        <jointpos name="RL_hip_pos"     joint="RL_hip_joint"/>
-        <jointpos name="RL_thigh_pos"   joint="RL_thigh_joint"/>
-        <jointpos name="RL_calf_pos"    joint="RL_calf_joint"/>
-        <jointpos name="RR_hip_pos"     joint="RR_hip_joint"/>
-        <jointpos name="RR_thigh_pos"   joint="RR_thigh_joint"/>
-        <jointpos name="RR_calf_pos"    joint="RR_calf_joint" />
-
-        <jointvel name="FL_hip_vel"     joint="FL_hip_joint"/>
-        <jointvel name="FL_thigh_vel"   joint="FL_thigh_joint"/>
-        <jointvel name="FL_calf_vel"    joint="FL_calf_joint"/>
-         <jointvel name="FR_hip_vel"     joint="FR_hip_joint"/>
-        <jointvel name="FR_thigh_vel"   joint="FR_thigh_joint"/>
-        <jointvel name="FR_calf_vel"    joint="FR_calf_joint"/>
-        <jointvel name="RL_hip_vel"     joint="RL_hip_joint"/>
-        <jointvel name="RL_thigh_vel"   joint="RL_thigh_joint"/>
-        <jointvel name="RL_calf_vel"    joint="RL_calf_joint"/>
-        <jointvel name="RR_hip_vel"     joint="RR_hip_joint"/>
-        <jointvel name="RR_thigh_vel"   joint="RR_thigh_joint"/>
-        <jointvel name="RR_calf_vel"    joint="RR_calf_joint" />
-
-        <accelerometer name="Body_Acc" site="imu"/>
-
-        <gyro name="Body_Gyro" site="imu"/>
-
         <framepos name="Body_Pos" objtype="site" objname="imu"/>
 
         <framequat name="Body_Quat" objtype="site" objname="imu"/>
+
+        <gyro site="imu" name="gyro"/>
+        <velocimeter site="imu" name="local_linvel"/>
+        <accelerometer site="imu" name="accelerometer"/>
+        <framepos objtype="site" objname="imu" name="position"/>
+        <framezaxis objtype="site" objname="imu" name="upvector"/>
+        <framexaxis objtype="site" objname="imu" name="forwardvector"/>
+        <framelinvel objtype="site" objname="imu" name="global_linvel"/>
+        <frameangvel objtype="site" objname="imu" name="global_angvel"/>
+        <framequat objtype="site" objname="imu" name="orientation"/>
+        <framelinvel objtype="site" objname="FR" name="FR_global_linvel"/>
+        <framelinvel objtype="site" objname="FL" name="FL_global_linvel"/>
+        <framelinvel objtype="site" objname="RR" name="RR_global_linvel"/>
+        <framelinvel objtype="site" objname="RL" name="RL_global_linvel"/>
+        <framepos objtype="site" objname="FR" name="FR_pos" reftype="site" refname="imu"/>
+        <framepos objtype="site" objname="FL" name="FL_pos" reftype="site" refname="imu"/>
+        <framepos objtype="site" objname="RR" name="RR_pos" reftype="site" refname="imu"/>
+        <framepos objtype="site" objname="RL" name="RL_pos" reftype="site" refname="imu"/>
+        
+        <touch name="FL_touch" site="FL"/>
+        <touch name="FR_touch" site="FR"/>
+        <touch name="RL_touch" site="RL"/>
+        <touch name="RR_touch" site="RR"/>
 
     </sensor>
 
 
     <keyframe>
         <key name="home" qpos="0 0 0.35 1 0 0 0 0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8"
-        ctrl="0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8 0 0.9 -1.8"/>
+        ctrl="0.1 0.9 -1.8 -0.1 0.9 -1.8 0.1 0.9 -1.8 -0.1 0.9 -1.8"/>
     </keyframe>
 </mujoco>
