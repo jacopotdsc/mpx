@@ -16,7 +16,7 @@ def wheeled_dfcip_obj(wheel_offset,N,W,reference,x, u, t):
 
     # State and control unpacking
     pcom   = x[0:3]    # (3,)
-    vcom   = x[3:6]    # (3,)
+    vcom   = x[3:6]    # (3,)   
     c      = x[6:9]    # (3,)
     vc_z   = x[9]      # scalar
     theta  = x[10]     # scalar
@@ -30,7 +30,8 @@ def wheeled_dfcip_obj(wheel_offset,N,W,reference,x, u, t):
     fr     = u[6:9]    # (3,)
 
     # Reference unpacking
-    x_ref = reference[t,0:3]    # (3,)
+    x_ref = reference[t, :13]   
+    u_ref = reference[t, -9:]
 
     # ── force contact point construction (eq. 3.39-3.40) ────────────────────────────────────
     vector_off = jnp.array([0.0, wheel_offset / 2.0, 0.0])
@@ -50,50 +51,49 @@ def wheeled_dfcip_obj(wheel_offset,N,W,reference,x, u, t):
     h_stability = pcom[:2] - c[:2]
 
     # Weights extractions
-    w_pcomxy_k_ = W[0, 0];   w_pcomz_k_  = W[1, 1]
-    w_vcomxy_k_ = W[2, 2];   w_vcomz_k_  = W[3, 3]
-    w_c_k_      = W[4, 4];   w_vcz_k_    = W[5, 5]
-    w_theta_k_  = W[6, 6];   w_v_k_      = W[7, 7];   w_w_k_      = W[8, 8]
-
-    w_a_k_      = W[9, 9];   w_ac_z_k_   = W[10, 10]; w_alpha_k_  = W[11, 11]
-    w_fcxy_k_   = W[12, 12]; w_fcz_k_    = W[13, 13]
-    w_eq_k_     = W[14, 14]
+    w_pcomxy = W[0, 0];   w_pcomz  = W[1, 1]
+    w_vcomxy = W[2, 2];   w_vcomz  = W[3, 3]
+    w_c      = W[4, 4];   w_vcz    = W[5, 5]
+    w_theta  = W[6, 6];   w_v      = W[7, 7];   w_w = W[8, 8]
+    w_a      = W[9, 9];   w_ac_z   = W[10, 10]; w_alpha = W[11, 11]
+    w_fcxy   = W[12, 12]; w_fcz    = W[13, 13]
+    w_eq     = W[14, 14]
 
     # Cost definitions
     stage_cost = (
-          0.5 * w_pcomxy_k_ * jnp.sum((pcom[:2]    - x_ref[0:2]) ** 2)
-        + 0.5 * w_pcomz_k_  *         (pcom[2]     - x_ref[2])   ** 2
-        + 0.5 * w_vcomxy_k_ * jnp.sum((vcom[:2]    - x_ref[3:5]) ** 2)
-        + 0.5 * w_vcomz_k_  *         (vcom[2]     - x_ref[5])   ** 2
-        + 0.5 * w_c_k_      * jnp.sum((c           - x_ref[6:9]) ** 2)
-        + 0.5 * w_vcz_k_    *         (vc_z        - x_ref[9])   ** 2
-        + 0.5 * w_theta_k_  *         (theta       - x_ref[10])  ** 2
-        + 0.5 * w_v_k_      *         (v           - x_ref[11])  ** 2
-        + 0.5 * w_w_k_      *         (w           - x_ref[12])  ** 2
-        + 0.5 * w_a_k_      *         (a           - u_ref[0])   ** 2
-        + 0.5 * w_ac_z_k_   *         (ac_z        - u_ref[1])   ** 2
-        + 0.5 * w_alpha_k_  *         (alpha       - u_ref[2])   ** 2
-        + 0.5 * w_fcxy_k_   * jnp.sum((fl[:2]      - u_ref[3:5]) ** 2)
-        + 0.5 * w_fcz_k_    *         (fl[2]       - u_ref[5])   ** 2
-        + 0.5 * w_fcxy_k_   * jnp.sum((fr[:2]      - u_ref[6:8]) ** 2)
-        + 0.5 * w_fcz_k_    *         (fr[2]       - u_ref[8])   ** 2
-        + 0.5 * w_eq_k_     *          h_contact  ** 2
-        + 0.5 * w_eq_k_     * jnp.dot(h_moment, h_moment)
+          0.5 * w_pcomxy * jnp.sum((pcom[:2] - x_ref[0:2]) ** 2)
+        + 0.5 * w_pcomz  *         (pcom[2]  - x_ref[2])   ** 2
+        + 0.5 * w_vcomxy * jnp.sum((vcom[:2] - x_ref[3:5]) ** 2)
+        + 0.5 * w_vcomz  *         (vcom[2]  - x_ref[5])   ** 2
+        + 0.5 * w_c      * jnp.sum((c        - x_ref[6:9]) ** 2)
+        + 0.5 * w_vcz    *         (vc_z     - x_ref[9])   ** 2
+        + 0.5 * w_theta  *         (theta    - x_ref[10])  ** 2
+        + 0.5 * w_v      *         (v        - x_ref[11])  ** 2
+        + 0.5 * w_w      *         (w        - x_ref[12])  ** 2
+        + 0.5 * w_a      *         (a        - u_ref[0])   ** 2
+        + 0.5 * w_ac_z   *         (ac_z     - u_ref[1])   ** 2
+        + 0.5 * w_alpha  *         (alpha    - u_ref[2])   ** 2
+        + 0.5 * w_fcxy   * jnp.sum((fl[:2]   - u_ref[3:5]) ** 2)
+        + 0.5 * w_fcz    *         (fl[2]    - u_ref[5])   ** 2
+        + 0.5 * w_fcxy   * jnp.sum((fr[:2]   - u_ref[6:8]) ** 2)
+        + 0.5 * w_fcz    *         (fr[2]    - u_ref[8])   ** 2
+        + 0.5 * w_eq     *          h_contact ** 2
+        + 0.5 * w_eq     * jnp.dot(h_moment, h_moment)
     )
 
-    # ── terminal cost (specchio di calc() terminal C++) ───────────────────────
+    # ── terminal cost ────────────────────────────────────────────
     term_cost = (
-          0.5 * w_pcomxy_k_ * jnp.sum((pcom[:2]    - x_ref[_IDX_PCOM ][:2]) ** 2)
-        + 0.5 * w_pcomz_k_  *         (pcom[2]     - x_ref[_IDX_PCOM ][2])  ** 2
-        + 0.5 * w_vcomxy_k_ * jnp.sum((vcom[:2]    - x_ref[_IDX_DPCOM][:2]) ** 2)
-        + 0.5 * w_vcomz_k_  *         (vcom[2]     - x_ref[_IDX_DPCOM][2])  ** 2
-        + 0.5 * w_c_k_      * jnp.sum((c           - x_ref[_IDX_C])         ** 2)
-        + 0.5 * w_v_k_      *         (vc_z        - x_ref[_IDX_VC_Z])      ** 2
-        + 0.5 * w_theta_k_  *         (theta       - x_ref[_IDX_THETA])     ** 2
-        + 0.5 * w_v_k_      *         (v           - x_ref[_IDX_V])         ** 2
-        + 0.5 * w_w_k_      *         (w           - x_ref[_IDX_OMEGA])     ** 2
-        + 0.5 * w_eq_k_     *          h_contact  ** 2
-        + 0.5 * w_eq_k_     * jnp.dot(h_stability, h_stability)
+          0.5 * w_pcomxy * jnp.sum((pcom[:2] - x_ref[:2])  ** 2)
+        + 0.5 * w_pcomz  *         (pcom[2]  - x_ref[2])   ** 2
+        + 0.5 * w_vcomxy * jnp.sum((vcom[:2] - x_ref[3:5]) ** 2)
+        + 0.5 * w_vcomz  *         (vcom[2]  - x_ref[5])   ** 2
+        + 0.5 * w_c      * jnp.sum((c        - x_ref[6:9]) ** 2)
+        + 0.5 * w_v      *         (vc_z     - x_ref[9])   ** 2
+        + 0.5 * w_theta  *         (theta    - x_ref[10])  ** 2
+        + 0.5 * w_v      *         (v        - x_ref[11])  ** 2
+        + 0.5 * w_w      *         (w        - x_ref[12])  ** 2
+        + 0.5 * w_eq     *          h_contact ** 2
+        + 0.5 * w_eq     * jnp.dot(h_stability, h_stability)
     )
 
     return jnp.where(t == N, 0.5 * term_cost, 0.5 * stage_cost)
