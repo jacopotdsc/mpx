@@ -93,7 +93,7 @@ class BatchedMPCControllerWrapper:
         
         # TODO: copy reference generator from colab - OK
         reference_generator = partial(mpc_utils.reference_generator_dfcip_offline,
-            pcom=(0.0, 0.0, config.robot_height), nx=config.nx, nu=config.nu, 
+            pcom=(0.0, 0.0, 0.4), nx=config.nx, nu=config.nu, 
             t_sec=6, dt=config.dt, m=config.mass, grav=config.grav)
 
         # Whole-body controller: static args frozen via partial, runtime args
@@ -233,7 +233,7 @@ class BatchedMPCControllerWrapper:
             a=new_a, ac_z=new_ac_z, alpha=new_alpha, grf=new_grf,
             X0=new_X0, U0=new_U0, V0=new_V0,
             X0_wbc=state.X0_wbc, U0_wbc=state.U0_wbc, V0_wbc=state.V0_wbc,
-        )
+        ), reference
 
     def whole_body_run(self, state: MPCState, qpos, qvel, time_frame,
                    pl_world, pr_world, dpl_world, dpr_world):

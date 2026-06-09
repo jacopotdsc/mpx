@@ -33,6 +33,8 @@ TORQUE_LIST = []
 FC_LIST = []
 MPC_INPUT_LIST = []
 MPC_OUTPUT_LIST = []
+X_DES_LIST = []
+U_DES_LIST = []
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -127,9 +129,10 @@ def _base_touches_floor(model, data, base_body_name: str = "base_link", floor_ge
 
     return False
 
-def build_tita_state(data, contact_ids) -> jnp.ndarray:
-    pcom = jnp.asarray(data.qpos[0:3])
-    vcom = jnp.asarray(data.qvel[0:3])
+def build_tita_state(model, data, base_body_name, contact_ids) -> jnp.ndarray:
+    base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, base_body_name)
+    pcom = pcom = data.subtree_com[base_body_id] #jnp.asarray(data.qpos[0:3])
+    vcom = vcom = data.subtree_linvel[base_body_id] #jnp.asarray(data.qvel[0:3])
 
     centers = np.asarray(sim_utils.geom_positions(data, contact_ids, flatten=False))  # (2, 3)
 
@@ -268,8 +271,9 @@ def main(headless=False, steps=500, scene="flat"):
     _sim_cam = mujoco.MjvCamera()
     mujoco.mjv_defaultCamera(_sim_cam)
     _sim_cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-    _sim_cam.distance = 5.0
-    _sim_cam.elevation = -20.0
+    _sim_cam.distance = 8.0
+    _sim_cam.elevation = -15.0
+    _sim_cam.azimuth = 60.0
     # ────────────────────────────────────────────────────────────────────
     model.opt.timestep = 1.0 / sim_frequency
     
@@ -288,7 +292,7 @@ def main(headless=False, steps=500, scene="flat"):
         m = model.body_mass[i]
         total += m
         if m > 0.0001:
-            print(f"  {name:25s}  {m:.4f} kg")
+            print(f"  id: {i:2d},  {name:25s}  {m:.4f} kg")
     print(f"  {'TOTAL':25s}  {total:.4f} kg")
     M = np.zeros((model.nv, model.nv))
     mujoco.mj_fullM(model, M, data.qM)
@@ -297,7 +301,7 @@ def main(headless=False, steps=500, scene="flat"):
     
     theta_prev = 0.0
     foot = jnp.asarray(sim_utils.geom_positions(data, contact_ids))
-    tita_state = build_tita_state(data, contact_ids)
+    tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
     x0, theta_prev = get_dfip_current_state(mpc, tita_state, theta_prev=theta_prev)
     print(f"pcom:    {x0[0:3]}")
     print(f"vcom:    {x0[3:6]}")
@@ -331,7 +335,7 @@ def main(headless=False, steps=500, scene="flat"):
 
     print("[timing] mpc.run  ... ", end="", flush=True)
     _t0 = timer()
-    mpc_state = mpc.run(mpc_state, x0[None, :], counter, config.N)
+    mpc_state, reference = mpc.run(mpc_state, x0[None, :], counter, config.N)
     jax.block_until_ready(mpc_state.U0)
     _dt = timer() - _t0
     print(f"{int(_dt // 60)}m {_dt % 60:.1f}s")
@@ -399,7 +403,7 @@ def main(headless=False, steps=500, scene="flat"):
 
     print(f"[timing] wbc.run  start={datetime.now().strftime('%H:%M:%S')} ... ", end="", flush=True)
     _t0 = timer()
-    tita_state_wbc = build_tita_state(data, contact_ids)
+    tita_state_wbc = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
     pl_world_wbc = tita_state_wbc[6:9][None, :]
     pr_world_wbc = tita_state_wbc[9:12][None, :]
     dpl_world_wbc = tita_state_wbc[12:15][None, :]
@@ -502,7 +506,7 @@ def main(headless=False, steps=500, scene="flat"):
         
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
-        tita_state = build_tita_state(data, contact_ids)
+        tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
 
         if counter % period == 0:
             foot = jnp.asarray(sim_utils.geom_positions(data, contact_ids))
@@ -519,7 +523,7 @@ def main(headless=False, steps=500, scene="flat"):
             #print(f"omega:   {x0[12]}")
 
             start = timer()
-            mpc_state = mpc.run(mpc_state, x0[None, :], counter, config.N)
+            mpc_state, reference = mpc.run(mpc_state, x0[None, :], counter, config.N)
             stop = timer()
             #print(f"MPC time: {1e3 * (stop - start):.2f} ms")
             print(f"x0 input MPC:  v={float(x0[11]):.4f}  theta={float(x0[10]):.4f}  pcom_z={float(x0[2]):.4f}")
@@ -531,13 +535,20 @@ def main(headless=False, steps=500, scene="flat"):
 
 
             if jnp.isnan(mpc_state.U0).any(): 
+                print("[WARN] NaN detected in MPC output U0: recording NaN values for controls to avoid confusion.")
                 MPC_OUTPUT_LIST.append(np.full_like(mpc_state.U0[0, 0], np.nan))
             else:
                 MPC_OUTPUT_LIST.append(np.asarray(mpc_state.U0[0, 0]).copy())
             if jnp.isnan(x0).any():
+                print("[WARN] NaN detected in MPC input x0: recording NaN values for state to avoid confusion.")
                 MPC_INPUT_LIST.append(np.full_like(x0, np.nan))
             else:
                 MPC_INPUT_LIST.append(np.asarray(x0).copy())
+
+            x_ref_step = reference[:, 0, :config.nx]
+            u_ref_step = reference[:, 0, config.nx:]
+            X_DES_LIST.append( x_ref_step[0].copy() )
+            U_DES_LIST.append( u_ref_step[0].copy() )
 
         pl_world_wbc = tita_state[6:9][None, :]
         pr_world_wbc = tita_state[9:12][None, :]
@@ -600,11 +611,13 @@ def main(headless=False, steps=500, scene="flat"):
         pd_tau = 70*(q_target - data.qpos[7:15]) - 0.5*data.qvel[6:14]
 
         if np.isnan(tau_cmd[0]).any():
+            print("[WARN] NaN detected in tau_cmd: applying zero torques to avoid simulation instability.")
             TORQUE_LIST.append(np.full_like(tau_cmd[0], np.nan))
         else:
             TORQUE_LIST.append(tau_cmd[0].copy())
         
         if np.isnan(fl[0]).any() or np.isnan(fr[0]).any():
+            print("[WARN] NaN detected in contact forces: recording NaN values for contacts to avoid confusion.")
             FC_LIST.append( [np.full_like(fl[0], np.nan), np.full_like(fr[0], np.nan)] )
         else:
             FC_LIST.append( [fl[0].copy(), fr[0].copy()] )
@@ -697,6 +710,8 @@ if __name__ == "__main__":
         plot_mpc_state_and_output(
             x0_list=MPC_INPUT_LIST,
             u0_list=MPC_OUTPUT_LIST,
+            x_ref_list=X_DES_LIST,
+            u_ref_list=U_DES_LIST,
             out_dir=TITA_PATH,
             filename_state="mpc_input.png",
             filename_u0="mpc_output.png",
