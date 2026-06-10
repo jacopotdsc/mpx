@@ -14,19 +14,22 @@ from jax import dlpack as jax_dlpack
 from timeit import default_timer as timer
 
 @struct.dataclass
+class ControlSol:
+    a: jax.Array
+    ac_z: jax.Array
+    alpha: jax.Array
+    grf: jax.Array
+
+@struct.dataclass
 class MPCState:
-    """Tutto lo stato mutabile dell'MPC in un pytree JAX (compatibile con jax.vmap)."""
-    a            : jax.Array
-    ac_z         : jax.Array
-    alpha        : jax.Array
-    grf          : jax.Array
-    X0           : jax.Array
-    U0           : jax.Array
-    V0           : jax.Array
+    sol          : ControlSol
+    X0_shifted           : jax.Array
+    U0_shifted           : jax.Array
+    V0_shifted           : jax.Array
     # WBC warm-start
-    X0_wbc       : jax.Array
-    U0_wbc       : jax.Array
-    V0_wbc       : jax.Array
+    #X0_wbc       : jax.Array
+    #U0_wbc       : jax.Array
+    #V0_wbc       : jax.Array
 
 class BatchedMPCControllerWrapper:
     def __init__(self, config, n_env):
@@ -46,7 +49,8 @@ class BatchedMPCControllerWrapper:
         mjx_model = mjx.put_model(model)
         self.config = config
         self.mpc_frequency = config.mpc_frequency
-        self.shift = int(1 / (config.dt * config.mpc_frequency))
+        self.shift = 1# int(1 / (config.dt_mpc * config.mpc_frequency))
+        print(f"MPC update every {self.shift} simulation steps (mpc_frequency={self.mpc_frequency} Hz, dt={config.dt} s)")
         
         # Timer and liftoff states for the reference generator.
         self.q0 = config.q0.copy()          # Initial joint configuration
@@ -80,21 +84,20 @@ class BatchedMPCControllerWrapper:
         
         # Define cost, hessian approximation, and dynamics functions for MPC.
         # TODO: write cost function
-        cost = partial(mpc_objectives.wheeled_dfcip_obj,
-                            config.n_contact, config.N)
+        cost = partial(mpc_objectives.wheeled_dfcip_obj, config.d, config.N)
         # TODO: can be omitted
-        hessian_approx = None #partial(mpc_objectives.quadruped_srbd_hessian_gn, config.n_contact)
+        hessian_approx = partial(mpc_objectives.wheeled_dfcip_hessian_gn, config.d, config.N)
         
         # TODO: write dynamics function - OK
         dynamics = partial(mpc_dyn_model.wheeled_dfcip_dynamics,
-            mjx_model, config.mass, config.grav, config.dt)
+            mjx_model, config.mass, config.grav, config.dt_mpc)
 
         work = partial(optimizers.mpc, cost, dynamics, hessian_approx, False)
         
         # TODO: copy reference generator from colab - OK
         reference_generator = partial(mpc_utils.reference_generator_dfcip_offline,
             pcom=(0.0, 0.0, 0.4), nx=config.nx, nu=config.nu, 
-            t_sec=6, dt=config.dt, m=config.mass, grav=config.grav)
+            t_sec=6, dt=config.dt_mpc, m=config.mass, grav=config.grav)
 
         # Whole-body controller: static args frozen via partial, runtime args
         # (X0_prev, U0_prev, V0_prev, qpos, qvel, desired) passed at call time.
@@ -131,23 +134,23 @@ class BatchedMPCControllerWrapper:
         _Kpr   = config.Kp_reg;     _Kdr  = config.Kd_reg
         _wq    = config.w_qddot;    _wc   = config.w_com
         _wl    = config.w_lwheel;   _wrr  = config.w_rwheel;  _wb = config.w_base
-        _weqr  = config.w_eq_roll;  _weqd = config.w_eq_dyn
+        #_weqr  = config.w_eq_roll;  _weqd = config.w_eq_dyn
         _mu    = config.mu               # 0.5 in C++
         _wf    = config.w_friction       # peso penalità friction
 
-        def whole_body_control(X0_prev, U0_prev, V0_prev, qpos, qvel, desired):
+        _Kpr = config.Kp_reg;  _Kdr = config.Kd_reg
+        _wjn = config.w_joint_vel  # penalità velocità articolari
+
+
+        def whole_body_control(qpos, qvel, desired):
             return mpc_utils.whole_body_interface_wheeled_legged_qp(
-                _mjx,
-                config.mass, config.grav, config.d,
+                _mjx, config.mass, config.grav, config.d,
                 _cid, _bid, _bbid,
                 _wr, _st, _nc,
-                X0_prev, U0_prev, V0_prev,
-                _Kpm, _Kdm,
-                _Kpw, _Kdw,
-                _Kpr, _Kdr,
+                _Kpm, _Kdm, _Kpw, _Kdw, _Kpr, _Kdr,   # ← ora 6 gains
                 _wq, _wc, _wl, _wrr, _wb,
-                _weqr, _weqd,
-                _mu, _wf,
+                _mu,
+                _wf, _wjn,
                 qpos, qvel, desired,
             )
 
@@ -171,13 +174,12 @@ class BatchedMPCControllerWrapper:
         ac_z = jnp.tile(cfg.u_ref[1], (n, 1))
         alpha = jnp.tile(cfg.u_ref[2], (n, 1))
         grf = jnp.tile(cfg.u_ref[3:], (n, 1))
-        X0_wbc = jnp.tile(self._wbc_X0_init, (n, 1))
-        U0_wbc = jnp.tile(self._wbc_U0_init, (n, 1))
-        V0_wbc = jnp.tile(self._wbc_V0_init, (n, 1))
+        
         return MPCState(
-            a=a, ac_z=ac_z, alpha=alpha, grf=grf,
-            X0=self._X0_init, U0=self._U0_init, V0=self._V0_init,
-            X0_wbc=X0_wbc, U0_wbc=U0_wbc, V0_wbc=V0_wbc,
+            sol= ControlSol(a=a, ac_z=ac_z, alpha=alpha, grf=grf),
+            X0_shifted=self._X0_init, 
+            U0_shifted=self._U0_init,
+            V0_shifted=self._V0_init,
         )
 
     def run(self, state: MPCState, x0, time_frame, horizon):
@@ -206,43 +208,50 @@ class BatchedMPCControllerWrapper:
         reference = jnp.tile(ref_slice[None, :, :], (self.n_env, 1, 1))
 
         parameter = None
-        
-        # Execute the MPC optimization (work function).
-        state_X0 = state.X0.at[:, 0, :].set(x0)
+
         X, U, V = self._solve(
             reference,
             parameter,
             jnp.tile(self.config.W, (self.n_env, 1, 1)),
             x0,
-            state_X0,
-            state.U0,
-            state.V0
+            state.X0_shifted,
+            state.U0_shifted,
+            state.V0_shifted
             )
         
-        # Warm-start for the next call: shift trajectories forward.
-        new_X0 = jnp.concatenate([X[:,self.shift:,:], jnp.tile(X[:,-1:,:], (self.shift, 1))],axis = 1)
-        new_U0 = jnp.concatenate([U[:,self.shift:,:], jnp.tile(U[:,-1:,:], (self.shift, 1))],axis = 1)
-        new_V0 = jnp.concatenate([V[:,self.shift:,:], jnp.tile(V[:,-1:,:], (self.shift, 1))],axis = 1)
-
         new_a = U[:,0,0]
         new_ac_z = U[:,0,1]
         new_alpha = U[:,0,2]
         new_grf = U[:,0,3:]
         
-        return MPCState(
-            a=new_a, ac_z=new_ac_z, alpha=new_alpha, grf=new_grf,
-            X0=new_X0, U0=new_U0, V0=new_V0,
-            X0_wbc=state.X0_wbc, U0_wbc=state.U0_wbc, V0_wbc=state.V0_wbc,
-        ), reference
+        # Warm-start for the next call: shift trajectories forward.
+        s = self.shift
+        new_X0  = jnp.concatenate([X[:, s:, :], jnp.tile(X[:, -1:, :], (1, s, 1))], axis=1)
+        new_U0  = jnp.concatenate([U[:, s:, :], jnp.tile(U[:, -1:, :], (1, s, 1))], axis=1)
+        new_V0  = jnp.concatenate([V[:, s:, :], jnp.tile(V[:, -1:, :], (1, s, 1))], axis=1)
+        
+        new_state = MPCState(
+            sol=ControlSol(a=new_a, ac_z=new_ac_z, alpha=new_alpha, grf=new_grf),
+            X0_shifted=new_X0, 
+            U0_shifted=new_U0, 
+            V0_shifted=new_V0,
+        )
 
-    def whole_body_run(self, state: MPCState, qpos, qvel, time_frame,
+        return new_state, reference
+
+    def whole_body_run(self, state: MPCState, x0, qpos, qvel, time_frame,
                    pl_world, pr_world, dpl_world, dpr_world):
         B = qpos.shape[0]
         desired = jnp.zeros((B, self._desired_size))
         nv = self._mjx_model.nv
-
-        x_mpc = state.X0[:, 0, :]
-        u_mpc = state.U0[:, 0, :]
+        
+        x_mpc = x0[None, :]
+        u_mpc = jnp.concatenate([
+            state.sol.a[:, None],
+            state.sol.ac_z[:, None],
+            state.sol.alpha[:, None],
+            state.sol.grf
+        ], axis=1)
 
         # ── inputs ───────────────────────────────────────────────────────
         # double a     = u_prediction(0);
@@ -424,30 +433,12 @@ class BatchedMPCControllerWrapper:
         desired = desired.at[:, mpc_utils._REF_JOINTS + self._nj:mpc_utils._REF_JOINTS + 2*self._nj].set(qjntdot_ref)
         desired = desired.at[:, mpc_utils._REF_JOINTS + 2*self._nj:mpc_utils._REF_JOINTS + 3*self._nj].set(qjntddot_ref)
 
-        # ── WBC warm-start seed ───────────────────────────────────────────
-        u0_wbc_seed = state.U0_wbc
-        u0_wbc_seed = u0_wbc_seed.at[:, 0].set(com_acc_ref[:, 0])
-        u0_wbc_seed = u0_wbc_seed.at[:, 1].set(com_acc_ref[:, 1])
-        u0_wbc_seed = u0_wbc_seed.at[:, 2].set(com_acc_ref[:, 2])
-        u0_wbc_seed = u0_wbc_seed.at[:, 3].set(0.0)
-        u0_wbc_seed = u0_wbc_seed.at[:, 4].set(0.0)
-        u0_wbc_seed = u0_wbc_seed.at[:, 5].set(alpha_)
-        u0_wbc_seed = u0_wbc_seed.at[:, nv:nv + 3].set(contact_force_left_)
-        u0_wbc_seed = u0_wbc_seed.at[:, nv + 3:nv + 6].set(contact_force_right_)
-
         # ── WBC solve ─────────────────────────────────────────────────────
-        tau_cmd, qddot, fl, fr, x0_wbc_next, u0_wbc_next, v0_wbc_next = self._whole_body_interface(
-            state.X0_wbc, u0_wbc_seed, state.V0_wbc,
+        tau_cmd, qddot, fl, fr = self._whole_body_interface(
             qpos, qvel, desired,
         )
 
-        new_state = state.replace(
-            X0_wbc=x0_wbc_next,
-            U0_wbc=u0_wbc_next,
-            V0_wbc=v0_wbc_next,
-        )
-
-        return new_state, tau_cmd, qddot, fl, fr
+        return state, tau_cmd, qddot, fl, fr
 
     def reset(self):
         """

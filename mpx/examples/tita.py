@@ -5,7 +5,9 @@ import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2" 
 
 import jax
-
+print(jax.config.jax_enable_x64)
+jax.config.update("jax_enable_x64", True)
+print(jax.config.jax_enable_x64)
 CACHE_DIR = os.path.expanduser("~/.jax_cache")
 print(CACHE_DIR)
 #jax.config.update("jax_compilation_cache_dir", CACHE_DIR)
@@ -26,7 +28,7 @@ os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 TITA_PATH = os.path.join(dir_path, "plots","tita_outputs")
 os.makedirs(TITA_PATH, exist_ok=True)
 
-MAX_STEPS = 1000
+MAX_STEPS = 10000
 DEFAULT_VIDEO_SLOWDOWN_FACTOR = 4.0
 LLC_ROLLOUT_CSV = os.path.join(TITA_PATH, "rollout_info_llc.csv")
 TORQUE_LIST = []
@@ -284,6 +286,8 @@ def main(headless=False, steps=500, scene="flat"):
 
     _reset_to_initial_state(model, data)
     mujoco.mj_forward(model, data)
+    data.qvel[:] = 0.0          # ← forza velocità a zero
+    mujoco.mj_forward(model, data)  # ← ri-propaga con vel=0
     np.set_printoptions(precision=20, suppress=True)
     print("------------")
     total = 0.0
@@ -310,18 +314,16 @@ def main(headless=False, steps=500, scene="flat"):
     print(f"theta:   {x0[10]}")
     print(f"v:       {x0[11]}")
     print(f"omega:   {x0[12]}")
-    print(f"robot_height ref: {config.robot_height}")
+    print(f"robot floating base: {config.robot_height}")
+    print(f"robot com: {data.subtree_com[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'base_link')]}")
     print(f"x_ref step0: {mpc._x_reference[0, :13]}")
     print(f"u_ref step0: {mpc._u_reference[0, :9]}")
     
-    command = jnp.asarray(command_handle.mpc_input(config.robot_height))
-    contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
-
     mpc_state = mpc.init_state()
 
     # ── print MPC config parameters ──────────────────────────────────────
     _mpc_params = [
-        "dt", "N", "mpc_frequency", "grav", "whole_body_frequency",
+        "dt", "dt_mpc", "N", "mpc_frequency", "grav", "whole_body_frequency",
         "duty_factor", "step_freq", "step_height", "robot_height", "clearence_speed",
         "mu", "mass", "d",
         "w_pcomxy", "w_pcomz", "w_vcomxy", "w_vcomz", "w_c", "w_vcz",
@@ -336,14 +338,15 @@ def main(headless=False, steps=500, scene="flat"):
     print("[timing] mpc.run  ... ", end="", flush=True)
     _t0 = timer()
     mpc_state, reference = mpc.run(mpc_state, x0[None, :], counter, config.N)
-    jax.block_until_ready(mpc_state.U0)
+    jax.block_until_ready(mpc_state.U0_shifted)
     _dt = timer() - _t0
     print(f"{int(_dt // 60)}m {_dt % 60:.1f}s")
 
     # ── save MPC prediction plots at timestep 0 ──────────────────────────
-    X0_np = np.asarray(mpc_state.X0[0])   # (N+1, 13)
-    U0_np = np.asarray(mpc_state.U0[0])   # (N,   9)
-
+    X0_np = x0
+    U0_np = np.concatenate([np.asarray(mpc_state.sol.a)[:, None], np.asarray(mpc_state.sol.ac_z)[:, None], np.asarray(mpc_state.sol.alpha)[:, None], np.asarray(mpc_state.sol.grf)], axis=1).copy()
+    XN_np = np.asarray(mpc_state.X0_shifted[0][-1]).copy()  
+    UN_np = np.asarray(mpc_state.U0_shifted[0][-1]).copy()
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
 
     _x_names = ["pcom_x", "pcom_y", "pcom_z", "dpcom_x", "dpcom_y", "dpcom_z",
@@ -354,36 +357,37 @@ def main(headless=False, steps=500, scene="flat"):
 
     def _fmt_row(names, values, w=10):
         header = "".join(f"{n:>{w}}" for n in names)
-        row    = "".join(f"{v:>{w}.4f}" for v in values)
+        values = np.asarray(values).reshape(-1)
+        row = "".join(f"{v:>10.4f}" for v in values)
         return header, row
 
-    print("\n── MPC state  X0  (N+1 × 13) ──")
-    hdr, r0 = _fmt_row(_x_names, X0_np[0])
-    _,   rN = _fmt_row(_x_names, X0_np[-1])
+    print("\n── MPC state  x0, XN ──")
+    hdr, r0 = _fmt_row(_x_names, X0_np)
+    _,   rN = _fmt_row(_x_names, XN_np)
     print(" " * len(_PREFIX) + hdr)
     print(f"  step  0: {r0}")
     print(f"  step  N: {rN}")
 
-    print("\n── MPC control  U0  (N × 9) ──")
-    hdr, r0 = _fmt_row(_u_names, U0_np[0])
-    _,   rN = _fmt_row(_u_names, U0_np[-1])
+    print("\n── MPC control  u0, UN ──")
+    hdr, r0 = _fmt_row(_u_names, U0_np)
+    _,   rN = _fmt_row(_u_names, UN_np)
     print(" " * len(_PREFIX) + hdr)
     print(f"  step  0: {r0}")
     print(f"  step  N: {rN}")
     print()
 
-    plot_mpc_prediction_state(
-        X0_np,
-        timestep=0,
-        filename="state_mpc_t000.png",
-        out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
-    )
-    plot_mpc_prediction_control(
-        U0_np,
-        timestep=0,
-        filename="control_mpc_t000.png",
-        out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
-    )
+    #plot_mpc_prediction_state(
+    #    mpc_state.X0_shifted[0],
+    #    timestep=0,
+    #    filename="state_mpc_t000.png",
+    #    out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
+    #)
+    #plot_mpc_prediction_control(
+    #    mpc_state.U0_shifted[0],
+    #    timestep=0,
+    #    filename="control_mpc_t000.png",
+    #    out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
+    #)
 
     # ── run WBC and print results ─────────────────────────────────────────
     
@@ -394,7 +398,7 @@ def main(headless=False, steps=500, scene="flat"):
     _wbc_params = [
         "base_body_name", "wheel_radius",
         "Kp_motion", "Kd_motion", "Kp_wheel", "Kd_wheel", "Kp_reg", "Kd_reg",
-        "w_qddot", "w_com", "w_lwheel", "w_rwheel", "w_base", "w_eq_roll", "w_eq_dyn", "w_friction",
+        "w_qddot", "w_com", "w_lwheel", "w_rwheel", "w_base", "w_friction", "w_joint_vel",
     ]
     print("\n── WBC parameters ──")
     for _p in _wbc_params:
@@ -410,6 +414,7 @@ def main(headless=False, steps=500, scene="flat"):
     dpr_world_wbc = tita_state_wbc[15:18][None, :]
     mpc_state, tau_cmd, qddot, fl, fr = mpc.whole_body_run(
         mpc_state,
+        x0,
         qpos_np,
         qvel_np,
         counter,
@@ -498,6 +503,7 @@ def main(headless=False, steps=500, scene="flat"):
     #print(f"Controller period: {period} steps at {sim_frequency} Hz simulation frequency.")
     counter = 0
     theta_prev = 0.0
+    mpc_state = mpc.init_state()
 
     def step_controller(mpc_state, theta_prev=theta_prev):
         nonlocal counter
@@ -506,73 +512,107 @@ def main(headless=False, steps=500, scene="flat"):
         
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
-        tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
 
         if counter % period == 0:
-            foot = jnp.asarray(sim_utils.geom_positions(data, contact_ids))
-            command = jnp.asarray(command_handle.mpc_input(config.robot_height))
-            contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
+
+            contact_ids = sim_utils.geom_ids(model, config.contact_frame)
+            tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
             x0, theta_prev = get_dfip_current_state(mpc, tita_state, theta_prev=theta_prev)
-            
-            #print(f"pcom:    {x0[0:3]}")
-            #print(f"vcom:    {x0[3:6]}")
-            #print(f"c_world: {x0[6:9]}")
-            #print(f"vcz:     {x0[9]}")
-            #print(f"theta:   {x0[10]}")
-            #print(f"v:       {x0[11]}")
-            #print(f"omega:   {x0[12]}")
 
-            start = timer()
             mpc_state, reference = mpc.run(mpc_state, x0[None, :], counter, config.N)
-            stop = timer()
-            #print(f"MPC time: {1e3 * (stop - start):.2f} ms")
-            print(f"x0 input MPC:  v={float(x0[11]):.4f}  theta={float(x0[10]):.4f}  pcom_z={float(x0[2]):.4f}")
-            print(f"MPC output U0: a={float(mpc_state.U0[0,0,0]):.4f}  alpha={float(mpc_state.U0[0,0,2]):.4f}  fl_z={float(mpc_state.U0[0,0,5]):.4f}  fr_z={float(mpc_state.U0[0,0,8]):.4f}")
-            print(f"MPC state X0:  v={float(mpc_state.X0[0,0,11]):.4f}  pcom_z={float(mpc_state.X0[0,0,2]):.4f}")
+
+            def _f(v, d=4):
+                s = f"{float(v):.{d}f}"
+                return s if float(v) < 0 else f" {s}"
             
-            print(f"MPC N output U0: a={float(mpc_state.U0[0,-1,0]):.4f}  alpha={float(mpc_state.U0[0,-1,2]):.4f}  fl_z={float(mpc_state.U0[0,-1,5]):.4f}  fr_z={float(mpc_state.U0[0,-1,8]):.4f}")
-            print(f"MPC N state X0:  v={float(mpc_state.X0[0,-1,11]):.4f}  pcom_z={float(mpc_state.X0[0,-1,2]):.4f}")
-
-
-            if jnp.isnan(mpc_state.U0).any(): 
-                print("[WARN] NaN detected in MPC output U0: recording NaN values for controls to avoid confusion.")
-                MPC_OUTPUT_LIST.append(np.full_like(mpc_state.U0[0, 0], np.nan))
-            else:
-                MPC_OUTPUT_LIST.append(np.asarray(mpc_state.U0[0, 0]).copy())
-            if jnp.isnan(x0).any():
-                print("[WARN] NaN detected in MPC input x0: recording NaN values for state to avoid confusion.")
-                MPC_INPUT_LIST.append(np.full_like(x0, np.nan))
-            else:
-                MPC_INPUT_LIST.append(np.asarray(x0).copy())
+            print(
+                f"[x0] "
+                f" pc=({_f(x0[0])},{_f(x0[1])},{_f(x0[2])}) "
+                f" vc=({_f(x0[3])},{_f(x0[4])},{_f(x0[5])}) "
+                f"\n      cw=({_f(x0[6])},{_f(x0[7])},{_f(x0[8])}) "
+                f" vcz={_f(x0[9])}\n      th={_f(x0[10],4)} v={_f(x0[11],4)} w={_f(x0[12],4)}"
+            )
+            print(
+                f"[sol] "
+                f"a={_f(mpc_state.sol.a[0])} "
+                f"acz={_f(mpc_state.sol.ac_z[0])} "
+                f"alpha={_f(mpc_state.sol.alpha[0], 4)}\n "
+                f"      fl=({_f(mpc_state.sol.grf[0,0])},{_f(mpc_state.sol.grf[0,1])},{_f(mpc_state.sol.grf[0,2])})\n "
+                f"      fr=({_f(mpc_state.sol.grf[0,3])},{_f(mpc_state.sol.grf[0,4])},{_f(mpc_state.sol.grf[0,5])})"
+           
+            )
 
             x_ref_step = reference[:, 0, :config.nx]
             u_ref_step = reference[:, 0, config.nx:]
+            print(
+                f"[ref0] "
+                f"pc=({_f(x_ref_step[0,0])},{_f(x_ref_step[0,1])},{_f(x_ref_step[0,2])}) "
+                f"vc=({_f(x_ref_step[0,3])},{_f(x_ref_step[0,4])},{_f(x_ref_step[0,5])}) "
+                f"\n       cw=({_f(x_ref_step[0,6])},{_f(x_ref_step[0,7])},{_f(x_ref_step[0,8])}) "
+                f"vcz={_f(x_ref_step[0,9])} "
+                f"th={_f(x_ref_step[0,10],4)} v={_f(x_ref_step[0,11],4)} w={_f(x_ref_step[0,12],4)}\n"
+                f"       a={_f(u_ref_step[0,0])} "
+                f"acz={_f(u_ref_step[0,1])} "
+                f"alpha={_f(u_ref_step[0,2],4)}\n "
+                f"      fl=({_f(u_ref_step[0,3])},{_f(u_ref_step[0,4])},{_f(u_ref_step[0,5])})\n "
+                f"      fr=({_f(u_ref_step[0,6])},{_f(u_ref_step[0,7])},{_f(u_ref_step[0,8])})"
+            )
+
+            x_ref_N = reference[:, -1, :config.nx]
+            u_ref_N = reference[:, -1, config.nx:]
+            print(
+                f"[refN] "
+                f"pc=({_f(x_ref_N[0,0])},{_f(x_ref_N[0,1])},{_f(x_ref_N[0,2])}) "
+                f"vc=({_f(x_ref_N[0,3])},{_f(x_ref_N[0,4])},{_f(x_ref_N[0,5])}) "
+                f"\n      cw=({_f(x_ref_N[0,6])},{_f(x_ref_N[0,7])},{_f(x_ref_N[0,8])}) "
+                f"vcz={_f(x_ref_N[0,9])} "
+                f"th={_f(x_ref_N[0,10],4)} v={_f(x_ref_N[0,11],4)} w={_f(x_ref_N[0,12],4)}\n"
+                f"       a={_f(u_ref_N[0,0])} "
+                f"acz={_f(u_ref_N[0,1])} "
+                f"alpha={_f(u_ref_N[0,2],4)}\n "
+                f"       fl=({_f(u_ref_N[0,3])},{_f(u_ref_N[0,4])},{_f(u_ref_N[0,5])})\n "
+                f"       fr=({_f(u_ref_N[0,6])},{_f(u_ref_N[0,7])},{_f(u_ref_N[0,8])})"
+            )
+
             X_DES_LIST.append( x_ref_step[0].copy() )
             U_DES_LIST.append( u_ref_step[0].copy() )
+            mpc_output = np.array([
+                float(mpc_state.sol.a[0]),
+                float(mpc_state.sol.ac_z[0]),
+                float(mpc_state.sol.alpha[0]),
+                *np.asarray(mpc_state.sol.grf[0])   # 6 elementi
+            ])
 
-        pl_world_wbc = tita_state[6:9][None, :]
-        pr_world_wbc = tita_state[9:12][None, :]
-        dpl_world_wbc = tita_state[12:15][None, :]
-        dpr_world_wbc = tita_state[15:18][None, :]
+            MPC_INPUT_LIST.append(np.asarray(x0).copy())
+            MPC_OUTPUT_LIST.append(mpc_output)
+            
+            pl_world_wbc = tita_state[6:9][None, :]
+            pr_world_wbc = tita_state[9:12][None, :]
+            dpl_world_wbc = tita_state[12:15][None, :]
+            dpr_world_wbc = tita_state[15:18][None, :]
 
-        mpc_state, tau_cmd, qddot, fl, fr = mpc.whole_body_run(
-            mpc_state,
-            jnp.asarray(qpos)[None, :],
-            jnp.asarray(qvel)[None, :],
-            counter,
-            pl_world_wbc,
-            pr_world_wbc,
-            dpl_world_wbc,
-            dpr_world_wbc,
-        )
+            mpc_state, tau_cmd, qddot, fl, fr = mpc.whole_body_run(
+                mpc_state,
+                x0,
+                jnp.asarray(qpos)[None, :],
+                jnp.asarray(qvel)[None, :],
+                counter,
+                pl_world_wbc,
+                pr_world_wbc,
+                dpl_world_wbc,
+                dpr_world_wbc,
+            )
+
+            tau_to_apply = tau_cmd[0].copy()
+
+            TORQUE_LIST.append(tau_to_apply)
+            FC_LIST.append( [fl[0].copy(), fr[0].copy()] )
 
         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
 
         print(
-            #f"timestep: {counter}\n"
-            #f"  base_rot_desired [3x3]:\n{np.eye(3)}\n"
-            #f"  base_rot_current [3x3]:\n{_quat_wxyz_to_rotmat(np.asarray(qpos[3:7]))}\n"
-            f"  tau_cmd: {tau_cmd[0]}\n"
+            f"[WBC]\n"
+            f"  tau_cmd: {tau_to_apply}\n"
             f"  contact_forces_left (fl): {fl[0]}\n"
             f"  contact_forces_right (fr): {fr[0]}"
         )
@@ -580,14 +620,14 @@ def main(headless=False, steps=500, scene="flat"):
         _append_llc_row(
             LLC_ROLLOUT_CSV,
             step=counter + 1,
-            tau_cmd=tau_cmd[0],
+            tau_cmd=tau_to_apply,
             kp=getattr(config, "Kp_motion", 0.0),
             kd=getattr(config, "Kd_motion", 0.0),
         )
 
         if (counter % 50 == 0 and counter < 505) or touch_floor:
-            X0_np = np.asarray(mpc_state.X0[0])   # (N+1, 13)
-            U0_np = np.asarray(mpc_state.U0[0])  
+            X0_np = np.asarray(mpc_state.X0_shifted[0])   # (N+1, 13)
+            U0_np = np.asarray(mpc_state.U0_shifted[0])  
 
             plot_mpc_prediction_state(
                 X0_np,
@@ -610,17 +650,6 @@ def main(headless=False, steps=500, scene="flat"):
         q_target = np.array([0.0, 0.5, -1.0, 0.0,]*2)
         pd_tau = 70*(q_target - data.qpos[7:15]) - 0.5*data.qvel[6:14]
 
-        if np.isnan(tau_cmd[0]).any():
-            print("[WARN] NaN detected in tau_cmd: applying zero torques to avoid simulation instability.")
-            TORQUE_LIST.append(np.full_like(tau_cmd[0], np.nan))
-        else:
-            TORQUE_LIST.append(tau_cmd[0].copy())
-        
-        if np.isnan(fl[0]).any() or np.isnan(fr[0]).any():
-            print("[WARN] NaN detected in contact forces: recording NaN values for contacts to avoid confusion.")
-            FC_LIST.append( [np.full_like(fl[0], np.nan), np.full_like(fr[0], np.nan)] )
-        else:
-            FC_LIST.append( [fl[0].copy(), fr[0].copy()] )
         data.ctrl = np.asarray(tau_cmd[0])
         #data.ctrl = pd_tau
         #data.ctrl = np.zeros(model.nu)
