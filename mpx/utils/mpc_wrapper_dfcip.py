@@ -438,7 +438,7 @@ class BatchedMPCControllerWrapper:
             qpos, qvel, desired,
         )
 
-        return state, tau_cmd, qddot, fl, fr
+        return state, tau_cmd, qddot, fl, fr, desired
 
     def reset(self):
         """

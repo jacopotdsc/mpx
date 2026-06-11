@@ -29,7 +29,7 @@ TITA_PATH = os.path.join(dir_path, "plots","tita_outputs")
 os.makedirs(TITA_PATH, exist_ok=True)
 
 MAX_STEPS = 10000
-DEFAULT_VIDEO_SLOWDOWN_FACTOR = 4.0
+DEFAULT_VIDEO_SLOWDOWN_FACTOR = 1.0
 LLC_ROLLOUT_CSV = os.path.join(TITA_PATH, "rollout_info_llc.csv")
 TORQUE_LIST = []
 FC_LIST = []
@@ -37,6 +37,8 @@ MPC_INPUT_LIST = []
 MPC_OUTPUT_LIST = []
 X_DES_LIST = []
 U_DES_LIST = []
+WBC_DESIRED_LIST = []
+WBC_CURRENT_LIST = []
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -49,12 +51,13 @@ import mpx.utils.mpc_wrapper_dfcip as mpc_wrapper_dfcip
 import mpx.utils.mpc_utils as mpc_utils
 import mpx.utils.sim as sim_utils
 from plot_rollout_info import (
+    _DEFAULT_DIR,
     plot_llc,
     plot_mpc_prediction_state,
     plot_mpc_prediction_control,
     plot_torques_and_contacts,
     plot_mpc_state_and_output,
-    render_mpc_prediction_video,
+    plot_wbc_desired,
 )
 
 
@@ -226,34 +229,97 @@ def get_dfip_current_state(self, tita_state: jax.Array, theta_prev: float) -> ja
 
     return x0, theta
 
+def build_wbc_current_vector(model, data, contact_ids, mpc_utils, nj: int) -> np.ndarray:
+    """
+    Build a vector with the same layout as WBC desired.
+    Useful for plotting desired vs current using the same _REF_* indices.
+    """
 
-def _quat_wxyz_to_rpy(quat_wxyz: np.ndarray) -> np.ndarray:
-    """Convert quaternion [w, x, y, z] to roll-pitch-yaw [rad]."""
-    w, x, y, z = [float(v) for v in quat_wxyz]
+    # stesso size usato dal wrapper:
+    # _REF_JOINTS + q, dq, ddq
+    current = np.zeros(mpc_utils._REF_JOINTS + 3 * nj, dtype=np.float64)
 
-    sinr_cosp = 2.0 * (w * x + y * z)
-    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-    roll = np.arctan2(sinr_cosp, cosr_cosp)
+    # ── COM current ─────────────────────────────────────────────
+    # Nota: nel WBC mjx viene usato subtree_com[0], cioè CoM globale del modello.
+    com_pos = np.asarray(data.subtree_com[0]).copy()
 
-    sinp = 2.0 * (w * y - z * x)
-    sinp = np.clip(sinp, -1.0, 1.0)
-    pitch = np.arcsin(sinp)
+    # MuJoCo non dà direttamente data.subtree_linvel[0] sempre in modo affidabile
+    # dopo mj_forward? Qui usiamo cvel/com subtree se disponibile.
+    # Se vuoi essere più coerente con il tuo x0, puoi sostituire con data.subtree_linvel[base_id].
+    try:
+        com_vel = np.asarray(data.subtree_linvel[0]).copy()
+    except Exception:
+        com_vel = np.zeros(3)
 
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = np.arctan2(siny_cosp, cosy_cosp)
+    current[mpc_utils._REF_COM_POS:mpc_utils._REF_COM_POS + 3] = com_pos
+    current[mpc_utils._REF_COM_VEL:mpc_utils._REF_COM_VEL + 3] = com_vel
+    current[mpc_utils._REF_COM_ACC:mpc_utils._REF_COM_ACC + 3] = 0.0
 
-    return np.array([roll, pitch, yaw], dtype=np.float64)
+    # ── Wheel center current ────────────────────────────────────
+    l_geom = int(contact_ids[0])
+    r_geom = int(contact_ids[1])
 
-def _quat_wxyz_to_rotmat(quat_wxyz: np.ndarray) -> np.ndarray:
-    """Convert quaternion [w, x, y, z] to a 3x3 rotation matrix."""
-    w, x, y, z = [float(v) for v in quat_wxyz]
+    l_pos = np.asarray(data.geom_xpos[l_geom]).copy()
+    r_pos = np.asarray(data.geom_xpos[r_geom]).copy()
 
-    return np.array([
-        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),     2.0 * (x * z + y * w)],
-        [2.0 * (x * y + z * w),     1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-        [2.0 * (x * z - y * w),     2.0 * (y * z + x * w),     1.0 - 2.0 * (x * x + y * y)],
-    ], dtype=np.float64)
+    def geom_center_velocity(data, geom_id: int) -> np.ndarray:
+        vel = np.zeros(6)  # [angular, linear]
+        mujoco.mj_objectVelocity(
+            data.model,
+            data,
+            mujoco.mjtObj.mjOBJ_GEOM,
+            geom_id,
+            vel,
+            flg_local=0,
+        )
+        return vel[3:6].copy()
+
+    l_vel = geom_center_velocity(data, l_geom)
+    r_vel = geom_center_velocity(data, r_geom)
+
+    current[mpc_utils._REF_LW_POS:mpc_utils._REF_LW_POS + 3] = l_pos
+    current[mpc_utils._REF_RW_POS:mpc_utils._REF_RW_POS + 3] = r_pos
+
+    current[mpc_utils._REF_LW_VEL:mpc_utils._REF_LW_VEL + 3] = l_vel
+    current[mpc_utils._REF_RW_VEL:mpc_utils._REF_RW_VEL + 3] = r_vel
+
+    current[mpc_utils._REF_LW_ACC:mpc_utils._REF_LW_ACC + 3] = 0.0
+    current[mpc_utils._REF_RW_ACC:mpc_utils._REF_RW_ACC + 3] = 0.0
+
+    # ── Base rotation / angular velocity current ────────────────
+    base_body_id = mujoco.mj_name2id(
+        model,
+        mujoco.mjtObj.mjOBJ_BODY,
+        config.base_body_name,
+    )
+
+    base_R = np.asarray(data.xmat[base_body_id]).reshape(3, 3).copy()
+    current[mpc_utils._REF_BASE_ROT:mpc_utils._REF_BASE_ROT + 9] = base_R.reshape(-1)
+
+    # body velocity: [angular, linear]
+    base_vel6 = np.zeros(6)
+    mujoco.mj_objectVelocity(
+        model,
+        data,
+        mujoco.mjtObj.mjOBJ_BODY,
+        base_body_id,
+        base_vel6,
+        flg_local=0,
+    )
+    base_omega = base_vel6[0:3].copy()
+
+    current[mpc_utils._REF_BASE_OMG:mpc_utils._REF_BASE_OMG + 3] = base_omega
+    current[mpc_utils._REF_BASE_ALP:mpc_utils._REF_BASE_ALP + 3] = 0.0
+
+    # ── Joints current ─────────────────────────────────────────
+    qj = np.asarray(data.qpos[7:7 + nj]).copy()
+    dqj = np.asarray(data.qvel[6:6 + nj]).copy()
+
+    current[mpc_utils._REF_JOINTS:mpc_utils._REF_JOINTS + nj] = qj
+    current[mpc_utils._REF_JOINTS + nj:mpc_utils._REF_JOINTS + 2 * nj] = dqj
+    current[mpc_utils._REF_JOINTS + 2 * nj:mpc_utils._REF_JOINTS + 3 * nj] = 0.0
+
+    return current
 
 def main(headless=False, steps=500, scene="flat"):
     if os.path.exists(LLC_ROLLOUT_CSV):
@@ -262,6 +328,7 @@ def main(headless=False, steps=500, scene="flat"):
     model = mujoco.MjModel.from_xml_path(
         dir_path + f"/../data/tita/tita_world.xml"
     )
+    nj = model.nv - 6
     data = mujoco.MjData(model)
     sim_frequency = float(config.whole_body_frequency)
     video_fps = max(1, int(round(sim_frequency / max(DEFAULT_VIDEO_SLOWDOWN_FACTOR, 1e-6))))
@@ -412,7 +479,7 @@ def main(headless=False, steps=500, scene="flat"):
     pr_world_wbc = tita_state_wbc[9:12][None, :]
     dpl_world_wbc = tita_state_wbc[12:15][None, :]
     dpr_world_wbc = tita_state_wbc[15:18][None, :]
-    mpc_state, tau_cmd, qddot, fl, fr = mpc.whole_body_run(
+    mpc_state, tau_cmd, qddot, fl, fr, desired = mpc.whole_body_run(
         mpc_state,
         x0,
         qpos_np,
@@ -427,17 +494,17 @@ def main(headless=False, steps=500, scene="flat"):
     _dt = timer() - _t0
     print(f"{int(_dt // 60)}m {_dt % 60:.1f}s")
 
-    _append_llc_row(
-        LLC_ROLLOUT_CSV,
-        step=0,
-        tau_cmd=tau_cmd[0],
-        kp=getattr(config, "Kp_motion", 0.0),
-        kd=getattr(config, "Kd_motion", 0.0),
-    )
-    plot_llc(
-        LLC_ROLLOUT_CSV,
-        out_path=os.path.join(TITA_PATH, "llc","llc_t000.png"),
-    )
+    #_append_llc_row(
+    #    LLC_ROLLOUT_CSV,
+    #    step=0,
+    #    tau_cmd=tau_cmd[0],
+    #    kp=getattr(config, "Kp_motion", 0.0),
+    #    kd=getattr(config, "Kd_motion", 0.0),
+    #)
+    #plot_llc(
+    #    LLC_ROLLOUT_CSV,
+    #    out_path=os.path.join(TITA_PATH, "llc","llc_t000.png"),
+    #)
 
     _tau_names = [f"τ{i}" for i in range(tau_cmd.shape[-1])]
     _q_names   = [f"q̈{i}" for i in range(qddot.shape[-1])]
@@ -505,10 +572,15 @@ def main(headless=False, steps=500, scene="flat"):
     theta_prev = 0.0
     mpc_state = mpc.init_state()
 
+    def do_print(*args, **kwargs):
+        debug_print = False
+        if debug_print:
+            print(*args, **kwargs)
+
     def step_controller(mpc_state, theta_prev=theta_prev):
         nonlocal counter
 
-        print(f"\n=== step {counter} ===")
+        do_print(f"\n=== step {counter} ===")
         
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
@@ -525,14 +597,14 @@ def main(headless=False, steps=500, scene="flat"):
                 s = f"{float(v):.{d}f}"
                 return s if float(v) < 0 else f" {s}"
             
-            print(
+            do_print(
                 f"[x0] "
                 f" pc=({_f(x0[0])},{_f(x0[1])},{_f(x0[2])}) "
                 f" vc=({_f(x0[3])},{_f(x0[4])},{_f(x0[5])}) "
                 f"\n      cw=({_f(x0[6])},{_f(x0[7])},{_f(x0[8])}) "
                 f" vcz={_f(x0[9])}\n      th={_f(x0[10],4)} v={_f(x0[11],4)} w={_f(x0[12],4)}"
             )
-            print(
+            do_print(
                 f"[sol] "
                 f"a={_f(mpc_state.sol.a[0])} "
                 f"acz={_f(mpc_state.sol.ac_z[0])} "
@@ -544,7 +616,7 @@ def main(headless=False, steps=500, scene="flat"):
 
             x_ref_step = reference[:, 0, :config.nx]
             u_ref_step = reference[:, 0, config.nx:]
-            print(
+            do_print(
                 f"[ref0] "
                 f"pc=({_f(x_ref_step[0,0])},{_f(x_ref_step[0,1])},{_f(x_ref_step[0,2])}) "
                 f"vc=({_f(x_ref_step[0,3])},{_f(x_ref_step[0,4])},{_f(x_ref_step[0,5])}) "
@@ -560,7 +632,7 @@ def main(headless=False, steps=500, scene="flat"):
 
             x_ref_N = reference[:, -1, :config.nx]
             u_ref_N = reference[:, -1, config.nx:]
-            print(
+            do_print(
                 f"[refN] "
                 f"pc=({_f(x_ref_N[0,0])},{_f(x_ref_N[0,1])},{_f(x_ref_N[0,2])}) "
                 f"vc=({_f(x_ref_N[0,3])},{_f(x_ref_N[0,4])},{_f(x_ref_N[0,5])}) "
@@ -591,7 +663,7 @@ def main(headless=False, steps=500, scene="flat"):
             dpl_world_wbc = tita_state[12:15][None, :]
             dpr_world_wbc = tita_state[15:18][None, :]
 
-            mpc_state, tau_cmd, qddot, fl, fr = mpc.whole_body_run(
+            mpc_state, tau_cmd, qddot, fl, fr, desired = mpc.whole_body_run(
                 mpc_state,
                 x0,
                 jnp.asarray(qpos)[None, :],
@@ -603,29 +675,60 @@ def main(headless=False, steps=500, scene="flat"):
                 dpr_world_wbc,
             )
 
+            d = desired[0] if desired.ndim == 2 else desired
+            _nj = model.nv - 6
+            
+            do_print(
+                f"[desired] "
+                f"com_p=({_f(d[mpc_utils._REF_COM_POS + 0])},{_f(d[mpc_utils._REF_COM_POS + 1])},{_f(d[mpc_utils._REF_COM_POS + 2])}) "
+                f"com_v=({_f(d[mpc_utils._REF_COM_VEL + 0])},{_f(d[mpc_utils._REF_COM_VEL + 1])},{_f(d[mpc_utils._REF_COM_VEL + 2])}) "
+                f"\n          com_a=({_f(d[mpc_utils._REF_COM_ACC + 0])},{_f(d[mpc_utils._REF_COM_ACC + 1])},{_f(d[mpc_utils._REF_COM_ACC + 2])})"
+                f"\n          lw_p=({_f(d[mpc_utils._REF_LW_POS + 0])},{_f(d[mpc_utils._REF_LW_POS + 1])},{_f(d[mpc_utils._REF_LW_POS + 2])}) "
+                f"rw_p=({_f(d[mpc_utils._REF_RW_POS + 0])},{_f(d[mpc_utils._REF_RW_POS + 1])},{_f(d[mpc_utils._REF_RW_POS + 2])})"
+                f"\n          lw_v=({_f(d[mpc_utils._REF_LW_VEL + 0])},{_f(d[mpc_utils._REF_LW_VEL + 1])},{_f(d[mpc_utils._REF_LW_VEL + 2])}) "
+                f"rw_v=({_f(d[mpc_utils._REF_RW_VEL + 0])},{_f(d[mpc_utils._REF_RW_VEL + 1])},{_f(d[mpc_utils._REF_RW_VEL + 2])})"
+                f"\n          lw_a=({_f(d[mpc_utils._REF_LW_ACC + 0])},{_f(d[mpc_utils._REF_LW_ACC + 1])},{_f(d[mpc_utils._REF_LW_ACC + 2])}) "
+                f"rw_a=({_f(d[mpc_utils._REF_RW_ACC + 0])},{_f(d[mpc_utils._REF_RW_ACC + 1])},{_f(d[mpc_utils._REF_RW_ACC + 2])})"
+                f"\n          omg=({_f(d[mpc_utils._REF_BASE_OMG + 0])},{_f(d[mpc_utils._REF_BASE_OMG + 1])},{_f(d[mpc_utils._REF_BASE_OMG + 2])}) "
+                f"alp=({_f(d[mpc_utils._REF_BASE_ALP + 0])},{_f(d[mpc_utils._REF_BASE_ALP + 1])},{_f(d[mpc_utils._REF_BASE_ALP + 2])})"
+                f"\n          qj0={_f(d[mpc_utils._REF_JOINTS + 0],4)} "
+                f"dqj0={_f(d[mpc_utils._REF_JOINTS + _nj + 0],4)} "
+                f"ddqj0={_f(d[mpc_utils._REF_JOINTS + 2*_nj + 0],4)}"
+            )
+
             tau_to_apply = tau_cmd[0].copy()
 
+            c = build_wbc_current_vector(
+                model=model,
+                data=data,
+                contact_ids=contact_ids,
+                mpc_utils=mpc_utils,
+                nj=_nj,
+            )
+            
             TORQUE_LIST.append(tau_to_apply)
             FC_LIST.append( [fl[0].copy(), fr[0].copy()] )
+            WBC_DESIRED_LIST.append(d.copy())
+            WBC_CURRENT_LIST.append(c.copy())
 
         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
 
-        print(
+        do_print(
             f"[WBC]\n"
             f"  tau_cmd: {tau_to_apply}\n"
             f"  contact_forces_left (fl): {fl[0]}\n"
             f"  contact_forces_right (fr): {fr[0]}"
         )
 
-        _append_llc_row(
-            LLC_ROLLOUT_CSV,
-            step=counter + 1,
-            tau_cmd=tau_to_apply,
-            kp=getattr(config, "Kp_motion", 0.0),
-            kd=getattr(config, "Kd_motion", 0.0),
-        )
+        #_append_llc_row(
+        #    LLC_ROLLOUT_CSV,
+        #    step=counter + 1,
+        #    tau_cmd=tau_to_apply,
+        #    kp=getattr(config, "Kp_motion", 0.0),
+        #    kd=getattr(config, "Kd_motion", 0.0),
+        #)
 
-        if (counter % 50 == 0 and counter < 505) or touch_floor:
+        if False and (counter % 50 == 0 and counter < 505) or touch_floor:
             X0_np = np.asarray(mpc_state.X0_shifted[0])   # (N+1, 13)
             U0_np = np.asarray(mpc_state.U0_shifted[0])  
 
@@ -698,8 +801,20 @@ def main(headless=False, steps=500, scene="flat"):
         while viewer.is_running():
             overlay_text = command_handle.consume_overlay_text()
             tic = timer()
+            overlay_text = command_handle.consume_overlay_text()
+
+            timestep_text = (
+                "Info",
+                f"step: {counter}\nsim time: {data.time:.3f} s",
+            )
+
+            texts = []
             if overlay_text is not None:
-                viewer.set_texts((None, None, *overlay_text))
+                texts.extend(overlay_text)
+
+            texts.append((None, None, timestep_text[0], timestep_text[1]))
+
+            viewer.set_texts(texts)
             mpc_state, theta_prev, touch_floor = step_controller(mpc_state, theta_prev=theta_prev)
 
             toc = timer()
@@ -729,6 +844,11 @@ if __name__ == "__main__":
         args.headless = True
 
     def do_plots():
+
+        model = mujoco.MjModel.from_xml_path(
+            dir_path + f"/../data/tita/tita_world.xml"
+        )
+        nj = model.nv - 6
         plot_torques_and_contacts(
             torques=TORQUE_LIST,
             contact_forces=FC_LIST,
@@ -744,6 +864,17 @@ if __name__ == "__main__":
             out_dir=TITA_PATH,
             filename_state="mpc_input.png",
             filename_u0="mpc_output.png",
+        )
+
+        plot_wbc_desired(
+            desired_list=WBC_DESIRED_LIST,
+            current_list=None, #WBC_CURRENT_LIST,
+            mpc_utils=mpc_utils,
+            nj=model.nv - 6,
+            out_dir=TITA_PATH,
+            filename_com_base="wbc_desired_com_base.png",
+            filename_wheels="wbc_desired_wheels.png",
+            filename_joints="wbc_desired_joints.png",
         )
 
     _snapshot_config_to_txt(TITA_PATH)

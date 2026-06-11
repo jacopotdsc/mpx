@@ -143,6 +143,264 @@ def plot_mpc_state_and_output(
     fig2.savefig(u_path)
     plt.close(fig2)
 
+def plot_wbc_desired(
+    desired_list,
+    current_list=None,
+    mpc_utils=None,
+    nj=None,
+    out_dir=".",
+    filename_com_base="wbc_desired_com_base.png",
+    filename_wheels="wbc_desired_wheels.png",
+    filename_joints="wbc_desired_joints.png",
+):
+    """
+    Plot WBC desired references, optionally against current values.
+
+    Layout:
+      - COM/base: 3 rows x 2 cols
+      - wheels:   3 rows x 2 cols
+      - joints:   4 rows x 2 cols
+
+    current_list must have the same layout as desired_list.
+    """
+
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    if mpc_utils is None:
+        raise ValueError("mpc_utils must be passed to plot_wbc_desired(...).")
+
+    if nj is None:
+        raise ValueError("nj must be passed to plot_wbc_desired(...).")
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    desired = np.asarray(desired_list, dtype=float)
+
+    if desired.size == 0:
+        print("[plot_wbc_desired] empty desired_list, skipping.")
+        return
+
+    if desired.ndim == 1:
+        desired = desired[None, :]
+
+    current = None
+    if current_list is not None and len(current_list) > 0:
+        current = np.asarray(current_list, dtype=float)
+
+        if current.ndim == 1:
+            current = current[None, :]
+
+        n = min(desired.shape[0], current.shape[0])
+        desired = desired[:n]
+        current = current[:n]
+
+    t = np.arange(desired.shape[0])
+
+    def _save(fig, filename):
+        path = os.path.join(out_dir, filename)
+        fig.tight_layout()
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        print(f"[plot] saved → {path}")
+
+    def _setup_ax(ax, title, ylabel=None):
+        ax.set_title(title)
+        if ylabel is not None:
+            ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7, ncol=2)
+
+    def _plot_scalar(ax, idx, name, ylabel=None):
+        ax.plot(t, desired[:, idx], label=f"{name} desired")
+        if current is not None:
+            ax.plot(t, current[:, idx], "--", label=f"{name} current")
+        _setup_ax(ax, name, ylabel)
+
+    def _plot_xyz(ax, base_idx, name, ylabel=None):
+        for k, lab in enumerate(["x", "y", "z"]):
+            idx = base_idx + k
+            ax.plot(t, desired[:, idx], label=f"{name}_{lab} desired")
+            if current is not None:
+                ax.plot(t, current[:, idx], "--", label=f"{name}_{lab} current")
+        _setup_ax(ax, name, ylabel)
+
+    def _plot_matrix_diag_or_entries(ax, base_idx, name):
+        """
+        Base rotation is stored as 9 entries.
+        Plot only useful entries to keep the figure readable.
+        """
+        entries = [
+            (0, "R00"),
+            (1, "R01"),
+            (3, "R10"),
+            (4, "R11"),
+            (8, "R22"),
+        ]
+
+        for off, lab in entries:
+            idx = base_idx + off
+            ax.plot(t, desired[:, idx], label=f"{name}_{lab} desired")
+            if current is not None:
+                ax.plot(t, current[:, idx], "--", label=f"{name}_{lab} current")
+
+        _setup_ax(ax, name, "")
+
+    # ============================================================
+    # FIGURE 1 — COM / BASE — 3 rows x 2 cols
+    # ============================================================
+    fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex=True)
+    axes = axes.reshape(3, 2)
+
+    _plot_xyz(
+        axes[0, 0],
+        mpc_utils._REF_COM_POS,
+        "com_pos",
+        ylabel="[m]",
+    )
+
+    _plot_xyz(
+        axes[0, 1],
+        mpc_utils._REF_COM_VEL,
+        "com_vel",
+        ylabel="[m/s]",
+    )
+
+    _plot_xyz(
+        axes[1, 0],
+        mpc_utils._REF_COM_ACC,
+        "com_acc",
+        ylabel="[m/s²]",
+    )
+
+    _plot_matrix_diag_or_entries(
+        axes[1, 1],
+        mpc_utils._REF_BASE_ROT,
+        "base_rot",
+    )
+
+    _plot_xyz(
+        axes[2, 0],
+        mpc_utils._REF_BASE_OMG,
+        "base_omega",
+        ylabel="[rad/s]",
+    )
+
+    _plot_xyz(
+        axes[2, 1],
+        mpc_utils._REF_BASE_ALP,
+        "base_alpha",
+        ylabel="[rad/s²]",
+    )
+
+    fig.suptitle("WBC desired vs current — COM / base", fontsize=14)
+
+    for ax in axes[-1, :]:
+        ax.set_xlabel("WBC step")
+
+    _save(fig, filename_com_base)
+
+    # ============================================================
+    # FIGURE 2 — WHEELS — 3 rows x 2 cols
+    # ============================================================
+    fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex=True)
+    axes = axes.reshape(3, 2)
+
+    _plot_xyz(
+        axes[0, 0],
+        mpc_utils._REF_LW_POS,
+        "lwheel_pos",
+        ylabel="[m]",
+    )
+
+    _plot_xyz(
+        axes[0, 1],
+        mpc_utils._REF_RW_POS,
+        "rwheel_pos",
+        ylabel="[m]",
+    )
+
+    _plot_xyz(
+        axes[1, 0],
+        mpc_utils._REF_LW_VEL,
+        "lwheel_vel",
+        ylabel="[m/s]",
+    )
+
+    _plot_xyz(
+        axes[1, 1],
+        mpc_utils._REF_RW_VEL,
+        "rwheel_vel",
+        ylabel="[m/s]",
+    )
+
+    _plot_xyz(
+        axes[2, 0],
+        mpc_utils._REF_LW_ACC,
+        "lwheel_acc",
+        ylabel="[m/s²]",
+    )
+
+    _plot_xyz(
+        axes[2, 1],
+        mpc_utils._REF_RW_ACC,
+        "rwheel_acc",
+        ylabel="[m/s²]",
+    )
+
+    fig.suptitle("WBC desired vs current — wheels", fontsize=14)
+
+    for ax in axes[-1, :]:
+        ax.set_xlabel("WBC step")
+
+    _save(fig, filename_wheels)
+
+    # ============================================================
+    # FIGURE 3 — JOINTS — 4 rows x 2 cols
+    # ============================================================
+    q_start = mpc_utils._REF_JOINTS
+    dq_start = mpc_utils._REF_JOINTS + nj
+    ddq_start = mpc_utils._REF_JOINTS + 2 * nj
+
+    fig, axes = plt.subplots(4, 2, figsize=(16, 14), sharex=True)
+    axes = axes.reshape(4, 2)
+
+    for j in range(nj):
+        row = j // 2
+        col = j % 2
+
+        ax = axes[row, col]
+
+        q_idx = q_start + j
+        dq_idx = dq_start + j
+        ddq_idx = ddq_start + j
+
+        ax.plot(t, desired[:, q_idx], label=f"q{j} desired")
+        ax.plot(t, desired[:, dq_idx], label=f"dq{j} desired")
+        ax.plot(t, desired[:, ddq_idx], label=f"ddq{j} desired")
+
+        if current is not None:
+            ax.plot(t, current[:, q_idx], "--", label=f"q{j} current")
+            ax.plot(t, current[:, dq_idx], "--", label=f"dq{j} current")
+            ax.plot(t, current[:, ddq_idx], "--", label=f"ddq{j} current")
+
+        ax.set_title(f"joint {j}")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7, ncol=2)
+
+    # se nj < 8, spegne assi vuoti
+    for j in range(nj, 8):
+        row = j // 2
+        col = j % 2
+        axes[row, col].axis("off")
+
+    fig.suptitle("WBC desired vs current — joints", fontsize=14)
+
+    for ax in axes[-1, :]:
+        ax.set_xlabel("WBC step")
+
+    _save(fig, filename_joints)
 
 def plot_torques_and_contacts(
     torques: list,
