@@ -15,12 +15,14 @@ contact_frame = ['left_leg_4_collision', 'right_leg_4_collision',]
 body_name = ['left_leg_4', 'right_leg_4']
 
 # Time and stage parameters
-dt = 0.002  # Time step in seconds
+dt = 0.02  # Time step in seconds
 dt_mpc = 0.01
 N = 50        # Number of stages
+T_TRAJECTORY = 6
 mpc_frequency = 500  # Frequency of MPC updates in Hz
 grav = 9.81
 whole_body_frequency = 500
+dt_ref = 1.0 / whole_body_frequency
 # Timer values (make sure the values match your intended configuration)
 timer_t = jnp.array([0.5, 0.0, 0.0, 0.5])  # Timer values for each leg
 duty_factor = 0.65  # Duty factor for the gait
@@ -67,10 +69,10 @@ Kd = jnp.diag(jnp.tile(jnp.array([20,20,20]),n_contact))
 # Whole-body controller
 base_body_name  = 'base_link'
 wheel_radius    = 0.0925
-Kp_motion = 3e1 
-Kd_motion = 8e1
-Kp_wheel  = 8e1
-Kd_wheel  = 1e1 
+Kp_motion = 5e1 
+Kd_motion = 3e1
+Kp_wheel  = 5e1
+Kd_wheel  = 3e1 
 Kp_reg    = 3e1 
 Kd_reg    = 2e1 
 
