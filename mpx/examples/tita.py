@@ -2,7 +2,7 @@ import argparse
 import csv
 import shutil
 import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2" 
+#os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2" 
 
 import jax
 print(jax.config.jax_enable_x64)
@@ -19,6 +19,19 @@ import sys
 import time
 from datetime import datetime
 from timeit import default_timer as timer
+import jax
+import mpx.config.config_dfcip as config
+
+import jaxlib
+
+print("JAX version:", jax.__version__)
+print("JAXLIB version:", jaxlib.__version__)
+print("JAX devices:", jax.devices())
+print("JAX default backend:", jax.default_backend())
+print("JAX x64 enabled:", jax.config.read("jax_enable_x64"))
+print("XLA_FLAGS:", os.environ.get("XLA_FLAGS"))
+print("CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
+print("JAX_PLATFORM_NAME:", os.environ.get("JAX_PLATFORM_NAME"))
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.abspath(os.path.join(dir_path, "..")))
@@ -28,7 +41,7 @@ os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 TITA_PATH = os.path.join(dir_path, "plots","tita_outputs")
 os.makedirs(TITA_PATH, exist_ok=True)
 
-MAX_STEPS = 10000
+MAX_STEPS = round(int(config.T_TRAJECTORY / config.dt_ref) + 1500 )
 DEFAULT_VIDEO_SLOWDOWN_FACTOR = 1.0
 LLC_ROLLOUT_CSV = os.path.join(TITA_PATH, "rollout_info_llc.csv")
 TORQUE_LIST = []
@@ -46,7 +59,6 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-import mpx.config.config_dfcip as config
 import mpx.utils.mpc_wrapper_dfcip as mpc_wrapper_dfcip
 import mpx.utils.mpc_utils as mpc_utils
 import mpx.utils.sim as sim_utils
@@ -136,6 +148,7 @@ def _base_touches_floor(model, data, base_body_name: str = "base_link", floor_ge
 
 def build_tita_state(model, data, base_body_name, contact_ids) -> jnp.ndarray:
     base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, base_body_name)
+    mujoco.mj_subtreeVel(model, data)
     pcom = pcom = data.subtree_com[base_body_id] #jnp.asarray(data.qpos[0:3])
     vcom = vcom = data.subtree_linvel[base_body_id] #jnp.asarray(data.qvel[0:3])
 
@@ -568,6 +581,7 @@ def main(headless=False, steps=500, scene="flat"):
     period = int(sim_frequency / config.mpc_frequency)
     print(f"sim_frequency: {sim_frequency} Hz, mpc_frequency: {config.mpc_frequency} Hz")
     #print(f"Controller period: {period} steps at {sim_frequency} Hz simulation frequency.")
+    _snapshot_config_to_txt(TITA_PATH)
     counter = 0
     theta_prev = 0.0
     mpc_state = mpc.init_state()
@@ -580,7 +594,7 @@ def main(headless=False, steps=500, scene="flat"):
     def step_controller(mpc_state, theta_prev=theta_prev):
         nonlocal counter
 
-        do_print(f"\n=== step {counter} ===")
+        print(f"\n=== step {counter} ===")
         
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
@@ -597,6 +611,17 @@ def main(headless=False, steps=500, scene="flat"):
                 s = f"{float(v):.{d}f}"
                 return s if float(v) < 0 else f" {s}"
             
+            do_print(
+                f"[tita_state] "
+                f"pcom=({_f(tita_state[0])},{_f(tita_state[1])},{_f(tita_state[2])}) "
+                f"vcom=({_f(tita_state[3])},{_f(tita_state[4])},{_f(tita_state[5])}) "
+                f"\n             "
+                f"pl=({_f(tita_state[6])},{_f(tita_state[7])},{_f(tita_state[8])}) "
+                f"pr=({_f(tita_state[9])},{_f(tita_state[10])},{_f(tita_state[11])}) "
+                f"\n             "
+                f"dpl=({_f(tita_state[12])},{_f(tita_state[13])},{_f(tita_state[14])}) "
+                f"dpr=({_f(tita_state[15])},{_f(tita_state[16])},{_f(tita_state[17])})"
+            )
             do_print(
                 f"[x0] "
                 f" pc=({_f(x0[0])},{_f(x0[1])},{_f(x0[2])}) "
@@ -761,14 +786,22 @@ def main(headless=False, steps=500, scene="flat"):
         #print(f"Joint positions: {list(map(lambda x: round(float(x), 2), data.qpos[7:]))}")
         mujoco.mj_step(model, data)
         _renderer.update_scene(data, camera=_sim_cam)
-        _sim_frames.append(_renderer.render().copy())
+        if counter % 5 == 0:  # record every 2nd frame to reduce video size
+            _sim_frames.append(_renderer.render().copy())
         counter += 1
         return mpc_state, theta_prev, touch_floor
 
     def _save_sim_video() -> None:
-        import imageio
-        if not _sim_frames:
+        print("Saving simulation video... ", end="\n", flush=True)
+        try:
+            import imageio
+        except ImportError:
+            print("imageio not installed, skipping video saving.")
             return
+        if not _sim_frames:
+            print("No frames captured, skipping video saving.")
+            return
+        print(f"Captured {len(_sim_frames)} frames at {video_fps} fps.")
         video_dir = os.path.join(TITA_PATH)
         os.makedirs(video_dir, exist_ok=True)
         video_path = os.path.join(video_dir, "simulation_video.mp4")
@@ -853,8 +886,6 @@ if __name__ == "__main__":
             torques=TORQUE_LIST,
             contact_forces=FC_LIST,
             out_dir=TITA_PATH,
-            filename_torques="wbc_torques.png",
-            filename_contacts="wbc_contacts.png",
         )
         plot_mpc_state_and_output(
             x0_list=MPC_INPUT_LIST,
@@ -862,8 +893,6 @@ if __name__ == "__main__":
             x_ref_list=X_DES_LIST,
             u_ref_list=U_DES_LIST,
             out_dir=TITA_PATH,
-            filename_state="mpc_input.png",
-            filename_u0="mpc_output.png",
         )
 
         plot_wbc_desired(
@@ -872,12 +901,8 @@ if __name__ == "__main__":
             mpc_utils=mpc_utils,
             nj=model.nv - 6,
             out_dir=TITA_PATH,
-            filename_com_base="wbc_desired_com_base.png",
-            filename_wheels="wbc_desired_wheels.png",
-            filename_joints="wbc_desired_joints.png",
         )
 
-    _snapshot_config_to_txt(TITA_PATH)
     try:
         main(
             headless=args.headless,

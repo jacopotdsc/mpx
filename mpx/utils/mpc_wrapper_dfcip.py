@@ -97,7 +97,9 @@ class BatchedMPCControllerWrapper:
         # TODO: copy reference generator from colab - OK
         reference_generator = partial(mpc_utils.reference_generator_dfcip_offline,
             pcom=(0.0, 0.0, 0.4), nx=config.nx, nu=config.nu, 
-            t_sec=6, dt=config.dt_mpc, m=config.mass, grav=config.grav)
+            t_sec=config.T_TRAJECTORY, dt=config.dt_ref, m=config.mass, grav=config.grav)
+
+        #reference_generator = partial(mpc_utils.reference_generator_dfcip_online, config.N, config.dt, config.mass, config.grav)
 
         # Whole-body controller: static args frozen via partial, runtime args
         # (X0_prev, U0_prev, V0_prev, qpos, qvel, desired) passed at call time.
@@ -195,14 +197,17 @@ class BatchedMPCControllerWrapper:
         """
         # Generate reference trajectory and additional MPC parameters.
         
-        x_slice = jax.lax.dynamic_slice(
-            self._x_reference,
-            (time_frame, 0),
-            (horizon+1, self._x_reference.shape[1])
-        )
-        u_slice = jax.lax.dynamic_slice(
-            self._u_reference, (time_frame, 0), (horizon, self._u_reference.shape[1])
-            )
+        x_T = self._x_reference.shape[0]
+        u_T = self._u_reference.shape[0]
+
+        x_idx = time_frame + jnp.arange(horizon + 1)
+        u_idx = time_frame + jnp.arange(horizon)
+
+        x_idx = jnp.clip(x_idx, 0, x_T - 1)
+        u_idx = jnp.clip(u_idx, 0, u_T - 1)
+
+        x_slice = self._x_reference[x_idx, :]   # (horizon+1, nx)
+        u_slice = self._u_reference[u_idx, :]   # (horizon,   nu)
         u_slice_pad = jnp.concatenate([u_slice, u_slice[-1:, :]], axis=0)
         ref_slice = jnp.concatenate([x_slice, u_slice_pad], axis=1)  # (horizon+1, nx + nu)
         reference = jnp.tile(ref_slice[None, :, :], (self.n_env, 1, 1))

@@ -16,7 +16,7 @@ body_name = ['left_leg_4', 'right_leg_4']
 
 # Time and stage parameters
 dt = 0.002  # Time step in seconds
-dt_mpc = 0.02
+dt_mpc = 0.01
 N = 50        # Number of stages
 mpc_frequency = 500  # Frequency of MPC updates in Hz
 grav = 9.81
@@ -68,17 +68,17 @@ Kd = jnp.diag(jnp.tile(jnp.array([20,20,20]),n_contact))
 base_body_name  = 'base_link'
 wheel_radius    = 0.0925
 Kp_motion = 3e1 
-Kd_motion = 8e0 
+Kd_motion = 8e1
 Kp_wheel  = 8e1
 Kd_wheel  = 1e1 
-Kp_reg    = 5e0 
-Kd_reg    = 1e0 
+Kp_reg    = 3e1 
+Kd_reg    = 2e1 
 
-w_qddot     = 1e-4
+w_qddot     = 1e-3
 w_com       = 1e1
-w_lwheel    = 5e1
-w_rwheel    = 5e1
-w_base      = 5e0
+w_lwheel    = 1e1
+w_rwheel    = 1e1
+w_base      = 1e1
 w_friction  = 1e2
 w_joint_vel = 1e-2
 
@@ -104,7 +104,7 @@ Qgrf = jnp.diag(jnp.array([1e0, 1e0, 1e0]))  # Cost matrix for
 
 # ── MPC cost weights ──────────────────────────────────────────────
 # State weights
-w_pcomxy = 1e1      # posizione xy (0 = non tracki, segui il ref generator)
+w_pcomxy = 1e0      # posizione xy (0 = non tracki, segui il ref generator)
 w_pcomz  = 1e3     # altezza CoM
 w_vcomxy = 1e2      # velocità xy CoM
 w_vcomz  = 1e1      # velocità z CoM
@@ -124,7 +124,7 @@ w_fcxy   = 1e-2      # forze orizzontali → penalizza, devono stare ~0
 w_fcz    = 1e-3     # forza verticale  → libera di adattarsi
 
 # Equality constraints
-w_eq     = 1e3     # momento + contatto
+w_eq     = 1e6     # momento + contatto
 
 # ── Assemble W (15×15 diagonal) ──────────────────────────────────
 W = jnp.diag(jnp.array([

@@ -338,20 +338,20 @@ def reference_generator_dfcip_offline(
                     0.0,
                                             jnp.where(
                     t < T,
-                    -a_max,
+                    a_max,
                     0.0                     )
                                             )
             )
 
             v = jnp.where(
                     t < T_acc,
-                    a_max * t,
+                    a * t,
                                             jnp.where(
                     t < T_acc + T_const,
                     v_peak,
                                             jnp.where(
                     t < T,
-                    v_peak - a_max * td,
+                    v_peak - a * td,
                     0.0                     )
                                             )
             )
@@ -377,7 +377,7 @@ def reference_generator_dfcip_offline(
                     omega_peak,
                                             jnp.where(
                     t < T,
-                    omega_peak - alpha_max * td,
+                    omega_peak + alpha_max * td,
                     0.0                     )
                                             )
             )
@@ -1996,6 +1996,13 @@ def whole_body_interface_wheeled_legged_qp(
     #jax.debug.print("Aeq shape {val}", val=A_eq.shape)
     #jax.debug.print("rank Aeq {val}", val=jnp.linalg.matrix_rank(A_eq))
     
+    #jax.debug.print("------\nrank A_eq {}", jnp.linalg.matrix_rank(A_eq))
+    #jax.debug.print("A_eq shape {}", A_eq.shape)
+    #jax.debug.print("rank A_osqp {}", jnp.linalg.matrix_rank(A_osqp))
+    #jax.debug.print("max eq residual {}", jnp.max(jnp.abs(A_eq @ sol_osqp.primal[0] - b_eq)))
+    #jax.debug.print("status {}", _state.status)
+    #jax.debug.print("error {}", _state.error)
+
     # q_ddot = solution.head(6 + n_joints_)
     # flr = solution.tail(2 * 3 * n_contacts)
     # fl  = flr.head(3 * n_contacts)
