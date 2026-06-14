@@ -462,6 +462,236 @@ def reference_generator_dfcip_offline(
 
         return x_ref, u_ref
 
+@partial(jax.jit, static_argnums=(0, 1, 2, 3))
+def reference_generator_dfcip_online(
+    N: int,
+    dt: float,
+    m: float,
+    grav: float,
+    x0: jax.Array,
+    cmd: jax.Array,
+    h_des: jax.Array,
+):
+    """
+    Online reference generator DFCIP.
+
+    State layout:
+        x[0:3]   = p_com
+        x[3:6]   = v_com
+        x[6:9]   = c, contact midpoint
+        x[9]     = v_contact_z
+        x[10]    = theta
+        x[11]    = v
+        x[12]    = omega
+
+    Command:
+        cmd[0] = desired forward velocity
+        cmd[1] = desired yaw velocity
+        cmd[2] = desired CoM vertical velocity
+
+    Notes:
+        x_ref[5] = CoM vertical velocity
+        x_ref[9] = contact midpoint vertical velocity, ideally zero
+    """
+
+    z_min = 0.25
+    z_max = 0.50
+
+    # Default acceleration magnitudes
+    a_default     = 0.1   # m/s^2
+    alpha_default = 0.1   # rad/s^2
+    ac_z_default  = 0.1   # m/s^2
+
+    # Current state
+    com_x = x0[0]
+    com_y = x0[1]
+    com_z = x0[2]
+
+    com_vz = x0[5]
+
+    pc_x = x0[6]
+    pc_y = x0[7]
+    pc_z = x0[8]
+
+    theta = x0[10]
+    v     = x0[11]
+    omega = x0[12]
+
+    # Velocity commands
+    v_cmd     = cmd[0]
+    omega_cmd = cmd[1]
+    vz_cmd    = cmd[2]
+
+    def integrate_with_acc_cmd(current, target, acc_abs):
+        """
+        Move current velocity toward target velocity using default acceleration.
+        If integration would overshoot target, clamp the acceleration itself.
+        """
+
+        err = target - current
+
+        # default commanded acceleration
+        acc_cmd = jnp.where(
+            err > 0.0,
+            acc_abs,
+            jnp.where(err < 0.0, -acc_abs, 0.0),
+        )
+
+        next_raw = current + acc_cmd * dt
+
+        # detect overshoot
+        overshoot_pos = jnp.logical_and(err > 0.0, next_raw > target)
+        overshoot_neg = jnp.logical_and(err < 0.0, next_raw < target)
+        overshoot = jnp.logical_or(overshoot_pos, overshoot_neg)
+
+        # if overshoot, choose exactly the acceleration needed to hit target
+        acc_cmd = jnp.where(
+            overshoot,
+            (target - current) / dt,
+            acc_cmd,
+        )
+
+        next_value = current + acc_cmd * dt
+
+        return next_value, acc_cmd
+
+    def scan_step(carry, k):
+        com_x, com_y, com_z, pc_x, pc_y, pc_z, vz_com, theta, v, omega = carry
+
+        # ─────────────────────────────────────────────
+        # Velocity commands reached through acceleration commands
+        # ─────────────────────────────────────────────
+        v_next, a_cmd = integrate_with_acc_cmd(
+            v,
+            v_cmd,
+            a_default,
+        )
+
+        omega_next, alpha_cmd = integrate_with_acc_cmd(
+            omega,
+            omega_cmd,
+            alpha_default,
+        )
+
+        vz_com_next, ac_z_cmd = integrate_with_acc_cmd(
+            vz_com,
+            vz_cmd,
+            ac_z_default,
+        )
+
+        # ─────────────────────────────────────────────
+        # Integrate DFCIP reference state
+        # ─────────────────────────────────────────────
+        theta_next = theta + omega_next * dt
+
+        com_vx_next = v_next * jnp.cos(theta_next)
+        com_vy_next = v_next * jnp.sin(theta_next)
+
+        com_x_next = com_x + com_vx_next * dt
+        com_y_next = com_y + com_vy_next * dt
+
+        com_z_raw = com_z + vz_com_next * dt
+        com_z_next = jnp.clip(com_z_raw, z_min, z_max)
+
+        # if z saturates, recompute vz_com_next and ac_z_cmd consistently
+        z_saturated = jnp.logical_or(com_z_raw < z_min, com_z_raw > z_max)
+
+        vz_com_next = jnp.where(
+            z_saturated,
+            (com_z_next - com_z) / dt,
+            vz_com_next,
+        )
+
+        ac_z_cmd = jnp.where(
+            z_saturated,
+            (vz_com_next - vz_com) / dt,
+            ac_z_cmd,
+        )
+
+        # Contact midpoint follows xy but keeps fixed ground/contact height
+        pc_x_next = com_x_next
+        pc_y_next = com_y_next
+        pc_z_next = pc_z
+
+        # This is contact midpoint vertical velocity, not CoM vertical velocity
+        v_contact_z_next = 0.0
+
+        x_ref_t = jnp.array([
+            com_x_next,          # [0] com_x
+            com_y_next,          # [1] com_y
+            com_z_next,          # [2] com_z
+
+            com_vx_next,         # [3] com_vx
+            com_vy_next,         # [4] com_vy
+            vz_com_next,         # [5] com_vz
+
+            pc_x_next,           # [6] pc_x
+            pc_y_next,           # [7] pc_y
+            pc_z_next,           # [8] pc_z
+
+            v_contact_z_next,    # [9] v_contact_z
+
+            theta_next,          # [10] theta
+            v_next,              # [11] v
+            omega_next,          # [12] omega
+        ])
+
+        u_ref_t = jnp.array([
+            a_cmd,               # [0] a
+            ac_z_cmd,            # [1] ac_z
+            alpha_cmd,           # [2] alpha
+
+            0.0,                 # [3] fl_x
+            0.0,                 # [4] fl_y
+            m * grav / 2.0,      # [5] fl_z
+
+            0.0,                 # [6] fr_x
+            0.0,                 # [7] fr_y
+            m * grav / 2.0,      # [8] fr_z
+        ])
+
+        # IMPORTANT: same order as scan_step input carry
+        carry_next = (
+            com_x_next,
+            com_y_next,
+            com_z_next,
+            pc_x_next,
+            pc_y_next,
+            pc_z_next,
+            vz_com_next,
+            theta_next,
+            v_next,
+            omega_next,
+        )
+
+        return carry_next, (x_ref_t, u_ref_t)
+
+    carry0 = (
+        com_x,
+        com_y,
+        com_z,
+        pc_x,
+        pc_y,
+        pc_z,
+        com_vz,      # NOT v_contact_z
+        theta,
+        v,
+        omega,
+    )
+
+    _, (x_pred, u_pred) = jax.lax.scan(
+        scan_step,
+        carry0,
+        jnp.arange(N),
+    )
+
+    x_ref = jnp.concatenate([x0[None, :], x_pred], axis=0)
+
+    # x[9] is contact midpoint vertical velocity, ideally zero
+    x_ref = x_ref.at[0, 9].set(0.0)
+
+    return x_ref, u_pred
+
 import mujoco
 from mujoco import mjx
 
@@ -1492,6 +1722,7 @@ import jax
 import jax.numpy as jnp
 from mujoco import mjx
 import jaxopt
+import qpax
 
 def whole_body_interface_wheeled_legged_qp(
     mjx_model,
@@ -1513,7 +1744,7 @@ def whole_body_interface_wheeled_legged_qp(
     w_friction_soft,   # penalità soft friction cone  (suggerito: 1e2)
     w_jnt_soft,        # penalità soft joint limits   (suggerito: 1e1)
     # ── runtime ───────────────────────────────────────────────────────────
-    qpos, qvel, desired,
+    time_frame, qpos, qvel, desired, warm_osqp, warm_state
 ):
     nq    = qpos.shape[0]
     nv    = mjx_model.nv
@@ -1530,6 +1761,7 @@ def whole_body_interface_wheeled_legged_qp(
     #     pinocchio::jacobianCenterOfMass / framesForwardKinematics /
     #     getFrameJacobian / getFrameJacobianTimeVariation
     # ══════════════════════════════════════════════════════════════════════
+    #jax.debug.callback(_tic_fwd, jnp.array(0))
     mjx_data = mjx.make_data(mjx_model)
     mjx_data = mjx_data.replace(qpos=qpos, qvel=qvel)
     mjx_data = mjx.fwd_position(mjx_model, mjx_data)
@@ -1547,6 +1779,8 @@ def whole_body_interface_wheeled_legged_qp(
     dqz = 0.5 * ( q_wxyz[0]*omega[2] + q_wxyz[1]*omega[1] - q_wxyz[2]*omega[0])
     dqpos = jnp.concatenate([qvel[:3], jnp.array([dqw, dqx, dqy, dqz]), qvel[6:]])
 
+    #jax.debug.callback(_toc_fwd, jnp.array(0))
+    #jax.debug.callback(_tic_jac, jnp.array(0))
     # helper per jvp
     def _jac_geom(qpos_, geom_id, bid):
         d_ = mjx.make_data(mjx_model)
@@ -1593,6 +1827,9 @@ def whole_body_interface_wheeled_legged_qp(
     )
     # ── J_com / J_com_dot (= jacobianCenterOfMass) ───────────────────────────
     J_com, J_com_dot = jax.jvp(_jac_com, (qpos,), (dqpos,))
+
+    #jax.debug.callback(_toc_jac, jnp.array(0))
+    #jax.debug.callback(_tic_pre_solver, jnp.array(0))
 
     #jax.debug.print("J_com = {}", J_com)
     #jax.debug.print("J_com_dot = {}", J_com_dot)
@@ -1925,14 +2162,14 @@ def whole_body_interface_wheeled_legged_qp(
     A_eq = jnp.vstack([
         jnp.hstack([A_roll_L,    zeros_f_eq[:3]]),   # rolling L  (3, n_var)
         jnp.hstack([A_roll_R,    zeros_f_eq[:3]]),   # rolling R  (3, n_var)
-        jnp.hstack([
-            jnp.zeros((2 * 3 * n_contacts, nv)),
-            A_no_contact,
-        ]),                                           # no_contact (6, n_var)  — zero block
+        #jnp.hstack([
+        #    jnp.zeros((2 * 3 * n_contacts, nv)),
+        #    A_no_contact,
+        #]),                                           # no_contact (6, n_var)  — zero block
         A_dyn,                                        # dynamics   (6, n_var)
     ])                                                # (18, n_var)
-    b_eq = jnp.concatenate([b_roll_L, b_roll_R, b_no_contact, b_dyn])  # (18,)
-
+    #b_eq = jnp.concatenate([b_roll_L, b_roll_R, b_no_contact, b_dyn])  # (18,)
+    b_eq = jnp.concatenate([b_roll_L, b_roll_R, b_dyn])  # (18,)
     # ══════════════════════════════════════════════════════════════════════
     #  7. BUILD C, d_min, d_max  (inequality block)
     #
@@ -1974,51 +2211,121 @@ def whole_body_interface_wheeled_legged_qp(
     #  → eq:   b_eq  ≤ A_eq   x ≤ b_eq    (hard equality)
     #  → ineq: d_min ≤ C_ineq x ≤ d_max
     # ══════════════════════════════════════════════════════════════════════
-    A_osqp = jnp.vstack([A_eq,  C_ineq])
-    l_osqp = jnp.concatenate([b_eq,  d_min_ineq])
-    u_osqp = jnp.concatenate([b_eq,  d_max_ineq])
-    solver = jaxopt.BoxOSQP(
-        momentum=1.6,
-        eq_qp_solve='lu',
-        tol=1e-4,
-        maxiter=4000,
-        jit=True,   # la funzione è già jit-compilata dall'esterno via jax.jit(jax.vmap(...))
-    )
-    sol_osqp, _state = solver.run(
-        params_obj=(H, f),
-        params_eq=A_osqp,              # solo la matrice A
-        params_ineq=(l_osqp, u_osqp),  # solo i bounds (l, u)
-    )
-    #jax.debug.print("H nan {val}", val=jnp.any(jnp.isnan(H)))
-    #jax.debug.print("Aeq nan {val}", val=jnp.any(jnp.isnan(A_eq)))
-    #jax.debug.print("beq nan {val}", val=jnp.any(jnp.isnan(b_eq)))
-    #jax.debug.print("rank H {val}", val=jnp.linalg.matrix_rank(H))
-    #jax.debug.print("Aeq shape {val}", val=A_eq.shape)
-    #jax.debug.print("rank Aeq {val}", val=jnp.linalg.matrix_rank(A_eq))
-    
-    #jax.debug.print("------\nrank A_eq {}", jnp.linalg.matrix_rank(A_eq))
-    #jax.debug.print("A_eq shape {}", A_eq.shape)
-    #jax.debug.print("rank A_osqp {}", jnp.linalg.matrix_rank(A_osqp))
-    #jax.debug.print("max eq residual {}", jnp.max(jnp.abs(A_eq @ sol_osqp.primal[0] - b_eq)))
-    #jax.debug.print("status {}", _state.status)
-    #jax.debug.print("error {}", _state.error)
+    G = jnp.vstack([C_ineq, -C_ineq])
+    h = jnp.concatenate([d_max_ineq, -d_min_ineq])
 
-    # q_ddot = solution.head(6 + n_joints_)
-    # flr = solution.tail(2 * 3 * n_contacts)
-    # fl  = flr.head(3 * n_contacts)
-    # fr  = flr.tail(3 * n_contacts)
-    qddot = sol_osqp.primal[0][:nv]
-    fl    = sol_osqp.primal[0][nv            : nv + n_f * n_contacts]
-    fr    = sol_osqp.primal[0][nv + n_f * n_contacts : nv + 2 * n_f * n_contacts]
 
+    #jax.debug.callback(_toc_pre_solver, jnp.array(0))
+    #jax.debug.callback(_tic_qpax, jnp.array(0))
+    x, s, z, y, converged, iters = qpax.solve_qp(
+        H, f, A_eq, b_eq, G, h,
+        solver_tol=1e-3,          # WBC non ha bisogno di 1e-8; alza per meno iter
+    )
+    #jax.debug.callback(_toc_qpax, (converged, iters))
+
+    #jax.debug.print("qpax converged={} iters={}", converged, iters)
+    #jax.debug.print("max eq residual {}", jnp.max(jnp.abs(A_eq @ x - b_eq)))
+    #jax.debug.print(
+    #    "nan H={hh} f={ff} Aeq={ae} beq={be} G={gg} h={hb}",
+    #    hh=jnp.any(jnp.isnan(H)),
+    #    ff=jnp.any(jnp.isnan(f)),
+    #    ae=jnp.any(jnp.isnan(A_eq)),
+    #    be=jnp.any(jnp.isnan(b_eq)),
+    #    gg=jnp.any(jnp.isnan(G)),
+    #    hb=jnp.any(jnp.isnan(h)),
+    #)
+    #jax.debug.print(
+    #    "rank_Aeq={r} rows={n}",
+    #    r=jnp.linalg.matrix_rank(A_eq),
+    #    n=A_eq.shape[0],
+    #)
+    #jax.debug.callback(_tic_post_solver, jnp.array(0))
+    qddot = x[:nv]
+    fl    = x[nv               : nv + n_f * n_contacts]
+    fr    = x[nv + n_f * n_contacts : nv + 2 * n_f * n_contacts]
     # ══════════════════════════════════════════════════════════════════════
     #  9. INVERSE DYNAMICS → TAU
     #     tau = Ma * q_ddot + ca - Jla' * T_l * fl - Jra' * T_r * fr
     # ══════════════════════════════════════════════════════════════════════
     tau = Ma @ qddot + ca - Jla.T @ T_l @ fl - Jra.T @ T_r @ fr
+    #jax.debug.print("tau = {val}", val=tau)
+    #jax.debug.callback(_toc_post_solver, jnp.array(0))
+    return tau, qddot, fl, fr, None, None
 
-    return tau, qddot, fl, fr
 
+import time
+
+_WBC_TIMING = {}
+
+
+def _tic_jac(_):
+    _WBC_TIMING["jac_t0"] = time.perf_counter()
+
+def _tic_post_solver(_):
+    _WBC_TIMING["post_solver_t0"] = time.perf_counter()
+
+
+def _toc_post_solver(_):
+    t0 = _WBC_TIMING.get("post_solver_t0", None)
+    if t0 is None:
+        print("[timing] post_solver: missing tic")
+        return
+
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+    print(f"[timing] post_solver+tau {dt_ms:.3f} ms")
+
+def _tic_fwd(_):
+    _WBC_TIMING["fwd_t0"] = time.perf_counter()
+
+
+def _toc_fwd(_):
+    t0 = _WBC_TIMING.get("fwd_t0", None)
+    if t0 is None:
+        print("[timing] mjx_fwd: missing tic")
+        return
+
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+    print(f"[timing] mjx_fwd+dqpos {dt_ms:.3f} ms")
+
+def _toc_jac(_):
+    t0 = _WBC_TIMING.get("jac_t0", None)
+    if t0 is None:
+        print("[timing] jacobian: missing tic")
+        return
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+    print(f"[timing] jacobian_build {dt_ms:.3f} ms")
+
+
+def _tic_pre_solver(_):
+    _WBC_TIMING["pre_solver_t0"] = time.perf_counter()
+
+
+def _toc_pre_solver(_):
+    t0 = _WBC_TIMING.get("pre_solver_t0", None)
+    if t0 is None:
+        print("[timing] pre_solver: missing tic")
+        return
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+    print(f"[timing] pre_solver_build {dt_ms:.3f} ms")
+
+
+def _tic_qpax(_):
+    _WBC_TIMING["qpax_t0"] = time.perf_counter()
+
+
+def _toc_qpax(info):
+    t0 = _WBC_TIMING.get("qpax_t0", None)
+    if t0 is None:
+        print("[timing] qpax: missing tic")
+        return
+
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+    converged, iters = info
+
+    print(
+        f"[timing] qpax.solve_qp {dt_ms:.3f} ms | "
+        f"converged={bool(converged)} | iters={int(iters)}"
+    )
 @partial(jax.jit, static_argnums=(0,1,2,3))
 def reference_barell_roll(N,dt,n_joints,n_contact,foot0,q0):
     t1 = 0.2

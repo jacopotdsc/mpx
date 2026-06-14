@@ -15,7 +15,7 @@ contact_frame = ['left_leg_4_collision', 'right_leg_4_collision',]
 body_name = ['left_leg_4', 'right_leg_4']
 
 # Time and stage parameters
-dt = 0.02  # Time step in seconds
+dt = 0.002  # Time step in seconds
 dt_mpc = 0.01
 N = 50        # Number of stages
 T_TRAJECTORY = 6
@@ -54,7 +54,7 @@ n_contact = len(contact_frame)  # Number of contact points
 nx =  13  # Number of states (pcom, dpcom, c, vcz, theta, v, omega)
 nu = 9 # Number of controls (F)
 mass = 27.6898
-d = 0.567  # half-wheelbase (m)
+d = 0.567  # leg distance (m)
 inertia = jnp.array([[ 1.1446753452439213,     -0.00002628867924503336, -0.024093265357648108],
                         [-0.00002628867924503336,  0.5535098529263547,     -0.00002104211459585719],
                         [-0.024093265357648108,   -0.00002104211459585719,  0.7015150712341189    ]])

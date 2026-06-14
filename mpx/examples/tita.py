@@ -41,7 +41,7 @@ os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 TITA_PATH = os.path.join(dir_path, "plots","tita_outputs")
 os.makedirs(TITA_PATH, exist_ok=True)
 
-MAX_STEPS = round(int(config.T_TRAJECTORY / config.dt_ref) + 1500 )
+MAX_STEPS = round(int( (2 + config.T_TRAJECTORY ) / config.dt_ref) )
 DEFAULT_VIDEO_SLOWDOWN_FACTOR = 1.0
 LLC_ROLLOUT_CSV = os.path.join(TITA_PATH, "rollout_info_llc.csv")
 TORQUE_LIST = []
@@ -492,7 +492,7 @@ def main(headless=False, steps=500, scene="flat"):
     pr_world_wbc = tita_state_wbc[9:12][None, :]
     dpl_world_wbc = tita_state_wbc[12:15][None, :]
     dpr_world_wbc = tita_state_wbc[15:18][None, :]
-    mpc_state, tau_cmd, qddot, fl, fr, desired = mpc.whole_body_run(
+    mpc_state, tau_cmd, qddot, fl, fr, desired, sol_osqp, _state = mpc.whole_body_run(
         mpc_state,
         x0,
         qpos_np,
@@ -502,6 +502,8 @@ def main(headless=False, steps=500, scene="flat"):
         pr_world_wbc,
         dpl_world_wbc,
         dpr_world_wbc,
+        prev_sol_osqp=None,
+        prev_state=None
     )
     jax.block_until_ready(tau_cmd)
     _dt = timer() - _t0
@@ -591,7 +593,7 @@ def main(headless=False, steps=500, scene="flat"):
         if debug_print:
             print(*args, **kwargs)
 
-    def step_controller(mpc_state, theta_prev=theta_prev):
+    def step_controller(mpc_state, sol_osqp, _state, theta_prev=theta_prev):
         nonlocal counter
 
         print(f"\n=== step {counter} ===")
@@ -604,9 +606,40 @@ def main(headless=False, steps=500, scene="flat"):
             contact_ids = sim_utils.geom_ids(model, config.contact_frame)
             tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
             x0, theta_prev = get_dfip_current_state(mpc, tita_state, theta_prev=theta_prev)
-
+            
+            start_time_mpc = timer()
             mpc_state, reference = mpc.run(mpc_state, x0[None, :], counter, config.N)
+            end_time_mpc = timer()
+            mpc_duration = end_time_mpc - start_time_mpc
+            print(f"[timing] mpc.run {mpc_duration * 1000:.2f} ms")
 
+            pl_world_wbc = tita_state[6:9][None, :]
+            pr_world_wbc = tita_state[9:12][None, :]
+            dpl_world_wbc = tita_state[12:15][None, :]
+            dpr_world_wbc = tita_state[15:18][None, :]
+
+            start_time_wbc = timer()
+            mpc_state, tau_cmd, qddot, fl, fr, desired, new_sol_osqp, new_state = mpc.whole_body_run(
+                mpc_state,
+                x0,
+                jnp.asarray(qpos)[None, :],
+                jnp.asarray(qvel)[None, :],
+                counter,
+                pl_world_wbc,
+                pr_world_wbc,
+                dpl_world_wbc,
+                dpr_world_wbc,
+                prev_sol_osqp=sol_osqp,
+                prev_state=_state
+            )
+            
+            end_time_wbc = timer()
+            wbc_duration = end_time_wbc - start_time_wbc
+            print(f"[timing] wbc.run {wbc_duration * 1000:.2f} ms")
+            
+            tau_to_apply = tau_cmd[0].copy()
+
+            
             def _f(v, d=4):
                 s = f"{float(v):.{d}f}"
                 return s if float(v) < 0 else f" {s}"
@@ -682,23 +715,6 @@ def main(headless=False, steps=500, scene="flat"):
 
             MPC_INPUT_LIST.append(np.asarray(x0).copy())
             MPC_OUTPUT_LIST.append(mpc_output)
-            
-            pl_world_wbc = tita_state[6:9][None, :]
-            pr_world_wbc = tita_state[9:12][None, :]
-            dpl_world_wbc = tita_state[12:15][None, :]
-            dpr_world_wbc = tita_state[15:18][None, :]
-
-            mpc_state, tau_cmd, qddot, fl, fr, desired = mpc.whole_body_run(
-                mpc_state,
-                x0,
-                jnp.asarray(qpos)[None, :],
-                jnp.asarray(qvel)[None, :],
-                counter,
-                pl_world_wbc,
-                pr_world_wbc,
-                dpl_world_wbc,
-                dpr_world_wbc,
-            )
 
             d = desired[0] if desired.ndim == 2 else desired
             _nj = model.nv - 6
@@ -721,29 +737,28 @@ def main(headless=False, steps=500, scene="flat"):
                 f"ddqj0={_f(d[mpc_utils._REF_JOINTS + 2*_nj + 0],4)}"
             )
 
-            tau_to_apply = tau_cmd[0].copy()
-
             c = build_wbc_current_vector(
                 model=model,
                 data=data,
                 contact_ids=contact_ids,
                 mpc_utils=mpc_utils,
-                nj=_nj,
+                nj=model.nv - 6,
             )
             
             TORQUE_LIST.append(tau_to_apply)
             FC_LIST.append( [fl[0].copy(), fr[0].copy()] )
             WBC_DESIRED_LIST.append(d.copy())
             WBC_CURRENT_LIST.append(c.copy())
+            
 
         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
 
-        do_print(
-            f"[WBC]\n"
-            f"  tau_cmd: {tau_to_apply}\n"
-            f"  contact_forces_left (fl): {fl[0]}\n"
-            f"  contact_forces_right (fr): {fr[0]}"
-        )
+        #do_print(
+        #    f"[WBC]\n"
+        #    f"  tau_cmd: {tau_to_apply}\n"
+        #    f"  contact_forces_left (fl): {fl[0]}\n"
+        #    f"  contact_forces_right (fr): {fr[0]}"
+        #)
 
         #_append_llc_row(
         #    LLC_ROLLOUT_CSV,
@@ -752,7 +767,7 @@ def main(headless=False, steps=500, scene="flat"):
         #    kp=getattr(config, "Kp_motion", 0.0),
         #    kd=getattr(config, "Kd_motion", 0.0),
         #)
-
+        '''
         if False and (counter % 50 == 0 and counter < 505) or touch_floor:
             X0_np = np.asarray(mpc_state.X0_shifted[0])   # (N+1, 13)
             U0_np = np.asarray(mpc_state.U0_shifted[0])  
@@ -773,7 +788,7 @@ def main(headless=False, steps=500, scene="flat"):
                 LLC_ROLLOUT_CSV,
                 out_path=os.path.join(TITA_PATH, f"llc.png"),
             )
-
+        '''
 
         q_target = np.array([0.0, 0.5, -1.0, 0.0,]*2)
         pd_tau = 70*(q_target - data.qpos[7:15]) - 0.5*data.qvel[6:14]
@@ -786,10 +801,10 @@ def main(headless=False, steps=500, scene="flat"):
         #print(f"Joint positions: {list(map(lambda x: round(float(x), 2), data.qpos[7:]))}")
         mujoco.mj_step(model, data)
         _renderer.update_scene(data, camera=_sim_cam)
-        if counter % 5 == 0:  # record every 2nd frame to reduce video size
+        if counter % 2 == 0:  # record every 2nd frame to reduce video size
             _sim_frames.append(_renderer.render().copy())
         counter += 1
-        return mpc_state, theta_prev, touch_floor
+        return mpc_state, theta_prev, touch_floor, sol_osqp, _state
 
     def _save_sim_video() -> None:
         print("Saving simulation video... ", end="\n", flush=True)
@@ -817,7 +832,7 @@ def main(headless=False, steps=500, scene="flat"):
 
     if headless:
         for _ in range(steps):
-            mpc_state, theta_prev, touch_floor = step_controller(mpc_state, theta_prev=theta_prev)
+            mpc_state, theta_prev, touch_floor, sol_osqp, _state = step_controller(mpc_state, sol_osqp, _state, theta_prev=theta_prev)
             if touch_floor:
                 print(f"Base touched the floor at step {counter}. Ending simulation.")
                 break
@@ -838,7 +853,7 @@ def main(headless=False, steps=500, scene="flat"):
 
             timestep_text = (
                 "Info",
-                f"step: {counter}\nsim time: {data.time:.3f} s",
+                f"step: {counter}/{MAX_STEPS}\nsim time: {data.time:.3f} s",
             )
 
             texts = []
@@ -848,7 +863,7 @@ def main(headless=False, steps=500, scene="flat"):
             texts.append((None, None, timestep_text[0], timestep_text[1]))
 
             viewer.set_texts(texts)
-            mpc_state, theta_prev, touch_floor = step_controller(mpc_state, theta_prev=theta_prev)
+            mpc_state, theta_prev, touch_floor, sol_osqp, _state = step_controller(mpc_state, sol_osqp, _state, theta_prev=theta_prev)
 
             toc = timer()
             if toc - tic < model.opt.timestep:
@@ -897,7 +912,7 @@ if __name__ == "__main__":
 
         plot_wbc_desired(
             desired_list=WBC_DESIRED_LIST,
-            current_list=None, #WBC_CURRENT_LIST,
+            current_list=WBC_CURRENT_LIST,
             mpc_utils=mpc_utils,
             nj=model.nv - 6,
             out_dir=TITA_PATH,

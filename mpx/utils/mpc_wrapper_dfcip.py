@@ -12,6 +12,7 @@ from mujoco import mjx
 import mpx.jax_ocp_solvers.optimizers as optimizers
 from jax import dlpack as jax_dlpack
 from timeit import default_timer as timer
+import time
 
 @struct.dataclass
 class ControlSol:
@@ -50,7 +51,7 @@ class BatchedMPCControllerWrapper:
         self.config = config
         self.mpc_frequency = config.mpc_frequency
         self.shift = 1# int(1 / (config.dt_mpc * config.mpc_frequency))
-        print(f"MPC update every {self.shift} simulation steps (mpc_frequency={self.mpc_frequency} Hz, dt={config.dt} s)")
+        print(f"MPC update every {self.shift} simulation steps (mpc_frequency={self.mpc_frequency} Hz, dt={config.dt_mpc} s)")
         
         # Timer and liftoff states for the reference generator.
         self.q0 = config.q0.copy()          # Initial joint configuration
@@ -144,7 +145,7 @@ class BatchedMPCControllerWrapper:
         _wjn = config.w_joint_vel  # penalità velocità articolari
 
 
-        def whole_body_control(qpos, qvel, desired):
+        def whole_body_control(time_frame, qpos, qvel, desired, prev_sol_osqp, prev_state):
             return mpc_utils.whole_body_interface_wheeled_legged_qp(
                 _mjx, config.mass, config.grav, config.d,
                 _cid, _bid, _bbid,
@@ -153,14 +154,15 @@ class BatchedMPCControllerWrapper:
                 _wq, _wc, _wl, _wrr, _wb,
                 _mu,
                 _wf, _wjn,
-                qpos, qvel, desired,
+                time_frame, qpos, qvel, desired, prev_sol_osqp, prev_state
             )
 
         self._solve = jax.jit(jax.vmap(work))
         #self._ref_gen = jax.jit(jax.vmap(reference_generator))
         self._ref_gen = jax.jit(reference_generator)
-        self._x_reference, self._u_reference = self._ref_gen(vel_lin=0.0, vel_ang=0.0, vel_z=0.0)
-        self._whole_body_interface = jax.jit(jax.vmap(whole_body_control))
+        self._x_reference, self._u_reference = self._ref_gen(vel_lin=0.5, vel_ang=0.0, vel_z=0.0)
+        self._build_desired_jit = jax.jit(self._build_desired_impl)
+        self._whole_body_interface = jax.jit(jax.vmap(whole_body_control, in_axes=(None, 0, 0, 0, 0, 0)))
 
         U0 = jnp.tile(config.u_ref, (config.N, 1))
         X0 = jnp.tile(self.initial_state, (config.N + 1, 1))
@@ -212,6 +214,8 @@ class BatchedMPCControllerWrapper:
         ref_slice = jnp.concatenate([x_slice, u_slice_pad], axis=1)  # (horizon+1, nx + nu)
         reference = jnp.tile(ref_slice[None, :, :], (self.n_env, 1, 1))
 
+        #reference = self._ref_gen(vel_lin=0.0, vel_ang=0.0, vel_z=0.0)
+
         parameter = None
 
         X, U, V = self._solve(
@@ -244,8 +248,16 @@ class BatchedMPCControllerWrapper:
 
         return new_state, reference
 
-    def whole_body_run(self, state: MPCState, x0, qpos, qvel, time_frame,
-                   pl_world, pr_world, dpl_world, dpr_world):
+    def _build_desired_impl(
+        self,
+        x0,
+        qpos,
+        state,
+        pl_world,
+        pr_world,
+        dpl_world,
+        dpr_world
+    ):
         B = qpos.shape[0]
         desired = jnp.zeros((B, self._desired_size))
         nv = self._mjx_model.nv
@@ -437,13 +449,39 @@ class BatchedMPCControllerWrapper:
         desired = desired.at[:, mpc_utils._REF_JOINTS:mpc_utils._REF_JOINTS + self._nj].set(qjnt_ref)
         desired = desired.at[:, mpc_utils._REF_JOINTS + self._nj:mpc_utils._REF_JOINTS + 2*self._nj].set(qjntdot_ref)
         desired = desired.at[:, mpc_utils._REF_JOINTS + 2*self._nj:mpc_utils._REF_JOINTS + 3*self._nj].set(qjntddot_ref)
+        
+        return desired
+    
+    def whole_body_run(self, state: MPCState, x0, qpos, qvel, time_frame,
+                   pl_world, pr_world, dpl_world, dpr_world, prev_sol_osqp, prev_state):
+        
+        #_t_total0 = time.perf_counter()
+        #_t_des0 = time.perf_counter()
 
-        # ── WBC solve ─────────────────────────────────────────────────────
-        tau_cmd, qddot, fl, fr = self._whole_body_interface(
-            qpos, qvel, desired,
+        desired = desired = self._build_desired_jit(
+            x0,
+            qpos,
+            state,
+            pl_world,
+            pr_world,
+            dpl_world,
+            dpr_world,
         )
 
-        return state, tau_cmd, qddot, fl, fr, desired
+        #jax.block_until_ready(desired)
+        #_t_des1 = time.perf_counter()
+        #jax.debug.print("[timing] whole_body_run desired_build {val} ms", val=(_t_des1 - _t_des0) * 1000:.3f)
+        # ── WBC solve ─────────────────────────────────────────────────────
+        #_t_wbc0 = time.perf_counter()
+        tau_cmd, qddot, fl, fr, sol_osqp, _state = self._whole_body_interface(
+            jnp.asarray(time_frame), qpos, qvel, desired, prev_sol_osqp, prev_state
+        )
+        #jax.block_until_ready(tau_cmd)
+        #_t_wbc1 = time.perf_counter()
+        #jax.debug.print("[timing] whole_body_run wbc_interface {val} ms", val=(_t_wbc1 - _t_wbc0) * 1000:.3f)
+        #_t_total1 = time.perf_counter()
+        #jax.debug.print("[timing] whole_body_run total {val} ms", val=(_t_total1 - _t_total0) * 1000:.3f)
+        return state, tau_cmd, qddot, fl, fr, desired, sol_osqp, _state
 
     def reset(self):
         """
