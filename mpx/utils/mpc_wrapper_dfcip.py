@@ -27,6 +27,8 @@ class MPCState:
     X0_shifted           : jax.Array
     U0_shifted           : jax.Array
     V0_shifted           : jax.Array
+    X_prediction         : jax.Array
+    U_prediction         : jax.Array
     # WBC warm-start
     #X0_wbc       : jax.Array
     #U0_wbc       : jax.Array
@@ -137,15 +139,12 @@ class BatchedMPCControllerWrapper:
         _Kpr   = config.Kp_reg;     _Kdr  = config.Kd_reg
         _wq    = config.w_qddot;    _wc   = config.w_com
         _wl    = config.w_lwheel;   _wrr  = config.w_rwheel;  _wb = config.w_base
-        #_weqr  = config.w_eq_roll;  _weqd = config.w_eq_dyn
         _mu    = config.mu               # 0.5 in C++
-        _wf    = config.w_friction       # peso penalità friction
 
         _Kpr = config.Kp_reg;  _Kdr = config.Kd_reg
-        _wjn = config.w_joint_vel  # penalità velocità articolari
 
 
-        def whole_body_control(time_frame, qpos, qvel, desired, prev_sol_osqp, prev_state):
+        def whole_body_control(qpos, qvel, desired):
             return mpc_utils.whole_body_interface_wheeled_legged_qp(
                 _mjx, config.mass, config.grav, config.d,
                 _cid, _bid, _bbid,
@@ -153,8 +152,7 @@ class BatchedMPCControllerWrapper:
                 _Kpm, _Kdm, _Kpw, _Kdw, _Kpr, _Kdr,   # ← ora 6 gains
                 _wq, _wc, _wl, _wrr, _wb,
                 _mu,
-                _wf, _wjn,
-                time_frame, qpos, qvel, desired, prev_sol_osqp, prev_state
+                qpos, qvel, desired
             )
 
         self._solve = jax.jit(jax.vmap(work))
@@ -162,7 +160,7 @@ class BatchedMPCControllerWrapper:
         self._ref_gen = jax.jit(reference_generator)
         self._x_reference, self._u_reference = self._ref_gen(vel_lin=0.5, vel_ang=0.0, vel_z=0.0)
         self._build_desired_jit = jax.jit(self._build_desired_impl)
-        self._whole_body_interface = jax.jit(jax.vmap(whole_body_control, in_axes=(None, 0, 0, 0, 0, 0)))
+        self._whole_body_interface = jax.jit(jax.vmap(whole_body_control))
 
         U0 = jnp.tile(config.u_ref, (config.N, 1))
         X0 = jnp.tile(self.initial_state, (config.N + 1, 1))
@@ -184,6 +182,8 @@ class BatchedMPCControllerWrapper:
             X0_shifted=self._X0_init, 
             U0_shifted=self._U0_init,
             V0_shifted=self._V0_init,
+            X_prediction=self._X0_init,
+            U_prediction=self._U0_init
         )
 
     def run(self, state: MPCState, x0, time_frame, horizon):
@@ -244,6 +244,8 @@ class BatchedMPCControllerWrapper:
             X0_shifted=new_X0, 
             U0_shifted=new_U0, 
             V0_shifted=new_V0,
+            X_prediction=X,
+            U_prediction=U,
         )
 
         return new_state, reference
@@ -452,11 +454,8 @@ class BatchedMPCControllerWrapper:
         
         return desired
     
-    def whole_body_run(self, state: MPCState, x0, qpos, qvel, time_frame,
-                   pl_world, pr_world, dpl_world, dpr_world, prev_sol_osqp, prev_state):
-        
-        #_t_total0 = time.perf_counter()
-        #_t_des0 = time.perf_counter()
+    def whole_body_run(self, state: MPCState, x0, qpos, qvel,
+                   pl_world, pr_world, dpl_world, dpr_world):
 
         desired = desired = self._build_desired_jit(
             x0,
@@ -468,20 +467,11 @@ class BatchedMPCControllerWrapper:
             dpr_world,
         )
 
-        #jax.block_until_ready(desired)
-        #_t_des1 = time.perf_counter()
-        #jax.debug.print("[timing] whole_body_run desired_build {val} ms", val=(_t_des1 - _t_des0) * 1000:.3f)
-        # ── WBC solve ─────────────────────────────────────────────────────
-        #_t_wbc0 = time.perf_counter()
-        tau_cmd, qddot, fl, fr, sol_osqp, _state = self._whole_body_interface(
-            jnp.asarray(time_frame), qpos, qvel, desired, prev_sol_osqp, prev_state
+        tau_cmd, qddot, fl, fr = self._whole_body_interface(
+            qpos, qvel, desired
         )
-        #jax.block_until_ready(tau_cmd)
-        #_t_wbc1 = time.perf_counter()
-        #jax.debug.print("[timing] whole_body_run wbc_interface {val} ms", val=(_t_wbc1 - _t_wbc0) * 1000:.3f)
-        #_t_total1 = time.perf_counter()
-        #jax.debug.print("[timing] whole_body_run total {val} ms", val=(_t_total1 - _t_total0) * 1000:.3f)
-        return state, tau_cmd, qddot, fl, fr, desired, sol_osqp, _state
+
+        return state, tau_cmd, qddot, fl, fr, desired
 
     def reset(self):
         """

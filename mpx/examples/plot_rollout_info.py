@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+from array import array
 import glob
 import os
 import re
@@ -288,6 +289,44 @@ def plot_wbc_desired(
 
         _setup_ax(ax, name, ylabel)
 
+    def _rotmat_to_rpy(R9):
+        """
+        R9: array (T, 9) con le entry della matrice di rotazione (row-major).
+        Ritorna (T, 3) -> roll, pitch, yaw  (convenzione ZYX).
+        """
+        R00 = R9[:, 0]
+        R10 = R9[:, 3]
+        R20 = R9[:, 6]
+        R21 = R9[:, 7]
+        R22 = R9[:, 8]
+
+        roll  = np.arctan2(R21, R22)
+        pitch = np.arctan2(-R20, np.sqrt(R21**2 + R22**2))
+        yaw   = np.arctan2(R10, R00)
+
+        return np.column_stack([roll, pitch, yaw])
+
+    def _plot_rpy(ax, base_idx, name, ylabel="[rad]"):
+        end = base_idx + 9
+
+        if end > desired.shape[1]:
+            ax.axis("off")
+            return
+
+        rpy_d = _rotmat_to_rpy(desired[:, base_idx:end])
+
+        rpy_c = None
+        if current is not None and end <= current.shape[1]:
+            rpy_c = _rotmat_to_rpy(current[:, base_idx:end])
+
+        for k, lab in enumerate(["roll", "pitch", "yaw"]):
+            ax.plot(t, rpy_d[:, k], label=f"{name}_{lab} desired")
+
+            if rpy_c is not None:
+                ax.plot(t, rpy_c[:, k], "--", label=f"{name}_{lab} current")
+
+        _setup_ax(ax, name, ylabel)
+
     def _plot_xyz(ax, base_idx, name, ylabel=None):
         for k, lab in enumerate(["x", "y", "z"]):
             idx = base_idx + k
@@ -356,12 +395,12 @@ def plot_wbc_desired(
         ylabel="[m/s²]",
     )
 
-    _plot_matrix_diag_or_entries(
+    _plot_rpy(
         axes[1, 1],
         mpc_utils._REF_BASE_ROT,
         "base_rot",
+        ylabel="[rad]",
     )
-
     _plot_xyz(
         axes[2, 0],
         mpc_utils._REF_BASE_OMG,

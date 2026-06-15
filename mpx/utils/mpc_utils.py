@@ -1741,10 +1741,8 @@ def whole_body_interface_wheeled_legged_qp(
     w_rwheel,   # params_.weight_rwheel
     w_base,     # params_.weight_base
     mu_,        # params_.mu
-    w_friction_soft,   # penalità soft friction cone  (suggerito: 1e2)
-    w_jnt_soft,        # penalità soft joint limits   (suggerito: 1e1)
     # ── runtime ───────────────────────────────────────────────────────────
-    time_frame, qpos, qvel, desired, warm_osqp, warm_state
+    qpos, qvel, desired
 ):
     nq    = qpos.shape[0]
     nv    = mjx_model.nv
@@ -1761,7 +1759,6 @@ def whole_body_interface_wheeled_legged_qp(
     #     pinocchio::jacobianCenterOfMass / framesForwardKinematics /
     #     getFrameJacobian / getFrameJacobianTimeVariation
     # ══════════════════════════════════════════════════════════════════════
-    #jax.debug.callback(_tic_fwd, jnp.array(0))
     mjx_data = mjx.make_data(mjx_model)
     mjx_data = mjx_data.replace(qpos=qpos, qvel=qvel)
     mjx_data = mjx.fwd_position(mjx_model, mjx_data)
@@ -1779,9 +1776,6 @@ def whole_body_interface_wheeled_legged_qp(
     dqz = 0.5 * ( q_wxyz[0]*omega[2] + q_wxyz[1]*omega[1] - q_wxyz[2]*omega[0])
     dqpos = jnp.concatenate([qvel[:3], jnp.array([dqw, dqx, dqy, dqz]), qvel[6:]])
 
-    #jax.debug.callback(_toc_fwd, jnp.array(0))
-    #jax.debug.callback(_tic_jac, jnp.array(0))
-    # helper per jvp
     def _jac_geom(qpos_, geom_id, bid):
         d_ = mjx.make_data(mjx_model)
         d_ = d_.replace(qpos=qpos_, qvel=qvel)
@@ -1828,24 +1822,6 @@ def whole_body_interface_wheeled_legged_qp(
     # ── J_com / J_com_dot (= jacobianCenterOfMass) ───────────────────────────
     J_com, J_com_dot = jax.jvp(_jac_com, (qpos,), (dqpos,))
 
-    #jax.debug.callback(_toc_jac, jnp.array(0))
-    #jax.debug.callback(_tic_pre_solver, jnp.array(0))
-
-    #jax.debug.print("J_com = {}", J_com)
-    #jax.debug.print("J_com_dot = {}", J_com_dot)
-    #jax.debug.print("J_left_wheel_lin = {}", J_left_wheel_lin)
-    #jax.debug.print("J_left_wheel_rot = {}", J_left_wheel_rot)
-    #jax.debug.print("J_left_wheel_dot_lin = {}", J_left_wheel_dot_lin)
-    #jax.debug.print("J_left_wheel_dot_rot = {}", J_left_wheel_dot_rot)
-    #jax.debug.print("J_right_wheel_lin = {}", J_right_wheel_lin)
-    #jax.debug.print("J_right_wheel_rot = {}", J_right_wheel_rot)
-    #jax.debug.print("J_right_wheel_dot_lin = {}", J_right_wheel_dot_lin)
-    #jax.debug.print("J_right_wheel_dot_rot = {}", J_right_wheel_dot_rot)
-    #jax.debug.print("J_base_link_rot = {}", J_base_link_rot)
-    #jax.debug.print("J_base_link_dot_rot = {}", J_base_link_dot_rot)
-    #jax.debug.print("J_base_link_rot = {}", J_base_link_rot)
-    #jax.debug.print("J_left_wheel_rot = {}", J_left_wheel_rot)
-    #jax.debug.print("J_right_wheel_rot = {}", J_right_wheel_rot)
 
     # ── posizioni / velocità correnti ─────────────────────────────────────────
     # robot_data_.oMf[right/left_leg4_idx_].translation() / .rotation()
@@ -1913,13 +1889,6 @@ def whole_body_interface_wheeled_legged_qp(
     # current_rwheel_vel   = J_right_wheel_.topRows(3) * qdot
     current_rwheel_pos = r_wheel_center
     current_rwheel_vel = J_right_wheel_lin @ qvel
-    #jax.debug.print("base_R = {}", current_base_link_pos)
-    #jax.debug.print("base_omega = {}", current_base_link_vel)
-    #jax.debug.print("com_pos = {} com_vel = {}", current_com_pos, current_com_vel)
-    #jax.debug.print("lwheel_pos = {} lwheel_vel = {}", current_lwheel_pos, current_lwheel_vel)
-    #jax.debug.print("rwheel_pos = {} rwheel_vel = {}", current_rwheel_pos, current_rwheel_vel)
-    #jax.debug.print("l_wheel_R = {}", l_wheel_R)
-    #jax.debug.print("r_wheel_R = {}", r_wheel_R)
     # ══════════════════════════════════════════════════════════════════════
     #  2. DESIRED ACCELERATIONS  (Compute desired accelerations)
     # ══════════════════════════════════════════════════════════════════════
@@ -2033,9 +2002,6 @@ def whole_body_interface_wheeled_legged_qp(
     # Se il tuo XML definisce <joint ... range="..." /> userai jnt_range; per vel usa un valore generoso
     vel_limit     = 20.0 * jnp.ones(nj)              # rad/s — adatta al tuo URDF
 
-    #jax.debug.print("q_jnt_min {val}", val=q_jnt_min)
-    #jax.debug.print("q_jnt_max {val}", val=q_jnt_max)
-    #jax.debug.print("vel_limit {val}", val=vel_limit)
 
     # C_acc.rightCols(nj).topRows(nj).diagonal()    = sample_time
     # C_acc.rightCols(nj).bottomRows(nj).diagonal() = sample_time^2 / 2
@@ -2190,16 +2156,6 @@ def whole_body_interface_wheeled_legged_qp(
     d_min_ineq = jnp.concatenate([d_min_acc, d_min_force_one, d_min_force_one])
     d_max_ineq = jnp.concatenate([d_max_acc, d_max_force_one, d_max_force_one])
 
-    #jax.debug.print(
-    #    "C_acc={cacc} Cfl={cfl} Cfr={cfr} Cineq={cineq} dmin={dmin} dmax={dmax} nvar={nvar}",
-    #    cacc=C_acc_ineq.shape,
-    #    cfl=C_force_left.shape,
-    #    cfr=C_force_right.shape,
-    #    cineq=C_ineq.shape,
-    #    dmin=d_min_ineq.shape,
-    #    dmax=d_max_ineq.shape,
-    #    nvar=n_var,
-    #)
     # ══════════════════════════════════════════════════════════════════════
     #  8. SOLVE QP  (wbc_solver_ptr_->solve — qui jaxopt.OSQP)
     #
@@ -2215,31 +2171,13 @@ def whole_body_interface_wheeled_legged_qp(
     h = jnp.concatenate([d_max_ineq, -d_min_ineq])
 
 
-    #jax.debug.callback(_toc_pre_solver, jnp.array(0))
     #jax.debug.callback(_tic_qpax, jnp.array(0))
     x, s, z, y, converged, iters = qpax.solve_qp(
         H, f, A_eq, b_eq, G, h,
-        solver_tol=1e-3,          # WBC non ha bisogno di 1e-8; alza per meno iter
+        solver_tol=1e-3,          
     )
     #jax.debug.callback(_toc_qpax, (converged, iters))
-
-    #jax.debug.print("qpax converged={} iters={}", converged, iters)
-    #jax.debug.print("max eq residual {}", jnp.max(jnp.abs(A_eq @ x - b_eq)))
-    #jax.debug.print(
-    #    "nan H={hh} f={ff} Aeq={ae} beq={be} G={gg} h={hb}",
-    #    hh=jnp.any(jnp.isnan(H)),
-    #    ff=jnp.any(jnp.isnan(f)),
-    #    ae=jnp.any(jnp.isnan(A_eq)),
-    #    be=jnp.any(jnp.isnan(b_eq)),
-    #    gg=jnp.any(jnp.isnan(G)),
-    #    hb=jnp.any(jnp.isnan(h)),
-    #)
-    #jax.debug.print(
-    #    "rank_Aeq={r} rows={n}",
-    #    r=jnp.linalg.matrix_rank(A_eq),
-    #    n=A_eq.shape[0],
-    #)
-    #jax.debug.callback(_tic_post_solver, jnp.array(0))
+    
     qddot = x[:nv]
     fl    = x[nv               : nv + n_f * n_contacts]
     fr    = x[nv + n_f * n_contacts : nv + 2 * n_f * n_contacts]
@@ -2248,9 +2186,8 @@ def whole_body_interface_wheeled_legged_qp(
     #     tau = Ma * q_ddot + ca - Jla' * T_l * fl - Jra' * T_r * fr
     # ══════════════════════════════════════════════════════════════════════
     tau = Ma @ qddot + ca - Jla.T @ T_l @ fl - Jra.T @ T_r @ fr
-    #jax.debug.print("tau = {val}", val=tau)
-    #jax.debug.callback(_toc_post_solver, jnp.array(0))
-    return tau, qddot, fl, fr, None, None
+    
+    return tau, qddot, fl, fr
 
 
 import time
