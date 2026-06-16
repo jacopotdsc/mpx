@@ -98,11 +98,11 @@ class BatchedMPCControllerWrapper:
         work = partial(optimizers.mpc, cost, dynamics, hessian_approx, False)
         
         # TODO: copy reference generator from colab - OK
-        reference_generator = partial(mpc_utils.reference_generator_dfcip_offline,
+        reference_generator_offline = partial(mpc_utils.reference_generator_dfcip_offline,
             pcom=(0.0, 0.0, 0.4), nx=config.nx, nu=config.nu, 
-            t_sec=config.T_TRAJECTORY, dt=config.dt_ref, m=config.mass, grav=config.grav)
+            t_sec=config.T_TRAJECTORY, dt=config.dt_mpc, m=config.mass, grav=config.grav)
 
-        #reference_generator = partial(mpc_utils.reference_generator_dfcip_online, config.N, config.dt, config.mass, config.grav)
+        reference_generator = partial(mpc_utils.reference_generator_dfcip_online, config.N, config.dt_mpc, config.mass, config.grav)
 
         # Whole-body controller: static args frozen via partial, runtime args
         # (X0_prev, U0_prev, V0_prev, qpos, qvel, desired) passed at call time.
@@ -156,11 +156,13 @@ class BatchedMPCControllerWrapper:
             )
 
         self._solve = jax.jit(jax.vmap(work))
-        #self._ref_gen = jax.jit(jax.vmap(reference_generator))
-        self._ref_gen = jax.jit(reference_generator)
-        self._x_reference, self._u_reference = self._ref_gen(vel_lin=0.5, vel_ang=0.0, vel_z=0.0)
+        self._ref_gen_offline = jax.jit(reference_generator_offline)
+        self._ref_gen = jax.jit(jax.vmap(reference_generator))
         self._build_desired_jit = jax.jit(self._build_desired_impl)
         self._whole_body_interface = jax.jit(jax.vmap(whole_body_control))
+
+        self._x_reference, self._u_reference = self._ref_gen_offline(vel_lin=0.5, vel_ang=0.0, vel_z=0.0)
+        
 
         U0 = jnp.tile(config.u_ref, (config.N, 1))
         X0 = jnp.tile(self.initial_state, (config.N + 1, 1))
@@ -186,7 +188,7 @@ class BatchedMPCControllerWrapper:
             U_prediction=self._U0_init
         )
 
-    def run(self, state: MPCState, x0, time_frame, horizon):
+    def run(self, state: MPCState, x0, cmd, time_frame, horizon):
         """
         Runs one MPC update using the current state, input, and foot positions.
         
@@ -211,15 +213,17 @@ class BatchedMPCControllerWrapper:
         x_slice = self._x_reference[x_idx, :]   # (horizon+1, nx)
         u_slice = self._u_reference[u_idx, :]   # (horizon,   nu)
         u_slice_pad = jnp.concatenate([u_slice, u_slice[-1:, :]], axis=0)
-        ref_slice = jnp.concatenate([x_slice, u_slice_pad], axis=1)  # (horizon+1, nx + nu)
-        reference = jnp.tile(ref_slice[None, :, :], (self.n_env, 1, 1))
-
-        #reference = self._ref_gen(vel_lin=0.0, vel_ang=0.0, vel_z=0.0)
-
+        ref_slice_offline = jnp.concatenate([x_slice, u_slice_pad], axis=1)  # (horizon+1, nx + nu)
+        reference_offline = jnp.tile(ref_slice_offline[None, :, :], (self.n_env, 1, 1))
+        
+        x_ref, u_ref = self._ref_gen(x0, cmd)
+        reference = jnp.concatenate([x_ref, u_ref], axis=-1)
+        
         parameter = None
 
         X, U, V = self._solve(
             reference,
+            #reference_offline,
             parameter,
             jnp.tile(self.config.W, (self.n_env, 1, 1)),
             x0,

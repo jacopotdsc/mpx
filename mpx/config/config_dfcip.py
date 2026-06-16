@@ -29,6 +29,7 @@ duty_factor = 0.65  # Duty factor for the gait
 step_freq = 1.35   # Step frequency in Hz
 step_height = 0.065  # Step height in meters
 robot_height = 0.44  # Height of the robot's base in meters
+com_z_to_track = 0.4
 clearence_speed = 0.4
 mu = 0.6  # Coefficient of friction
 use_terrain_estimator = False  # Whether to use state estimation
@@ -73,16 +74,14 @@ Kp_motion = 5e1
 Kd_motion = 3e1
 Kp_wheel  = 5e1
 Kd_wheel  = 3e1 
-Kp_reg    = 3e1 
-Kd_reg    = 2e1 
+Kp_reg    = 1e3 
+Kd_reg    = 5e1 
 
-w_qddot     = 1e-3
-w_com       = 1e1
-w_lwheel    = 1e1
-w_rwheel    = 1e1
-w_base      = 1e1
-w_friction  = 1e2
-w_joint_vel = 1e-2
+w_qddot     = 0e0
+w_com       = 1e0
+w_lwheel    = 1e0
+w_rwheel    = 1e0
+w_base      = 1e-2
 
 # Cost matrices (diagonal matrices created using jnp.diag)
 Qp    = jnp.diag(jnp.array([1e2, 1e2, 1e3]))  # Cost matrix for position
@@ -106,30 +105,56 @@ Qgrf = jnp.diag(jnp.array([1e0, 1e0, 1e0]))  # Cost matrix for
 
 # ── MPC cost weights ──────────────────────────────────────────────
 # State weights
-w_pcomxy = 1e0      # posizione xy (0 = non tracki, segui il ref generator)
-w_pcomz  = 1e3     # altezza CoM
-w_vcomxy = 1e2      # velocità xy CoM
-w_vcomz  = 1e1      # velocità z CoM
-w_c      = 1e2      # posizione contact point
-w_vcz    = 1e1      # velocità verticale contact point
-w_theta  = 1e2      # heading
-w_v      = 1e1      # velocità longitudinale
-w_omega  = 1e1      # velocità angolare
+w_pcomxy = 1e2      # posizione xy
+w_pcomz  = 1e4     # altezza CoM
+w_vcomxy = 1e1      # velocità xy CoM
+w_vcomz  = 1e0      # velocità z CoM
+w_c      = 0e0      # posizione com_ground projection
+w_vcz    = 0e0      # velocità com_ground projection
+w_theta  = 0e0      # heading
+w_v      = 0e0      # velocità com_ground projection
+w_omega  = 5e0      # velocità angolare
 
 # Control weights – ruote (attuatori principali, non troppo economici)
 w_a      = 1e-1      # accelerazione lineare
 w_ac_z   = 1e-1      # accelerazione verticale
-w_alpha  = 1e-1      # accelerazione angolare
+w_alpha  = 1e-3      # accelerazione angolare
 
 # Control weights – GRF (gambe = supporto verticale, non locomozione)
-w_fcxy   = 1e-2      # forze orizzontali → penalizza, devono stare ~0
-w_fcz    = 1e-3     # forza verticale  → libera di adattarsi
+w_fcxy   = 1e-4      # forze orizzontali → penalizza, devono stare ~0
+w_fcz    = 1e-4     # forza verticale  → libera di adattarsi
 
 # Equality constraints
 w_eq     = 1e6     # momento + contatto
 
+
+'''
+w_pcomxy = 5e1      # posizione xy
+w_pcomz  = 3e4     # altezza CoM
+w_vcomxy = 1e2      # velocità xy CoM
+w_vcomz  = 1e0      # velocità z CoM
+w_c      = 1e1      # posizione com_ground projection
+w_vcz    = 0e0      # velocità com_ground projection
+w_theta  = 0e0      # heading
+w_v      = 0e0      # velocità com_ground projection
+w_omega  = 5e0      # velocità angolare
+
+# Control weights – ruote (attuatori principali, non troppo economici)
+w_a      = 1e-1      # accelerazione lineare
+w_ac_z   = 1e-1      # accelerazione verticale
+w_alpha  = 1e-3      # accelerazione angolare
+
+# Control weights – GRF (gambe = supporto verticale, non locomozione)
+w_fcxy   = 1e-6      # forze orizzontali → penalizza, devono stare ~0
+w_fcz    = 1e-3     # forza verticale  → libera di adattarsi
+
+# Equality constraints
+w_eq     = 1e5     # momento + contatto
+
+'''
+
 # ── Assemble W (15×15 diagonal) ──────────────────────────────────
-W = jnp.diag(jnp.array([
+W = 1e0 * jnp.diag(jnp.array([
     w_pcomxy, w_pcomz,
     w_vcomxy, w_vcomz,
     w_c,      w_vcz,

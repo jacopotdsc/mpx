@@ -64,8 +64,6 @@ def wheeled_dfcip_obj(wheel_offset, N, W, reference, x, u, t):
         + 0.5 * w_fcz    *         (fr[2]    - u_ref[8])   ** 2
         + 0.5 * w_eq     *          h_contact ** 2
         + 0.5 * w_eq     * jnp.dot(h_moment, h_moment)
-        + 0.5 * w_eq     *          h_fz
-        + 0.5 * w_eq     * jnp.dot(h_stability, h_stability)
     )
  
     term_cost = (
@@ -83,7 +81,6 @@ def wheeled_dfcip_obj(wheel_offset, N, W, reference, x, u, t):
     )
  
     return jnp.where(t == N, term_cost, stage_cost)
- 
  
 def wheeled_dfcip_hessian_gn(wheel_offset, N, W, reference, x, u, t):
     """Hessiana Gauss-Newton COERENTE con wheeled_dfcip_obj (stesso residuo)."""
@@ -130,8 +127,8 @@ def wheeled_dfcip_hessian_gn(wheel_offset, N, W, reference, x, u, t):
             u - u_ref,
             h_contact,
             h_moment,
-            h_fz,
-            h_stability,
+            jnp.zeros_like(h_fz),
+            jnp.zeros_like(h_stability),
         ])  # (30,)
  
         term_res = jnp.concatenate([
@@ -151,7 +148,14 @@ def wheeled_dfcip_hessian_gn(wheel_offset, N, W, reference, x, u, t):
  
     Jx = jax.jacobian(residual, 0)(x, u)
     Ju = jax.jacobian(residual, 1)(x, u)
-    return Jx.T @ W_res @ Jx, Ju.T @ W_res @ Ju, Jx.T @ W_res @ Ju
+    
+    Lxx = Jx.T @ W_res @ Jx
+    Luu = Ju.T @ W_res @ Ju
+    Lxu = Jx.T @ W_res @ Ju
+    
+    return Lxx, Luu, Lxu
+
+    #return Jx.T @ W_res @ Jx, Ju.T @ W_res @ Ju, Jx.T @ W_res @ Ju
 
 def quadruped_srbd_obj(n_contact,N,W,reference,x, u, t):
 

@@ -136,6 +136,14 @@ class KeyboardVelocityCommand:
             [self.vx, self.vy, 0.0, 0.0, 0.0, self.wz, robot_height],
             dtype=np.float64,
         )
+    
+    def mpc_wheeled_input(self, com_z_to_track: float) -> np.ndarray:
+        """Return the 7D locomotion command used by the MPC examples."""
+
+        return np.array(
+            [self.vx, self.vy, 0.0, 0.0, 0.0, self.wz, com_z_to_track],
+            dtype=np.float64,
+        )
 
     def overlay_text(self) -> tuple[str, str]:
         """Return short viewer text showing controls and the current command."""

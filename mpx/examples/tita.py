@@ -1,5 +1,6 @@
 import argparse
 import csv
+from pyexpat import model
 import shutil
 import os
 #os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2" 
@@ -42,7 +43,7 @@ TITA_PATH = os.path.join(dir_path, "plots","tita_outputs")
 os.makedirs(TITA_PATH, exist_ok=True)
 
 MAX_STEPS = round(int( (2 + config.T_TRAJECTORY ) / config.dt_ref) )
-DEFAULT_VIDEO_SLOWDOWN_FACTOR = 1.0
+DEFAULT_VIDEO_SLOWDOWN_FACTOR = 4.0
 LLC_ROLLOUT_CSV = os.path.join(TITA_PATH, "rollout_info_llc.csv")
 TORQUE_LIST = []
 FC_LIST = []
@@ -52,6 +53,8 @@ X_DES_LIST = []
 U_DES_LIST = []
 WBC_DESIRED_LIST = []
 WBC_CURRENT_LIST = []
+MPC_PREDICTION_FRAMES = {}
+CMD = [0.5, 0.0, 0.0] 
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -72,6 +75,100 @@ from plot_rollout_info import (
     plot_wbc_desired,
 )
 
+def update_com_tracking_camera(cam, model, data, base_body_id, alpha=0.10):
+    """
+    Camera free che segue il CoM del robot.
+    alpha basso = tracking smooth.
+    alpha = 1.0 = tracking istantaneo.
+    """
+    mujoco.mj_subtreeVel(model, data)
+
+    com = np.asarray(data.subtree_com[base_body_id]).copy()
+
+    # opzionale: blocca un po' la quota del lookat per evitare tremolio verticale
+    # com[2] = 0.40
+
+    cam.lookat[:] = (1.0 - alpha) * cam.lookat + alpha * com
+    
+def store_mpc_prediction_frame(
+    storage: dict,
+    timeframe: int,
+    X0_np,
+    x_ref,
+    U0_np,
+    u_ref,
+    cmd,
+):
+    """
+    storage[timeframe] = {
+        "X0_np": ...,
+        "x_ref": ...,
+        "U0_np": ...,
+        "u_ref": ...,
+        "cmd": ...
+    }
+    """
+
+    storage[int(timeframe)] = {
+        "X0_np": np.asarray(X0_np).copy(),
+        "x_ref": np.asarray(x_ref).copy(),
+        "U0_np": np.asarray(U0_np).copy(),
+        "u_ref": np.asarray(u_ref).copy(),
+        "cmd": np.asarray(cmd).copy(),
+    }
+
+def plot_mpc_prediction_frames(
+    prediction_frames: dict,
+    out_dir: str,
+):
+    """
+    Generate MPC state/control prediction plots for every saved timeframe.
+
+    Expected structure:
+
+    prediction_frames[timeframe] = {
+        "X0_np": (N+1, nx),
+        "x_ref": (N+1, nx),
+        "U0_np": (N, nu) or (N+1, nu),
+        "u_ref": (N+1, nu),
+        "cmd": command array
+    }
+    """
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    if len(prediction_frames) == 0:
+        print("[plot_mpc_prediction_frames] no frames to plot.")
+        return
+
+    for timeframe in sorted(prediction_frames.keys()):
+        item = prediction_frames[timeframe]
+
+        X0_np = item["X0_np"]
+        x_ref = item["x_ref"]
+        U0_np = item["U0_np"]
+        u_ref = item["u_ref"]
+        cmd   = item["cmd"]
+
+        plot_mpc_prediction_state(
+            X0_np,
+            x_ref=x_ref,
+            cmd=cmd,
+            timestep=timeframe,
+            filename=f"state_mpc_t{timeframe:06d}.png",
+            out_dir=os.path.join(out_dir, "state"),
+        )
+
+        plot_mpc_prediction_control(
+            U0_np,
+            u_ref=u_ref,
+            cmd=cmd,
+            timestep=timeframe,
+            filename=f"control_mpc_t{timeframe:06d}.png",
+            out_dir=os.path.join(out_dir, "control"),
+        )
+
+    print(f"[plot_mpc_prediction_frames] saved {len(prediction_frames)} frames in {out_dir}")
 
 def _snapshot_config_to_txt(output_dir: str = TITA_PATH) -> None:
     """Copy the active MPC config file to txt so run weights are traceable."""
@@ -116,6 +213,220 @@ def _append_llc_row(
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+def debug_dfcip_ref0_cost_terms(reference, W, wheel_offset, N=None, prefix="[ref0 cost]"):
+    """
+    Debug dei termini del costo DFCIP valutati su:
+        x = x_ref[0]
+        u = u_ref[0]
+
+    reference shape:
+        (N+1, nx+nu) oppure (B, N+1, nx+nu)
+
+    W shape:
+        (15, 15)
+    """
+
+    ref = np.asarray(reference)
+
+    if ref.ndim == 3:
+        ref = ref[0]
+
+    W_np = np.asarray(W)
+
+    x_ref = ref[:, :13]
+    u_ref = ref[:, 13:22]
+
+    x = x_ref[0]
+    u = u_ref[0]
+
+    pcom = x[0:3]
+    vcom = x[3:6]
+    c = x[6:9]
+
+    vc_z = x[9]
+    theta = x[10]
+    v = x[11]
+    omega = x[12]
+
+    a = u[0]
+    ac_z = u[1]
+    alpha = u[2]
+
+    fl = u[3:6]
+    fr = u[6:9]
+
+    xr = x_ref[0]
+    ur = u_ref[0]
+
+    vector_off = np.array([0.0, wheel_offset / 2.0, 0.0])
+
+    R = np.array([
+        [np.cos(theta), -np.sin(theta), 0.0],
+        [np.sin(theta),  np.cos(theta), 0.0],
+        [0.0,            0.0,           1.0],
+    ])
+
+    pl = c + R @ vector_off
+    pr = c - R @ vector_off
+
+    h_contact = vc_z
+    h_moment = np.cross(pl - pcom, fl) + np.cross(pr - pcom, fr)
+    h_stability = pcom[:2] - c[:2]
+
+    h_fz_raw = np.array([
+        min(fl[2], 0.0),
+        min(fr[2], 0.0),
+    ])
+
+    h_fz_cost_style = min(fl[2], 0.0) ** 2 + min(fr[2], 0.0) ** 2
+
+    w_pcomxy = W_np[0, 0]
+    w_pcomz = W_np[1, 1]
+    w_vcomxy = W_np[2, 2]
+    w_vcomz = W_np[3, 3]
+    w_c = W_np[4, 4]
+    w_vcz = W_np[5, 5]
+    w_theta = W_np[6, 6]
+    w_v = W_np[7, 7]
+    w_w = W_np[8, 8]
+
+    w_a = W_np[9, 9]
+    w_ac_z = W_np[10, 10]
+    w_alpha = W_np[11, 11]
+
+    w_fcxy = W_np[12, 12]
+    w_fcz = W_np[13, 13]
+    w_eq = W_np[14, 14]
+
+    terms = {
+        "pcom_xy": 0.5 * w_pcomxy * np.sum((pcom[:2] - xr[0:2]) ** 2),
+        "pcom_z":  0.5 * w_pcomz  *        (pcom[2]  - xr[2])   ** 2,
+
+        "vcom_xy": 0.5 * w_vcomxy * np.sum((vcom[:2] - xr[3:5]) ** 2),
+        "vcom_z":  0.5 * w_vcomz  *        (vcom[2]  - xr[5])   ** 2,
+
+        "c_xyz":   0.5 * w_c      * np.sum((c        - xr[6:9]) ** 2),
+        "vcz":     0.5 * w_vcz    *        (vc_z     - xr[9])   ** 2,
+        "theta":   0.5 * w_theta  *        (theta    - xr[10])  ** 2,
+        "v":       0.5 * w_v      *        (v        - xr[11])  ** 2,
+        "omega":   0.5 * w_w      *        (omega    - xr[12])  ** 2,
+
+        "a":       0.5 * w_a      *        (a        - ur[0])   ** 2,
+        "ac_z":    0.5 * w_ac_z   *        (ac_z     - ur[1])   ** 2,
+        "alpha":   0.5 * w_alpha  *        (alpha    - ur[2])   ** 2,
+
+        "fl_xy":   0.5 * w_fcxy   * np.sum((fl[:2]   - ur[3:5]) ** 2),
+        "fl_z":    0.5 * w_fcz    *        (fl[2]    - ur[5])   ** 2,
+        "fr_xy":   0.5 * w_fcxy   * np.sum((fr[:2]   - ur[6:8]) ** 2),
+        "fr_z":    0.5 * w_fcz    *        (fr[2]    - ur[8])   ** 2,
+
+        "h_contact":   0.5 * w_eq * h_contact ** 2,
+        "h_moment":    0.5 * w_eq * np.dot(h_moment, h_moment),
+        "h_stability": 0.5 * w_eq * np.dot(h_stability, h_stability),
+        "h_fz_raw_unused": 0.5 * w_eq * h_fz_cost_style,
+    }
+
+    running_total = (
+        terms["pcom_xy"]
+        + terms["pcom_z"]
+        + terms["vcom_xy"]
+        + terms["vcom_z"]
+        + terms["c_xyz"]
+        + terms["vcz"]
+        + terms["theta"]
+        + terms["v"]
+        + terms["omega"]
+        + terms["a"]
+        + terms["ac_z"]
+        + terms["alpha"]
+        + terms["fl_xy"]
+        + terms["fl_z"]
+        + terms["fr_xy"]
+        + terms["fr_z"]
+        + terms["h_contact"]
+        + terms["h_moment"]
+    )
+
+    terminal_total = (
+        terms["pcom_xy"]
+        + terms["pcom_z"]
+        + terms["vcom_xy"]
+        + terms["vcom_z"]
+        + terms["c_xyz"]
+        + terms["vcz"]
+        + terms["theta"]
+        + terms["v"]
+        + terms["omega"]
+        + terms["h_contact"]
+        + terms["h_stability"]
+    )
+
+    def fmt_vec(v):
+        return np.array2string(np.asarray(v), precision=6, suppress_small=True)
+
+    print("\n" + "═" * 80)
+    print(f"{prefix}")
+    print("═" * 80)
+
+    print("\n── x_ref[0] ──")
+    print(f"pcom      = {fmt_vec(pcom)}")
+    print(f"vcom      = {fmt_vec(vcom)}")
+    print(f"c         = {fmt_vec(c)}")
+    print(f"vc_z      = {vc_z:.8f}")
+    print(f"theta     = {theta:.8f}")
+    print(f"v         = {v:.8f}")
+    print(f"omega     = {omega:.8f}")
+
+    print("\n── u_ref[0] ──")
+    print(f"a         = {a:.8f}")
+    print(f"ac_z      = {ac_z:.8f}")
+    print(f"alpha     = {alpha:.8f}")
+    print(f"fl        = {fmt_vec(fl)}")
+    print(f"fr        = {fmt_vec(fr)}")
+    print(f"fl + fr   = {fmt_vec(fl + fr)}")
+
+    print("\n── contact points from x_ref[0] ──")
+    print(f"pl        = {fmt_vec(pl)}")
+    print(f"pr        = {fmt_vec(pr)}")
+    print(f"pcom-c    = {fmt_vec(pcom - c)}")
+    print(f"pcom_xy-c_xy = {fmt_vec(h_stability)}")
+
+    print("\n── constraints / residuals at x_ref[0], u_ref[0] ──")
+    print(f"h_contact       = {h_contact:.10f}")
+    print(f"h_moment        = {fmt_vec(h_moment)}")
+    print(f"||h_moment||    = {np.linalg.norm(h_moment):.10f}")
+    print(f"h_stability     = {fmt_vec(h_stability)}")
+    print(f"||h_stability|| = {np.linalg.norm(h_stability):.10f}")
+    print(f"h_fz_raw        = {fmt_vec(h_fz_raw)}")
+    print(f"h_fz_cost_style = {h_fz_cost_style:.10f}")
+
+    print("\n── weights ──")
+    print(f"w_pcomxy = {w_pcomxy:.3e}")
+    print(f"w_pcomz  = {w_pcomz:.3e}")
+    print(f"w_vcomxy = {w_vcomxy:.3e}")
+    print(f"w_vcomz  = {w_vcomz:.3e}")
+    print(f"w_c      = {w_c:.3e}")
+    print(f"w_vcz    = {w_vcz:.3e}")
+    print(f"w_theta  = {w_theta:.3e}")
+    print(f"w_v      = {w_v:.3e}")
+    print(f"w_omega  = {w_w:.3e}")
+    print(f"w_a      = {w_a:.3e}")
+    print(f"w_ac_z   = {w_ac_z:.3e}")
+    print(f"w_alpha  = {w_alpha:.3e}")
+    print(f"w_fcxy   = {w_fcxy:.3e}")
+    print(f"w_fcz    = {w_fcz:.3e}")
+    print(f"w_eq     = {w_eq:.3e}")
+
+    print("\n── individual cost terms at x_ref[0], u_ref[0] ──")
+    for k, val in terms.items():
+        print(f"{k:18s}: {val:.10e}")
+
+    print("\n── totals ──")
+    print(f"running_total  = {running_total:.10e}")
+    print(f"terminal_total = {terminal_total:.10e}")
+
+    print("═" * 80 + "\n")
 
 def _reset_to_initial_state(model, data):
     try:
@@ -350,12 +661,25 @@ def main(headless=False, steps=500, scene="flat"):
     # ── MuJoCo video recording ───────────────────────────────────────────
     _sim_frames: list = []
     _renderer = mujoco.Renderer(model, height=480, width=640)
+
     _sim_cam = mujoco.MjvCamera()
     mujoco.mjv_defaultCamera(_sim_cam)
+
     _sim_cam.type = mujoco.mjtCamera.mjCAMERA_FREE
     _sim_cam.distance = 8.0
     _sim_cam.elevation = -15.0
     _sim_cam.azimuth = 60.0
+
+    # body da usare per il CoM
+    _sim_base_body_id = mujoco.mj_name2id(
+        model,
+        mujoco.mjtObj.mjOBJ_BODY,
+        config.base_body_name,
+    )
+
+    # inizializza lookat sul CoM
+    mujoco.mj_subtreeVel(model, data)
+    _sim_cam.lookat[:] = np.asarray(data.subtree_com[_sim_base_body_id])
     # ────────────────────────────────────────────────────────────────────
     model.opt.timestep = 1.0 / sim_frequency
     
@@ -396,8 +720,6 @@ def main(headless=False, steps=500, scene="flat"):
     print(f"omega:   {x0[12]}")
     print(f"robot floating base: {config.robot_height}")
     print(f"robot com: {data.subtree_com[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'base_link')]}")
-    print(f"x_ref step0: {mpc._x_reference[0, :13]}")
-    print(f"u_ref step0: {mpc._u_reference[0, :9]}")
     
     mpc_state = mpc.init_state()
 
@@ -416,8 +738,10 @@ def main(headless=False, steps=500, scene="flat"):
     print("────────────────────\n")
 
     print("[timing] mpc.run  ... ", end="", flush=True)
+    cmd = command_handle.mpc_wheeled_input(config.com_z_to_track) 
+    cmd = jnp.asarray(CMD)[None, :]
     _t0 = timer()
-    mpc_state, reference = mpc.run(mpc_state, x0[None, :], counter, config.N)
+    mpc_state, reference = mpc.run(mpc_state, x0[None, :], cmd, counter, config.N)
     jax.block_until_ready(mpc_state.U0_shifted)
     _dt = timer() - _t0
     print(f"{int(_dt // 60)}m {_dt % 60:.1f}s")
@@ -434,6 +758,22 @@ def main(headless=False, steps=500, scene="flat"):
     _u_names = ["a", "acz", "α", "Fl_x", "Fl_y", "Fl_z", "Fr_x", "Fr_y", "Fr_z"]
 
     _PREFIX = "  step  0: "   # 11 chars — aligns header with data rows
+
+    def clean_plots_prediction(path: str):
+        n_removed = 0
+        for name in os.listdir(path):
+            item_path = os.path.join(path, name)
+
+            if os.path.isfile(item_path) or os.path.islink(item_path):
+                os.remove(item_path)
+                n_removed += 1
+            elif os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+                n_removed += 1
+        
+        print(f"[clean] cleared directory: {path}  |  removed {n_removed} items")
+
+    clean_plots_prediction(os.path.join(TITA_PATH, "mpc_prediction"))
 
     def _fmt_row(names, values, w=10):
         header = "".join(f"{n:>{w}}" for n in names)
@@ -456,18 +796,21 @@ def main(headless=False, steps=500, scene="flat"):
     print(f"  step  N: {rN}")
     print()
 
-    #plot_mpc_prediction_state(
-    #    mpc_state.X0_shifted[0],
-    #    timestep=0,
-    #    filename="state_mpc_t000.png",
-    #    out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
-    #)
-    #plot_mpc_prediction_control(
-    #    mpc_state.U0_shifted[0],
-    #    timestep=0,
-    #    filename="control_mpc_t000.png",
-    #    out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
-    #)
+    plot_mpc_prediction_state(
+        mpc_state.X_prediction[0],
+        x_ref = reference[0][:, :config.nx],
+        cmd=cmd,
+        timestep=0,
+        filename="dummy_state_mpc_t000.png",
+        out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
+    )
+    plot_mpc_prediction_control(
+        mpc_state.U_prediction[0],
+        u_ref = reference[0][:, config.nx:],
+        timestep=0,
+        filename="dummy_control_mpc_t000.png",
+        out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
+    )
 
     # ── run WBC and print results ─────────────────────────────────────────
     
@@ -478,7 +821,7 @@ def main(headless=False, steps=500, scene="flat"):
     _wbc_params = [
         "base_body_name", "wheel_radius",
         "Kp_motion", "Kd_motion", "Kp_wheel", "Kd_wheel", "Kp_reg", "Kd_reg",
-        "w_qddot", "w_com", "w_lwheel", "w_rwheel", "w_base", "w_friction", "w_joint_vel",
+        "w_qddot", "w_com", "w_lwheel", "w_rwheel", "w_base",
     ]
     print("\n── WBC parameters ──")
     for _p in _wbc_params:
@@ -492,18 +835,15 @@ def main(headless=False, steps=500, scene="flat"):
     pr_world_wbc = tita_state_wbc[9:12][None, :]
     dpl_world_wbc = tita_state_wbc[12:15][None, :]
     dpr_world_wbc = tita_state_wbc[15:18][None, :]
-    mpc_state, tau_cmd, qddot, fl, fr, desired, sol_osqp, _state = mpc.whole_body_run(
+    mpc_state, tau_cmd, qddot, fl, fr, desired = mpc.whole_body_run(
         mpc_state,
         x0,
         qpos_np,
         qvel_np,
-        counter,
         pl_world_wbc,
         pr_world_wbc,
         dpl_world_wbc,
-        dpr_world_wbc,
-        prev_sol_osqp=None,
-        prev_state=None
+        dpr_world_wbc
     )
     jax.block_until_ready(tau_cmd)
     _dt = timer() - _t0
@@ -593,10 +933,11 @@ def main(headless=False, steps=500, scene="flat"):
         if debug_print:
             print(*args, **kwargs)
 
-    def step_controller(mpc_state, sol_osqp, _state, theta_prev=theta_prev):
+    def step_controller(mpc_state, cmd, theta_prev=theta_prev):
         nonlocal counter
 
         print(f"\n=== step {counter} ===")
+        print(F"command: {cmd[0,0]:.2f} m/s forward, {cmd[0,1]:.2f} m/s lateral, {cmd[0,2]:.2f} rad/s angular")
         
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
@@ -606,9 +947,9 @@ def main(headless=False, steps=500, scene="flat"):
             contact_ids = sim_utils.geom_ids(model, config.contact_frame)
             tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
             x0, theta_prev = get_dfip_current_state(mpc, tita_state, theta_prev=theta_prev)
-            
+
             start_time_mpc = timer()
-            mpc_state, reference = mpc.run(mpc_state, x0[None, :], counter, config.N)
+            mpc_state, reference = mpc.run(mpc_state, x0[None, :], cmd, counter, config.N)
             end_time_mpc = timer()
             mpc_duration = end_time_mpc - start_time_mpc
             print(f"[timing] mpc.run {mpc_duration * 1000:.2f} ms")
@@ -619,18 +960,15 @@ def main(headless=False, steps=500, scene="flat"):
             dpr_world_wbc = tita_state[15:18][None, :]
 
             start_time_wbc = timer()
-            mpc_state, tau_cmd, qddot, fl, fr, desired, new_sol_osqp, new_state = mpc.whole_body_run(
+            mpc_state, tau_cmd, qddot, fl, fr, desired = mpc.whole_body_run(
                 mpc_state,
                 x0,
                 jnp.asarray(qpos)[None, :],
                 jnp.asarray(qvel)[None, :],
-                counter,
                 pl_world_wbc,
                 pr_world_wbc,
                 dpl_world_wbc,
                 dpr_world_wbc,
-                prev_sol_osqp=sol_osqp,
-                prev_state=_state
             )
             
             end_time_wbc = timer()
@@ -639,6 +977,13 @@ def main(headless=False, steps=500, scene="flat"):
             
             tau_to_apply = tau_cmd[0].copy()
 
+            #debug_dfcip_ref0_cost_terms(
+            #    reference=reference,
+            #    W=config.W,
+            #    wheel_offset=config.d,
+            #    N=config.N,
+            #    prefix=f"[ref0 cost] step {counter}",
+            #)
             
             def _f(v, d=4):
                 s = f"{float(v):.{d}f}"
@@ -737,6 +1082,8 @@ def main(headless=False, steps=500, scene="flat"):
                 f"ddqj0={_f(d[mpc_utils._REF_JOINTS + 2*_nj + 0],4)}"
             )
 
+
+
             c = build_wbc_current_vector(
                 model=model,
                 data=data,
@@ -749,46 +1096,40 @@ def main(headless=False, steps=500, scene="flat"):
             FC_LIST.append( [fl[0].copy(), fr[0].copy()] )
             WBC_DESIRED_LIST.append(d.copy())
             WBC_CURRENT_LIST.append(c.copy())
+
+            #store_mpc_prediction_frame(
+            #    MPC_PREDICTION_FRAMES,
+            #    timeframe=counter,
+            #    X0_np=mpc_state.X0_shifted[0],
+            #    x_ref=reference[0][:, :config.nx],
+            #    U0_np=mpc_state.U0_shifted[0],
+            #    u_ref=reference[0][:, config.nx:],
+            #    cmd=cmd,
+            #)
             
 
         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
-
-        #do_print(
-        #    f"[WBC]\n"
-        #    f"  tau_cmd: {tau_to_apply}\n"
-        #    f"  contact_forces_left (fl): {fl[0]}\n"
-        #    f"  contact_forces_right (fr): {fr[0]}"
-        #)
-
-        #_append_llc_row(
-        #    LLC_ROLLOUT_CSV,
-        #    step=counter + 1,
-        #    tau_cmd=tau_to_apply,
-        #    kp=getattr(config, "Kp_motion", 0.0),
-        #    kd=getattr(config, "Kd_motion", 0.0),
-        #)
-        '''
-        if False and (counter % 50 == 0 and counter < 505) or touch_floor:
+        
+        if (counter % 200 == 0) or touch_floor:
             X0_np = np.asarray(mpc_state.X0_shifted[0])   # (N+1, 13)
             U0_np = np.asarray(mpc_state.U0_shifted[0])  
 
             plot_mpc_prediction_state(
                 X0_np,
-                timestep=counter+1,
-                filename=f"state_mpc_t{counter+1:03d}.png",
+                x_ref=reference[0][:, :config.nx],
+                cmd=cmd,
+                timestep=counter,
+                filename=f"state_mpc_t{counter:03d}.png",
                 out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
             )
             plot_mpc_prediction_control(
                 U0_np,
-                timestep=counter+1,
-                filename=f"control_mpc_t{counter+1:03d}.png",
+                u_ref=reference[0][:, config.nx:],
+                cmd=cmd,
+                timestep=counter,
+                filename=f"control_mpc_t{counter:03d}.png",
                 out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
             )
-            plot_llc(
-                LLC_ROLLOUT_CSV,
-                out_path=os.path.join(TITA_PATH, f"llc.png"),
-            )
-        '''
 
         q_target = np.array([0.0, 0.5, -1.0, 0.0,]*2)
         pd_tau = 70*(q_target - data.qpos[7:15]) - 0.5*data.qvel[6:14]
@@ -800,12 +1141,19 @@ def main(headless=False, steps=500, scene="flat"):
         #print(f"Base position: {data.qpos[0:3]}")
         #print(f"Joint positions: {list(map(lambda x: round(float(x), 2), data.qpos[7:]))}")
         mujoco.mj_step(model, data)
+        update_com_tracking_camera(
+            _sim_cam,
+            model,
+            data,
+            _sim_base_body_id,
+            alpha=0.10,
+        )
         _renderer.update_scene(data, camera=_sim_cam)
         if counter % 2 == 0:  # record every 2nd frame to reduce video size
             _sim_frames.append(_renderer.render().copy())
         counter += 1
-        return mpc_state, theta_prev, touch_floor, sol_osqp, _state
-
+        return mpc_state, theta_prev, touch_floor
+    
     def _save_sim_video() -> None:
         print("Saving simulation video... ", end="\n", flush=True)
         try:
@@ -832,7 +1180,8 @@ def main(headless=False, steps=500, scene="flat"):
 
     if headless:
         for _ in range(steps):
-            mpc_state, theta_prev, touch_floor, sol_osqp, _state = step_controller(mpc_state, sol_osqp, _state, theta_prev=theta_prev)
+            cmd = command_handle.get_command()
+            mpc_state, theta_prev, touch_floor = step_controller(mpc_state, cmd, theta_prev=theta_prev)
             if touch_floor:
                 print(f"Base touched the floor at step {counter}. Ending simulation.")
                 break
@@ -846,24 +1195,28 @@ def main(headless=False, steps=500, scene="flat"):
     ) as viewer:
         viewer.cam.distance *= 5.5
         viewer.sync()
+        start_time = timer()
         while viewer.is_running():
             overlay_text = command_handle.consume_overlay_text()
             tic = timer()
-            overlay_text = command_handle.consume_overlay_text()
-
-            timestep_text = (
-                "Info",
-                f"step: {counter}/{MAX_STEPS}\nsim time: {data.time:.3f} s",
-            )
 
             texts = []
-            if overlay_text is not None:
-                texts.extend(overlay_text)
 
-            texts.append((None, None, timestep_text[0], timestep_text[1]))
+            if overlay_text is not None:
+                texts.append((None, None, *overlay_text))
+
+            texts.append((
+                None,
+                None,
+                "Info",
+                f"step: {counter}/{MAX_STEPS}\nsim time: {data.time:.3f} s"
+            ))
 
             viewer.set_texts(texts)
-            mpc_state, theta_prev, touch_floor, sol_osqp, _state = step_controller(mpc_state, sol_osqp, _state, theta_prev=theta_prev)
+
+            cmd = command_handle.mpc_wheeled_input(config.com_z_to_track)  # dummy command for now
+            cmd = jnp.asarray(CMD)[None, :]
+            mpc_state, theta_prev, touch_floor = step_controller(mpc_state, cmd, theta_prev=theta_prev)
 
             toc = timer()
             if toc - tic < model.opt.timestep:
@@ -878,6 +1231,10 @@ def main(headless=False, steps=500, scene="flat"):
                 break
             viewer.sync()
 
+    end_time = timer()
+    step_duration = end_time - start_time
+    print(f"[timing] step {counter}/{MAX_STEPS}: {step_duration // 60:.0f}m {step_duration % 60:.1f}s")
+    
     _save_sim_video()
 
 if __name__ == "__main__":
@@ -896,7 +1253,7 @@ if __name__ == "__main__":
         model = mujoco.MjModel.from_xml_path(
             dir_path + f"/../data/tita/tita_world.xml"
         )
-        nj = model.nv - 6
+        
         plot_torques_and_contacts(
             torques=TORQUE_LIST,
             contact_forces=FC_LIST,
@@ -905,8 +1262,9 @@ if __name__ == "__main__":
         plot_mpc_state_and_output(
             x0_list=MPC_INPUT_LIST,
             u0_list=MPC_OUTPUT_LIST,
-            x_ref_list=X_DES_LIST,
-            u_ref_list=U_DES_LIST,
+            cmd=CMD,
+            x_ref_list=None,
+            u_ref_list=None,
             out_dir=TITA_PATH,
         )
 
@@ -918,7 +1276,15 @@ if __name__ == "__main__":
             out_dir=TITA_PATH,
         )
 
+        if len(MPC_PREDICTION_FRAMES.keys()) > 0:
+            plot_mpc_prediction_frames(
+                MPC_PREDICTION_FRAMES,
+                out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
+            )
+
     try:
+
+        start_sim = timer()
         main(
             headless=args.headless,
             steps=args.steps,

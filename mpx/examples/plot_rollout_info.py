@@ -18,10 +18,10 @@ import re
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import mpx.config.config_dfcip as config
 
 _DEFAULT_DIR = os.path.join(os.path.dirname(__file__), "plots", "test")
 _MPC_DIR = os.path.join(_DEFAULT_DIR, "mpc_prediction")
-
 
 def _extract_step_idx(path: str) -> int:
     name = os.path.basename(path)
@@ -33,23 +33,10 @@ def get_cols(df, prefix):
     """Return sorted list of columns that start with prefix."""
     return sorted([c for c in df.columns if c.startswith(prefix)])
 
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-
-
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-
-
 def plot_mpc_state_and_output(
     x0_list,
     u0_list,
+    cmd=None,
     x_ref_list=None,
     u_ref_list=None,
     filename_state: str = "mpc_input.png",
@@ -60,6 +47,9 @@ def plot_mpc_state_and_output(
     save_csv: bool = True,
 ):
     os.makedirs(out_dir, exist_ok=True)
+    
+    title_state += f"\n{cmd}" if cmd is not None else ""
+    title_u0 += f"\n{cmd}" if cmd is not None else ""
 
     x0 = np.asarray(x0_list, dtype=float)
     u0 = np.asarray(u0_list, dtype=float)
@@ -766,7 +756,6 @@ def plot_llc(csv_path: str, out_path: str | None = None) -> str | None:
     print(f"  Saved: {out_path}")
     return out_path
 
-
 def _ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
@@ -812,94 +801,277 @@ def _read_matrix_cols(df: pd.DataFrame, prefix: str):
 
 def plot_mpc_prediction_state(
     X_pred,
+    x_ref=None,
+    cmd=None,
     timestep: int = 0,
     filename: str = "mpc_state_t0.png",
     out_dir: str = _MPC_DIR,
 ):
-    """Plot MPC predicted state trajectory (nx=13) at a given timestep.
+    """
+    Plot MPC predicted state trajectory (nx=13) and reference trajectory.
 
     X_pred: array of shape (N+1, 13)
-    State layout: [pcom(3), dpcom(3), c(3), vcz(1), θ(1), v(1), ω(1)]
+    x_ref : optional array of shape:
+            - (N+1, 13)
+            - (N+1, >=13)
+            - (B, N+1, 13)
+            - (B, N+1, >=13)
+
+    State layout:
+        [pcom(3), vcom(3), c(3), vcz(1), theta(1), v(1), omega(1)]
     """
+
     _ensure_dir(out_dir)
+
     X = np.asarray(X_pred)
-    steps = np.arange(X.shape[0])
 
-    labels_pcom  = ["pcom_x", "pcom_y", "pcom_z"]
-    labels_dpcom = ["ṗcom_x", "ṗcom_y", "ṗcom_z"]
-    labels_c     = ["c_x", "c_y", "c_z"]
+    if X.ndim == 3:
+        X = X[0]
 
-    fig, axes = plt.subplots(4, 3, figsize=(14, 10))
-    fig.suptitle(f"MPC prediction – state  (sim step {timestep})", fontsize=13)
+    X = np.squeeze(X)
 
-    def _title(label, col):
-        return f"{label}\n[{col[0]:.3f} → {col[-1]:.3f}]"
+    if X.ndim != 2:
+        raise ValueError(f"X_pred must be 2D after squeeze, got shape {X.shape}")
 
-    for j in range(3):
-        axes[0, j].plot(steps, X[:, j])
-        axes[0, j].set_title(_title(labels_pcom[j], X[:, j]))
-        axes[0, j].set_xlabel("horizon step")
-    for j in range(3):
-        axes[1, j].plot(steps, X[:, 3 + j])
-        axes[1, j].set_title(_title(labels_dpcom[j], X[:, 3 + j]))
-        axes[1, j].set_xlabel("horizon step")
-    for j in range(3):
-        axes[2, j].plot(steps, X[:, 6 + j])
-        axes[2, j].set_title(_title(labels_c[j], X[:, 6 + j]))
-        axes[2, j].set_xlabel("horizon step")
+    if X.shape[1] < 13:
+        raise ValueError(f"X_pred must have at least 13 columns, got shape {X.shape}")
 
-    scalar_names   = ["vcz", "θ (rad)", "v (m/s)", "ω (rad/s)"]
-    scalar_indices = [9, 10, 11, 12]
-    for j, (name, idx) in enumerate(zip(scalar_names[:3], scalar_indices[:3])):
-        axes[3, j].plot(steps, X[:, idx])
-        axes[3, j].set_title(_title(name, X[:, idx]))
-        axes[3, j].set_xlabel("horizon step")
-    axes[3, 2].plot(steps, X[:, 11], label="v")
-    axes[3, 2].plot(steps, X[:, 12], label="ω", linestyle="--")
-    axes[3, 2].set_title(
-        f"v / ω\n[v: {X[0,11]:.3f}→{X[-1,11]:.3f}  ω: {X[0,12]:.3f}→{X[-1,12]:.3f}]"
+    X = X[:, :13]
+    steps = np.arange(X.shape[0]) * config.dt_mpc
+
+    # ── Reference handling ─────────────────────────────────────────────
+    Xr = None
+    ref_steps = None
+
+    if x_ref is not None:
+        Xr = np.asarray(x_ref)
+
+        if Xr.ndim == 3:
+            Xr = Xr[0]
+
+        Xr = np.squeeze(Xr)
+
+        if Xr.ndim != 2:
+            raise ValueError(f"x_ref must be 2D after squeeze, got shape {Xr.shape}")
+
+        if Xr.shape[1] < 13:
+            raise ValueError(f"x_ref must have at least 13 columns, got shape {Xr.shape}")
+
+        Xr = Xr[:, :13]
+
+        n = min(X.shape[0], Xr.shape[0])
+        X = X[:n]
+        Xr = Xr[:n]
+        steps = np.arange(n) * config.dt_mpc
+        ref_steps = steps
+
+    state_names = [
+        "pcom_x", "pcom_y", "pcom_z",
+        "vcom_x", "vcom_y", "vcom_z",
+        "c_x", "c_y", "c_z",
+        "vcz",
+        "theta (rad)",
+        "v (m/s)",
+        "omega (rad/s)",
+    ]
+
+    fig, axes = plt.subplots(5, 3, figsize=(15, 13))
+    axes = axes.reshape(-1)
+
+    fig.suptitle(
+        f"MPC prediction – state  (sim step {timestep})\nCommand input: {cmd}" if cmd is not None else "",
+        fontsize=14,
     )
-    axes[3, 2].legend(fontsize=8)
+
+    def _title(name, pred_col, ref_col=None):
+        if ref_col is None:
+            return (
+                f"{name}\n"
+                f"pred {float(pred_col[0]):.3f} → {float(pred_col[-1]):.3f}"
+            )
+
+        return (
+            f"{name}\n"
+            f"pred {float(pred_col[0]):.3f} → {float(pred_col[-1]):.3f} | "
+            f"ref {float(ref_col[0]):.3f} → {float(ref_col[-1]):.3f}"
+        )
+
+    for idx in range(13):
+        ax = axes[idx]
+
+        pred_col = X[:, idx]
+        ax.plot(
+            steps,
+            pred_col,
+            label="pred",
+        )
+
+        ref_col = None
+        if Xr is not None:
+            ref_col = Xr[:, idx]
+            ax.plot(
+                ref_steps,
+                ref_col,
+                "--",
+                color="orange",
+                label="ref",
+            )
+
+        ax.set_title(_title(state_names[idx], pred_col, ref_col))
+        ax.set_xlabel("horizon step")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+    # Spegni subplot vuoti: 15 subplot disponibili, 13 stati
+    for idx in range(13, len(axes)):
+        axes[idx].axis("off")
 
     fig.tight_layout()
     path = os.path.join(out_dir, filename)
     fig.savefig(path, dpi=120)
     plt.close(fig)
+
     print(f"[plot] saved → {path}")
 
 def plot_mpc_prediction_control(
     U_pred,
+    u_ref=None,
+    cmd=None,
     timestep: int = 0,
     filename: str = "mpc_control_t0.png",
     out_dir: str = _MPC_DIR,
 ):
-    """Plot MPC predicted control trajectory (nu=9) at a given timestep.
+    """Plot MPC predicted control trajectory (nu=9) and reference trajectory.
 
-    U_pred: array of shape (N, 9)
-    Control layout: [a(1), acz(1), α(1), Fl(3), Fr(3)]
+    U_pred: array of shape:
+            - (N, 9)
+            - (B, N, 9)
+
+    u_ref : optional array of shape:
+            - (N, 9)
+            - (N+1, 9)
+            - (B, N, 9)
+            - (B, N+1, 9)
+            - (N+1, nx+nu)
+            - (B, N+1, nx+nu)
+
+            If u_ref has more than 9 columns, the last 9 are used.
+
+    Control layout:
+        [a, acz, alpha, Fl_x, Fl_y, Fl_z, Fr_x, Fr_y, Fr_z]
     """
+
     _ensure_dir(out_dir)
+
     U = np.asarray(U_pred)
-    steps = np.arange(U.shape[0])
+
+    if U.ndim == 3:
+        U = U[0]
+
+    U = np.squeeze(U)
+
+    if U.ndim != 2:
+        raise ValueError(f"U_pred must be 2D after squeeze, got shape {U.shape}")
+
+    if U.shape[1] < 9:
+        raise ValueError(f"U_pred must have at least 9 columns, got shape {U.shape}")
+
+    U = U[:, :9]
+
+    # ── Reference handling ─────────────────────────────────────────────
+    Ur = None
+
+    if u_ref is not None:
+        Ur = np.asarray(u_ref)
+
+        if Ur.ndim == 3:
+            Ur = Ur[0]
+
+        Ur = np.squeeze(Ur)
+
+        if Ur.ndim != 2:
+            raise ValueError(f"u_ref must be 2D after squeeze, got shape {Ur.shape}")
+
+        if Ur.shape[1] < 9:
+            raise ValueError(f"u_ref must have at least 9 columns, got shape {Ur.shape}")
+
+        # Se passi tutta la reference concatenata [x_ref, u_ref],
+        # prendo automaticamente gli ultimi 9 campi.
+        if Ur.shape[1] > 9:
+            Ur = Ur[:, -9:]
+        else:
+            Ur = Ur[:, :9]
+
+        # U_pred è spesso N, mentre u_ref può essere N+1:
+        # taglio alla lunghezza comune.
+        n = min(U.shape[0], Ur.shape[0])
+        U = U[:n]
+        Ur = Ur[:n]
+
+    steps = np.arange(U.shape[0]) * config.dt_mpc
+    ref_steps = steps
 
     fig, axes = plt.subplots(3, 3, figsize=(14, 8))
-    fig.suptitle(f"MPC prediction – control  (sim step {timestep})", fontsize=13)
+    fig.suptitle(
+        f"MPC prediction – control  (sim step {timestep})\nCommand input: {cmd}" if cmd is not None else "",
+        fontsize=13,
+    )
 
     ctrl_labels = [
-        "a (lin acc)", "acz (z acc)", "α (ang acc)",
-        "Fl_x", "Fl_y", "Fl_z",
-        "Fr_x", "Fr_y", "Fr_z",
+        "a (lin acc)",
+        "acz (z acc)",
+        "alpha (ang acc)",
+        "Fl_x",
+        "Fl_y",
+        "Fl_z",
+        "Fr_x",
+        "Fr_y",
+        "Fr_z",
     ]
+
+    def _title(label, pred_col, ref_col=None):
+        if ref_col is None:
+            return (
+                f"{label}\n"
+                f"pred {float(pred_col[0]):.3f} → {float(pred_col[-1]):.3f}"
+            )
+
+        return (
+            f"{label}\n"
+            f"pred {float(pred_col[0]):.3f} → {float(pred_col[-1]):.3f} | "
+            f"ref {float(ref_col[0]):.3f} → {float(ref_col[-1]):.3f}"
+        )
+
     for idx, (ax, lbl) in enumerate(zip(axes.flat, ctrl_labels)):
-        col = U[:, idx]
-        ax.plot(steps, col)
-        ax.set_title(f"{lbl}\n[{col[0]:.3f} → {col[-1]:.3f}]")
+        pred_col = U[:, idx]
+
+        ax.plot(
+            steps,
+            pred_col,
+            label="pred",
+        )
+
+        ref_col = None
+        if Ur is not None:
+            ref_col = Ur[:, idx]
+            ax.plot(
+                ref_steps,
+                ref_col,
+                "--",
+                color="orange",
+                label="ref",
+            )
+
+        ax.set_title(_title(lbl, pred_col, ref_col))
         ax.set_xlabel("horizon step")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
 
     fig.tight_layout()
     path = os.path.join(out_dir, filename)
     fig.savefig(path, dpi=120)
     plt.close(fig)
+
     print(f"[plot] saved → {path}")
 
 def render_mpc_prediction_video(
