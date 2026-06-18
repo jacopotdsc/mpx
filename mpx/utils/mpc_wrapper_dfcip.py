@@ -85,23 +85,19 @@ class BatchedMPCControllerWrapper:
         self.batch_X0 = jnp.tile(X0, (n_env, 1, 1))
         self.batch_V0 = jnp.tile(V0, (n_env, 1, 1))
         
-        # Define cost, hessian approximation, and dynamics functions for MPC.
-        # TODO: write cost function
-        cost = partial(mpc_objectives.wheeled_dfcip_obj, config.d, config.N)
-        # TODO: can be omitted
-        hessian_approx = partial(mpc_objectives.wheeled_dfcip_hessian_gn, config.d, config.N)
-        
-        # TODO: write dynamics function - OK
-        dynamics = partial(mpc_dyn_model.wheeled_dfcip_dynamics,
+        self.cost = partial(mpc_objectives.wheeled_dfcip_obj, config.d, config.N)
+        self.hessian_approx = partial(mpc_objectives.wheeled_dfcip_hessian_gn, config.d, config.N)
+        self.dynamics = partial(mpc_dyn_model.wheeled_dfcip_dynamics,
             mjx_model, config.mass, config.grav, config.dt_mpc)
 
-        work = partial(optimizers.mpc, cost, dynamics, hessian_approx, False)
+        work = partial(optimizers.fddp_mpc, self.cost, self.dynamics, self.hessian_approx, False)
         
-        # TODO: copy reference generator from colab - OK
         reference_generator_offline = partial(mpc_utils.reference_generator_dfcip_offline,
             pcom=(0.0, 0.0, 0.4), nx=config.nx, nu=config.nu, 
             t_sec=config.T_TRAJECTORY, dt=config.dt_mpc, m=config.mass, grav=config.grav)
 
+        self.ref_substeps = int(round(config.dt_mpc / config.dt_ref))  # 5
+        self.N_dense = config.N * self.ref_substeps                # 50 * 5 = 250
         reference_generator = partial(mpc_utils.reference_generator_dfcip_online, config.N, config.dt_mpc, config.mass, config.grav)
 
         # Whole-body controller: static args frozen via partial, runtime args
@@ -162,7 +158,6 @@ class BatchedMPCControllerWrapper:
         self._whole_body_interface = jax.jit(jax.vmap(whole_body_control))
 
         self._x_reference, self._u_reference = self._ref_gen_offline(vel_lin=0.5, vel_ang=0.0, vel_z=0.0)
-        
 
         U0 = jnp.tile(config.u_ref, (config.N, 1))
         X0 = jnp.tile(self.initial_state, (config.N + 1, 1))
@@ -178,14 +173,14 @@ class BatchedMPCControllerWrapper:
         ac_z = jnp.tile(cfg.u_ref[1], (n, 1))
         alpha = jnp.tile(cfg.u_ref[2], (n, 1))
         grf = jnp.tile(cfg.u_ref[3:], (n, 1))
-        
+
         return MPCState(
             sol= ControlSol(a=a, ac_z=ac_z, alpha=alpha, grf=grf),
             X0_shifted=self._X0_init, 
             U0_shifted=self._U0_init,
             V0_shifted=self._V0_init,
             X_prediction=self._X0_init,
-            U_prediction=self._U0_init
+            U_prediction=self._U0_init,
         )
 
     def run(self, state: MPCState, x0, cmd, time_frame, horizon):
@@ -218,7 +213,7 @@ class BatchedMPCControllerWrapper:
         
         x_ref, u_ref = self._ref_gen(x0, cmd)
         reference = jnp.concatenate([x_ref, u_ref], axis=-1)
-        
+
         parameter = None
 
         X, U, V = self._solve(
@@ -229,8 +224,18 @@ class BatchedMPCControllerWrapper:
             x0,
             state.X0_shifted,
             state.U0_shifted,
-            state.V0_shifted
+            #state.V0_shifted
             )
+
+        #jax.debug.print("x0: {value}", value=x0[0])
+        #jax.debug.print("X0_warm: {value}", value=X_warm[0,0])
+        #jax.debug.print("XN_warm: {value}", value=X_warm[0,-1])
+        #jax.debug.print("U0_warm: {value}", value=U_warm[0,0])
+        #jax.debug.print("UN_warm: {value}", value=U_warm[0,-1])
+        #jax.debug.print("X0_pred: {value}", value=X[0,0])
+        #jax.debug.print("XN_pred: {value}", value=X[0,-1])
+        #jax.debug.print("U0_warm: {value}", value=U[0,0])
+        #jax.debug.print("UN_warm: {value}", value=U[0,-1])
         
         new_a = U[:,0,0]
         new_ac_z = U[:,0,1]
@@ -461,7 +466,7 @@ class BatchedMPCControllerWrapper:
     def whole_body_run(self, state: MPCState, x0, qpos, qvel,
                    pl_world, pr_world, dpl_world, dpr_world):
 
-        desired = desired = self._build_desired_jit(
+        desired = self._build_desired_jit(
             x0,
             qpos,
             state,

@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import mujoco
 import mujoco.viewer
+from mujoco_playground import registry
 import numpy as np
 
 import mpx.config.config_srbd as config
@@ -45,14 +46,31 @@ def _srbd_state(qpos, qvel):
 
 
 def main(headless=False, steps=500, scene="flat"):
+    #model = mujoco.MjModel.from_xml_path(
+    #    dir_path + f"/../data/aliengo/scene_{scene}.xml"
+    #)
+    from mujoco_playground._src.locomotion.aliengo import aliengo_constants as consts
     model = mujoco.MjModel.from_xml_path(
-        dir_path + f"/../data/aliengo/scene_{scene}.xml"
+        consts.task_to_xml("flat_terrain").as_posix()
     )
+
+
+    #env = registry.load("Go1JoystickFlatTerrain")
+    #model = env.mj_model
+    #data = mujoco.MjData(model)
+
     data = mujoco.MjData(model)
     sim_frequency = float(config.whole_body_frequency)
     model.opt.timestep = 1.0 / sim_frequency
+    
 
     contact_ids = sim_utils.geom_ids(model, config.contact_frame)
+    from mujoco_playground._src.locomotion.aliengo import aliengo_constants as consts
+    playground_feet_ids = [model.geom(name).id for name in consts.FEET_GEOMS]
+    print(f"config.contact_frame: {config.contact_frame}")
+    print(f"srbd geom_ids:        {contact_ids}")
+    print(f"consts.FEET_GEOMS:    {consts.FEET_GEOMS}")
+    print(f"playground geom_ids:  {playground_feet_ids}")
     command_handle = sim_utils.KeyboardVelocityCommand(vx=0.0, vy=0.0, wz=0.0)
     mpc = mpc_wrapper_srbd.BatchedMPCControllerWrapper(config, n_env=1)
 
@@ -61,7 +79,9 @@ def main(headless=False, steps=500, scene="flat"):
     foot = jnp.asarray(sim_utils.geom_positions(data, contact_ids))
     x0 = _srbd_state(data.qpos, data.qvel)
     command = jnp.asarray(command_handle.mpc_input(config.robot_height))
-    contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
+    #contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
+    foot_z = jnp.array(foot).reshape(-1, 3)[:, 2]
+    contact = (foot_z < 0.035).astype(jnp.float32)
     mpc_state = mpc.init_state()
     mpc_state = mpc.run(mpc_state, x0[None, :], command[None, :], foot[None, :], contact[None, :])
     tau_warm, _ = mpc.whole_body_run(
@@ -88,7 +108,23 @@ def main(headless=False, steps=500, scene="flat"):
         if counter % period == 0:
             foot = jnp.asarray(sim_utils.geom_positions(data, contact_ids))
             command = jnp.asarray(command_handle.mpc_input(config.robot_height))
-            contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
+            #contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
+            #foot_z = jnp.array(foot).reshape(-1, 3)[:, 2]
+            #contact = (foot_z < 0.035).astype(jnp.float32)
+            foot_arr = np.array(foot).reshape(-1, 3)
+            foot_z = foot_arr[:, 2]
+            # Setup (dopo aver creato model)
+            touch_sensor_adr = [model.sensor_adr[model.sensor(name).id] 
+                                for name in ["FL_touch", "FR_touch", "RL_touch", "RR_touch"]]
+
+            # Nel loop
+            contact_threshold = jnp.array([data.sensordata[adr] > 0 for adr in touch_sensor_adr], dtype=jnp.float32)
+            print(f"foot_z:             {foot_z}")
+            print(f"contact (forze):    {np.array(contact)}")
+            print(f"contact (soglia):   {contact_threshold}")
+            print(f"match:              {np.allclose(contact, contact_threshold)}")
+            print("---")
+
             x0 = _srbd_state(qpos, qvel)
 
             #print(f"Contact: {contact}")
@@ -116,7 +152,7 @@ def main(headless=False, steps=500, scene="flat"):
             
             bias = data.qfrc_bias.copy()
             vec = np.zeros(model.nv)
-            J_j = J[0, 6:, :] ¯
+            J_j = J[0, 6:, :]
             vec[6:] = tau - bias[6:] + J_j@grf
            
             M = np.zeros((model.nv, model.nv), dtype=np.float64)
@@ -134,19 +170,9 @@ def main(headless=False, steps=500, scene="flat"):
         tau_ctrl = np.asarray(tau_cmd[0])
         q_des, dq_des, qacc_joints = tau_to_qdes(model, data, tau_ctrl, grf, J, model.opt.timestep)
         pd_ctrl = tau_ctrl + 50 * (q_des - qpos[7:]) + 5 * (dq_des - qvel[6:])
-        #print(config.q0)
-        #print(config.q0.shape)
-        #pd_ctrl = 50*(config.q0 - qpos[7:]) - 0 * ( - qvel[6:])
-        
-        #print(f"bias[6:]     : {data.qfrc_bias[6:]}")
-        #print(f"vec (netto)  : {tau_ctrl - data.qfrc_bias[6:]}")
-        #print(f"qacc_joints  : {qacc_joints}")
-        #print(f"q_des - q    : {q_des - data.qpos[7:]}")
-        #print(f"pd_ctrl      : {pd_ctrl}")
-        #print(f"tau_cmd[0]   : {tau_ctrl}\n-----------------------")
 
-        data.ctrl = np.asarray(pd_ctrl)
-        #data.ctrl = np.asarray(tau_ctrl)
+        #data.ctrl = np.asarray(pd_ctrl)
+        data.ctrl = np.asarray(tau_ctrl)
         mujoco.mj_step(model, data)
         counter += 1
 

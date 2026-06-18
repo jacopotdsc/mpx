@@ -32,7 +32,7 @@ def _build_solve_fn(mpc):
             .at[mpc.qvel_slice].set(qvel)
             .at[mpc.foot_slice].set(foot)
         )
-        return mpc.run(mpc_data, x0, command, contact)
+        return mpc.run_with_refs(mpc_data, x0, command, contact)
 
     return solve_mpc
 
@@ -59,7 +59,7 @@ def main(headless=False, steps=500, scene="flat"):
 
     warm_command = jnp.asarray(command_handle.mpc_input(config.robot_height))
     warm_contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
-    mpc_data, tau = solve_mpc(
+    mpc_data, tau, q_ref, dq_ref = solve_mpc(
         mpc_data,
         data.qpos.copy(),
         data.qvel.copy(),
@@ -71,13 +71,14 @@ def main(headless=False, steps=500, scene="flat"):
     mpc_data = reset_mpc(mpc_data, data.qpos.copy(), data.qvel.copy(), foot)
 
     period = int(sim_frequency / config.mpc_frequency)
-    print(f"Controller period: {period} steps at {sim_frequency} Hz simulation frequency.")
+    #print(f"Controller period: {period} steps at {sim_frequency} Hz simulation frequency.")
     counter = 0
     tau = jnp.zeros(config.n_joints)
-    q_ref = config.q0.copy()
+    q_ref = jnp.asarray(q_ref)
+    dq_ref = jnp.asarray(dq_ref)
 
     def step_controller():
-        nonlocal counter, tau, q_ref, mpc_data
+        nonlocal counter, tau, q_ref, dq_ref, mpc_data
 
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
@@ -87,12 +88,12 @@ def main(headless=False, steps=500, scene="flat"):
            
             command = jnp.asarray(command_handle.mpc_input(config.robot_height))
             contact = jnp.asarray(sim_utils.estimate_contacts(data, contact_ids))
-            print(f"Contact: {contact}")
-            print(foot)
-            print(f"Command: {command}")
+            #print(f"Contact: {contact}")
+            #print(foot)
+            #print(f"Command: {command}")
             
             start = timer()
-            mpc_data, tau = solve_mpc(
+            mpc_data, tau, q_ref, dq_ref = solve_mpc(
                 mpc_data,
                 qpos,
                 qvel,
@@ -103,12 +104,12 @@ def main(headless=False, steps=500, scene="flat"):
             tau.block_until_ready()
             stop = timer()
 
-            # tau = jnp.clip(tau, config.min_torque, config.max_torque)
-            # The shifted warm start is the next joint target used by the PD stabilizer.
-            q_ref = mpc_data.X0[0, 7 : 7 + config.n_joints]
+            # q_ref and dq_ref are returned by the wrapper from its internal warm-start update.
             print(f"MPC time: {1e3 * (stop - start):.2f} ms")
 
-        data.ctrl = np.asarray(tau)
+        pd_ctrl = 100 * (q_ref - qpos[7:]) + 5 * (dq_ref - qvel[6:])
+        #data.ctrl = np.asarray(tau)
+        data.ctrl = np.asarray(pd_ctrl)
         mujoco.mj_step(model, data)
         counter += 1
 

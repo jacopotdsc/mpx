@@ -9,5 +9,5 @@ c_generated_code/
 *.TXT
 *.pkl
 *.egg*info/
-*/plots/*
-*/checkpoints/*
+mpx/examples/plots/**
+**/checkpoints/**

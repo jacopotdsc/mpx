@@ -1,6 +1,7 @@
 import argparse
 import csv
 from pyexpat import model
+from pyexpat import model
 import shutil
 import os
 #os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2" 
@@ -725,9 +726,9 @@ def main(headless=False, steps=500, scene="flat"):
 
     # ── print MPC config parameters ──────────────────────────────────────
     _mpc_params = [
-        "dt", "dt_mpc", "N", "mpc_frequency", "grav", "whole_body_frequency",
+        "dt_mpc", "dt_ref", "N", "mpc_frequency", "grav", "whole_body_frequency",
         "duty_factor", "step_freq", "step_height", "robot_height", "clearence_speed",
-        "mu", "mass", "d",
+        "mu", "mass",
         "w_pcomxy", "w_pcomz", "w_vcomxy", "w_vcomz", "w_c", "w_vcz",
         "w_theta", "w_v", "w_omega",
         "w_a", "w_ac_z", "w_alpha", "w_fcxy", "w_fcz", "w_eq",
@@ -749,8 +750,8 @@ def main(headless=False, steps=500, scene="flat"):
     # ── save MPC prediction plots at timestep 0 ──────────────────────────
     X0_np = x0
     U0_np = np.concatenate([np.asarray(mpc_state.sol.a)[:, None], np.asarray(mpc_state.sol.ac_z)[:, None], np.asarray(mpc_state.sol.alpha)[:, None], np.asarray(mpc_state.sol.grf)], axis=1).copy()
-    XN_np = np.asarray(mpc_state.X0_shifted[0][-1]).copy()  
-    UN_np = np.asarray(mpc_state.U0_shifted[0][-1]).copy()
+    XN_np = np.asarray(mpc_state.X_prediction[0][-1]).copy()  
+    UN_np = np.asarray(mpc_state.U_prediction[0][-1]).copy()
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
 
     _x_names = ["pcom_x", "pcom_y", "pcom_z", "dpcom_x", "dpcom_y", "dpcom_z",
@@ -929,11 +930,11 @@ def main(headless=False, steps=500, scene="flat"):
     mpc_state = mpc.init_state()
 
     def do_print(*args, **kwargs):
-        debug_print = False
+        debug_print = True
         if debug_print:
             print(*args, **kwargs)
 
-    def step_controller(mpc_state, cmd, theta_prev=theta_prev):
+    def step_controller(mpc_state, reference, cmd, theta_prev=theta_prev):
         nonlocal counter
 
         print(f"\n=== step {counter} ===")
@@ -942,17 +943,18 @@ def main(headless=False, steps=500, scene="flat"):
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
 
-        if counter % period == 0:
-
+        if True:
             contact_ids = sim_utils.geom_ids(model, config.contact_frame)
             tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
             x0, theta_prev = get_dfip_current_state(mpc, tita_state, theta_prev=theta_prev)
 
-            start_time_mpc = timer()
-            mpc_state, reference = mpc.run(mpc_state, x0[None, :], cmd, counter, config.N)
-            end_time_mpc = timer()
-            mpc_duration = end_time_mpc - start_time_mpc
-            print(f"[timing] mpc.run {mpc_duration * 1000:.2f} ms")
+            if counter % 1 == 0:
+                print(f"calling mpc.run at step {counter} with x0={x0}")
+                start_time_mpc = timer()
+                mpc_state, reference = mpc.run(mpc_state, x0[None, :], cmd, counter, config.N)
+                end_time_mpc = timer()
+                mpc_duration = end_time_mpc - start_time_mpc
+                print(f"[timing] mpc.run {mpc_duration * 1000:.2f} ms")
 
             pl_world_wbc = tita_state[6:9][None, :]
             pr_world_wbc = tita_state[9:12][None, :]
@@ -1006,6 +1008,32 @@ def main(headless=False, steps=500, scene="flat"):
                 f" vc=({_f(x0[3])},{_f(x0[4])},{_f(x0[5])}) "
                 f"\n      cw=({_f(x0[6])},{_f(x0[7])},{_f(x0[8])}) "
                 f" vcz={_f(x0[9])}\n      th={_f(x0[10],4)} v={_f(x0[11],4)} w={_f(x0[12],4)}"
+            )
+            do_print(
+                f"[pred_X0] "
+                f" pc=({_f(mpc_state.X_prediction[0,0,0])},{_f(mpc_state.X_prediction[0,0,1])},{_f(mpc_state.X_prediction[0,0,2])}) "
+                f" vc=({_f(mpc_state.X_prediction[0,0,3])},{_f(mpc_state.X_prediction[0,0,4])},{_f(mpc_state.X_prediction[0,0,5])}) "
+                f"\n      cw=({_f(mpc_state.X_prediction[0,0,6])},{_f(mpc_state.X_prediction[0,0,7])},{_f(mpc_state.X_prediction[0,0,8])}) "
+                f" vcz={_f(mpc_state.X_prediction[0,0,9])}\n      th={_f(mpc_state.X_prediction[0,0,10],4)} v={_f(mpc_state.X_prediction[0,0,11],4)} w={_f(mpc_state.X_prediction[0,0,12],4)}"
+            )
+            do_print(
+                f"[pred_U0] "
+                f" a, acz, alpha=({_f(mpc_state.U_prediction[0,0,0])},{_f(mpc_state.U_prediction[0,0,1])},{_f(mpc_state.U_prediction[0,0,2])}) "
+                f"\n      fl=({_f(mpc_state.U_prediction[0,0,3])},{_f(mpc_state.U_prediction[0,0,4])},{_f(mpc_state.U_prediction[0,0,5])}) "
+                f"\n      fr=({_f(mpc_state.U_prediction[0,0,6])},{_f(mpc_state.U_prediction[0,0,7])},{_f(mpc_state.U_prediction[0,0,8])}) "
+            )
+            do_print(
+                f"[pred_XN] "
+                f" pc=({_f(mpc_state.X_prediction[0, -1,0])},{_f(mpc_state.X_prediction[0, -1,1])},{_f(mpc_state.X_prediction[0, -1,2])}) "
+                f" vc=({_f(mpc_state.X_prediction[0, -1,3])},{_f(mpc_state.X_prediction[0, -1,4])},{_f(mpc_state.X_prediction[0, -1,5])}) "
+                f"\n      cw=({_f(mpc_state.X_prediction[0, -1,6])},{_f(mpc_state.X_prediction[0, -1,7])},{_f(mpc_state.X_prediction[0, -1,8])}) "
+                f" vcz={_f(mpc_state.X_prediction[0, -1,9])}\n      th={_f(mpc_state.X_prediction[0, -1,10],4)} v={_f(mpc_state.X_prediction[0, -1,11],4)} w={_f(mpc_state.X_prediction[0, -1,12],4)}"
+            )
+            do_print(
+                f"[pred_U0] "
+                f" a, acz, alpha=({_f(mpc_state.U_prediction[0,-1,0])},{_f(mpc_state.U_prediction[0,-1,1])},{_f(mpc_state.U_prediction[0,-1,2])}) "
+                f"\n      fl=({_f(mpc_state.U_prediction[0,-1,3])},{_f(mpc_state.U_prediction[0,-1,4])},{_f(mpc_state.U_prediction[0,-1,5])}) "
+                f"\n      fr=({_f(mpc_state.U_prediction[0,-1,6])},{_f(mpc_state.U_prediction[0,-1,7])},{_f(mpc_state.U_prediction[0,-1,8])}) "
             )
             do_print(
                 f"[sol] "
@@ -1110,9 +1138,10 @@ def main(headless=False, steps=500, scene="flat"):
 
         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
         
-        if (counter % 200 == 0) or touch_floor:
-            X0_np = np.asarray(mpc_state.X0_shifted[0])   # (N+1, 13)
-            U0_np = np.asarray(mpc_state.U0_shifted[0])  
+        if (counter % 100 == 0) or touch_floor:
+            print(f"[step {counter}] touch_floor={touch_floor}, saving MPC prediction plots...")
+            X0_np = np.asarray(mpc_state.X_prediction[0])   # (N+1, 13)
+            U0_np = np.asarray(mpc_state.U_prediction[0])  
 
             plot_mpc_prediction_state(
                 X0_np,
@@ -1129,6 +1158,15 @@ def main(headless=False, steps=500, scene="flat"):
                 timestep=counter,
                 filename=f"control_mpc_t{counter:03d}.png",
                 out_dir=os.path.join(TITA_PATH, "mpc_prediction"),
+            )
+
+            plot_mpc_state_and_output(
+                x0_list=MPC_INPUT_LIST,
+                u0_list=MPC_OUTPUT_LIST,
+                cmd=CMD,
+                x_ref_list=None,
+                u_ref_list=None,
+                out_dir=TITA_PATH,
             )
 
         q_target = np.array([0.0, 0.5, -1.0, 0.0,]*2)
@@ -1152,7 +1190,7 @@ def main(headless=False, steps=500, scene="flat"):
         if counter % 2 == 0:  # record every 2nd frame to reduce video size
             _sim_frames.append(_renderer.render().copy())
         counter += 1
-        return mpc_state, theta_prev, touch_floor
+        return mpc_state, reference, theta_prev, touch_floor
     
     def _save_sim_video() -> None:
         print("Saving simulation video... ", end="\n", flush=True)
@@ -1181,7 +1219,7 @@ def main(headless=False, steps=500, scene="flat"):
     if headless:
         for _ in range(steps):
             cmd = command_handle.get_command()
-            mpc_state, theta_prev, touch_floor = step_controller(mpc_state, cmd, theta_prev=theta_prev)
+            mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, cmd, theta_prev=theta_prev)
             if touch_floor:
                 print(f"Base touched the floor at step {counter}. Ending simulation.")
                 break
@@ -1216,7 +1254,7 @@ def main(headless=False, steps=500, scene="flat"):
 
             cmd = command_handle.mpc_wheeled_input(config.com_z_to_track)  # dummy command for now
             cmd = jnp.asarray(CMD)[None, :]
-            mpc_state, theta_prev, touch_floor = step_controller(mpc_state, cmd, theta_prev=theta_prev)
+            mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, cmd, theta_prev=theta_prev)
 
             toc = timer()
             if toc - tic < model.opt.timestep:

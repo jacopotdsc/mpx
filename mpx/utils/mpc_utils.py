@@ -486,7 +486,7 @@ def reference_generator_dfcip_online(
     Command layout:
         cmd[0] = desired forward velocity v_des
         cmd[1] = desired yaw rate omega_des
-        cmd[2] = desired vertical CoM velocity vz_des
+        cmd[2] = desired vertical CoM velocity vz_des, ignored here for flat walking
 
     Returns:
         x_ref: (N+1, nx)
@@ -496,51 +496,56 @@ def reference_generator_dfcip_online(
         [a, ac_z, alpha, Fl_x, Fl_y, Fl_z, Fr_x, Fr_y, Fr_z]
     """
 
-    # ── Hardcoded limits / acceleration magnitudes ─────────────────────
-    z_min = 0.25
-    z_max = 0.45
+    # ============================================================
+    # Fixed reference quantities, as in the C++ flat walking plan
+    # ============================================================
+    z_com_ref = 0.4
+    z_contact_ref = 0.0
+    vcom_z_ref = 0.0
+    vcz_ref = 0.0
 
-    a_default     = 1   # m/s^2
-    alpha_default = 1   # rad/s^2
-    ac_z_default  = 1   # m/s^2
+    # Acceleration limits for online ramp
+    a_default = 1.0          # m/s^2
+    alpha_default = 1.0      # rad/s^2
 
-    # ── Current state ─────────────────────────────────────────────────
-    pcom  = x0[0:3]
-    vcom  = x0[3:6]
-    c     = x0[6:9]
-    vcz   = x0[9]
-    theta = x0[10]
-    v     = x0[11]
-    omega = x0[12]
+    # ============================================================
+    # Current reduced state
+    # ============================================================
+    pcom0 = x0[0:3]
+    theta0 = x0[10]
+    v0 = x0[11]
+    omega0 = x0[12]
 
-    # Uso vcom_z corrente come velocità verticale CoM.
-    # Nel tuo stato x0[9] è v_contact_z, che per ora vuoi tenerlo a 0.
-    vz = vcom[2]
-
-    # ── Desired command targets ────────────────────────────────────────
-    v_des     = cmd[0]
+    # ============================================================
+    # Desired command
+    # ============================================================
+    v_des = cmd[0]
     omega_des = cmd[1]
-    vz_des    = cmd[2]
 
     def move_towards(current, target, max_delta):
         delta = target - current
         return current + jnp.clip(delta, -max_delta, max_delta)
 
-    def build_state(pcom, vcom, c, vcz, theta, v, omega):
-        return jnp.array([
-            # CoM
-            pcom[0],
-            pcom[1],
-            pcom[2],
-            vcom[0],
-            vcom[1],
-            vcom[2],
+    def build_state(p_xy, theta, v, vx, vy, omega):
 
-            # Midpoint contact / wheel-ground center
-            c[0],
-            c[1],
-            0.0,
-            vcz,
+        return jnp.array([
+            # CoM position
+            p_xy[0],
+            p_xy[1],
+            z_com_ref,
+
+            # CoM velocity from reduced velocity v
+            vx,
+            vy,
+            vcom_z_ref,
+
+            # Contact midpoint / ground projection
+            p_xy[0],
+            p_xy[1],
+            z_contact_ref,
+
+            # Contact vertical velocity
+            vcz_ref,
 
             # Reduced coordinates
             theta,
@@ -548,69 +553,38 @@ def reference_generator_dfcip_online(
             omega,
         ])
 
-    x_init = build_state(pcom=pcom, vcom=vcom, c=c, vcz=vcz, theta=theta, v=v, omega=omega)
+    def scan_step(carry, j):
+        p_xy, theta, v, omega = carry
 
-    def scan_step(carry, _):
-        pcom, vcom, c, vcz, theta, v, omega = carry
+        a_lim = jnp.where(j == 0, a_default, a_default)
+        alpha_lim = jnp.where(j == 0, alpha_default, alpha_default)
 
-        # ── Compute limited accelerations toward target ────────────────
-        vcom_x_current = vcom[0]
-        vcom_y_current = vcom[1]
-        vcom_z_current = vcom[2]
-        omega_current = omega
+        v_next = move_towards(v, v_des, a_lim * dt)
+        omega_next = move_towards(omega, omega_des, alpha_lim * dt)
 
-        v_local = vcom_x_current * jnp.cos(theta) + vcom_y_current * jnp.sin(theta)
-        v_next = move_towards(v_local, v_des, a_default * dt)
-        omega_next = move_towards(omega_current, omega_des, alpha_default * dt)
-        vz_next = move_towards(vcom_z_current, vz_des, ac_z_default * dt)
+        vx_next = v_next * jnp.cos(theta)
+        vy_next = v_next * jnp.sin(theta)
 
-        a = (v_next - v) / dt
-        alpha = (omega_next - omega) / dt
-        ac_z = (vz_next - vcom_z_current) / dt
+        p_xy_next = p_xy + jnp.array([
+            vx_next * dt,
+            vy_next * dt,
+        ])
 
-        # ── Integrate heading and planar motion ────────────────────────
         theta_next = theta + omega_next * dt
 
-        vx_next = v_next * jnp.cos(theta_next)
-        vy_next = v_next * jnp.sin(theta_next)
-
-        pcom_next = pcom.at[0].add(vx_next * dt)
-        pcom_next = pcom_next.at[1].add(vy_next * dt)
-
-        vcom_next = jnp.array([vx_next, vy_next, vz_next])
-
-        # ── Vertical CoM integration with bounds ───────────────────────
-        z_unclipped = pcom[2] + vz_next * dt
-        z_next = jnp.clip(z_unclipped, z_min, z_max)
-
-        hit_low  = jnp.logical_and(z_next <= z_min, vz_next < 0.0)
-        hit_high = jnp.logical_and(z_next >= z_max, vz_next > 0.0)
-        hit_bound = jnp.logical_or(hit_low, hit_high)
-
-        vz_next = jnp.where(hit_bound, 0.0, vz_next)
-        ac_z = jnp.where(hit_bound, 0.0, ac_z)
-
-        pcom_next = pcom_next.at[2].set(z_next)
-
-        # Contact z resta sul terreno
-        c_next = pcom_next.copy()
-        c_next = c_next.at[2].set(0.0)
-        vcz_next = 0.0
-
-        x_ref_t = build_state(  
-            pcom=pcom_next,
-            vcom=vcom_next,
-            c=c_next,
-            vcz=vcz_next,
+        x_ref_t = build_state(
+            p_xy=p_xy_next,
             theta=theta_next,
             v=v_next,
+            vx=vx_next,
+            vy=vy_next, 
             omega=omega_next,
         )
 
         u_ref_t = jnp.array([
-            0.0, #a,
-            0.0, #ac_z,
-            0.0, #alpha,
+            0.0,  # a
+            0.0,  # ac_z
+            0.0,  # alpha
 
             0.0,
             0.0,
@@ -621,26 +595,39 @@ def reference_generator_dfcip_online(
             m * grav / 2.0,
         ])
 
-        carry_next = pcom_next, vcom_next, c_next, vcz_next, theta_next, v_next, omega_next
+        carry_next = (
+            p_xy_next,
+            theta_next,
+            v_next,
+            omega_next,
+        )
 
         return carry_next, (x_ref_t, u_ref_t)
 
-    carry0 = pcom, vcom, c, vcz, theta, v, omega
+    # ============================================================
+    # Initial carry
+    # ============================================================
+    # Start from current xy, but the generated reference always has:
+    #   pcom_z = 0.4
+    #   c_z = 0
+    #   c_xy = pcom_xy
+    p_xy0 = pcom0[0:2]
 
-    _, (x_scan, u_scan) = jax.lax.scan(
-        scan_step,
-        carry0,
-        xs=None,
-        length=N,
+    carry0 = (
+        p_xy0,
+        theta0,
+        v0,
+        omega0,
     )
 
-    # x_ref ha N+1 nodi: stato corrente + N predetti
-    x_ref = jnp.concatenate([x_init[None, :], x_scan], axis=0)
-
-    # u_ref lo porto a N+1 ripetendo ultimo controllo,
-    # così puoi concatenarlo direttamente con x_ref.
-    u_last = u_scan[-1:, :]
-    u_ref = jnp.concatenate([u_scan, u_last], axis=0)
+    # ============================================================
+    # Generate N+1 reference samples
+    # ============================================================
+    _, (x_ref, u_ref) = jax.lax.scan(
+        scan_step,
+        carry0,
+        length=N + 1,
+    )
 
     return x_ref, u_ref
 

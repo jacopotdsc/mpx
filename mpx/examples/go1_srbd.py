@@ -26,6 +26,8 @@ import numpy as np
 from mujoco_playground._src import mjx_env
 from mujoco_playground._src.locomotion.go1 import base as go1_base
 from mujoco_playground._src.locomotion.go1 import go1_constants as consts
+import mpx.config.config_srbd as srbd_config
+from mpx.utils.mpc_wrapper_srbd import BatchedMPCControllerWrapper
 
 
 def default_config() -> config_dict.ConfigDict:
@@ -95,7 +97,7 @@ def default_config() -> config_dict.ConfigDict:
   )
 
 
-class Joystick(go1_base.Go1Env):
+class QuadrupedMPCEnv(go1_base.Go1Env):
   """Track a joystick command."""
 
   def __init__(
@@ -146,6 +148,10 @@ class Joystick(go1_base.Go1Env):
 
     self._cmd_a = jp.array(self._config.command_config.a)
     self._cmd_b = jp.array(self._config.command_config.b)
+
+    sim_frequency = 1.0 / float(self._config.sim_dt)
+    self.mpc_period = int(sim_frequency / srbd_config.mpc_frequency)
+    self.mpc = BatchedMPCControllerWrapper(srbd_config, 1)
 
   def reset(self, rng: jax.Array) -> mjx_env.State:
     qpos = self._init_q
@@ -210,6 +216,9 @@ class Joystick(go1_base.Go1Env):
         key2, shape=(3,), minval=-self._cmd_a, maxval=self._cmd_a
     )
 
+    mpc_state = self.mpc.init_state()
+    ctrl, mpc_state = self._compute_ctrl(qpos, qvel, data.geom_xpos, cmd, mpc_state)
+
     info = {
         "rng": rng,
         "command": cmd,
@@ -226,6 +235,10 @@ class Joystick(go1_base.Go1Env):
         "pert_steps": 0,
         "pert_dir": jp.zeros(3),
         "pert_mag": pert_mag,
+        "step_counter": 0,
+        "mpc_state": mpc_state,
+        "mpc_ctrl": ctrl,
+        "ctrl": ctrl,
     }
 
     metrics = {}
@@ -245,12 +258,53 @@ class Joystick(go1_base.Go1Env):
   #   state = state.replace(data=state.data.replace(qpos=qpos))
   #   return state
 
+  def _build_mpc_input(self, command: jax.Array) -> jax.Array:
+    command = jp.nan_to_num(command, nan=0.0, posinf=0.0, neginf=0.0)
+    return jp.array([command[0], command[1], 0.0, 0.0, 0.0, command[2], srbd_config.robot_height])
+
+  def _compute_ctrl(self, qpos: jax.Array, qvel: jax.Array, geom_xpos: jax.Array, command: jax.Array, mpc_state):
+    qpos = jp.nan_to_num(qpos, nan=0.0, posinf=0.0, neginf=0.0)
+    qvel = jp.nan_to_num(qvel, nan=0.0, posinf=0.0, neginf=0.0)
+
+    foot_world = jp.stack([geom_xpos[gid] for gid in self._feet_geom_id], axis=0)
+    foot_pos = foot_world.reshape(1, -1)
+    foot_pos = jp.nan_to_num(foot_pos, nan=0.0, posinf=0.0, neginf=0.0)
+
+    x0 = jp.concatenate([qpos[:3], qpos[3:7], qvel[:3], qvel[3:6]])[None]
+    mpc_input = self._build_mpc_input(command)[None, :]
+
+    contact = (foot_world[:, 2] < 0.035).astype(jp.float32)[None, :]
+
+    mpc_state = self.mpc.run(mpc_state, x0, mpc_input, foot_pos, contact)
+    tau, _ = self.mpc.whole_body_run(mpc_state, qpos[None], qvel[None])
+    tau = jp.nan_to_num(tau[0], nan=0.0, posinf=0.0, neginf=0.0)
+
+    return tau, mpc_state
+
   def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
     if self._config.pert_config.enable:
       state = self._maybe_apply_perturbation(state)
     # state = self._reset_if_outside_bounds(state)
 
-    motor_targets = self._default_pose + action * self._config.action_scale
+    mpc_ctrl, mpc_state = jax.lax.cond(
+        state.info["step_counter"] % self.mpc_period == 0,
+      lambda: self._compute_ctrl(
+        state.data.qpos,
+        state.data.qvel,
+        state.data.geom_xpos,
+        state.info["command"],
+        state.info["mpc_state"],
+      ),
+        lambda: (state.info["mpc_ctrl"], state.info["mpc_state"]),
+    )
+
+    tau_cmd, J = self.mpc.whole_body_run(
+        mpc_state,
+        jp.asarray(state.data.qpos)[None, :],
+        jp.asarray(state.data.qvel)[None, :],
+    )
+    
+    motor_targets = tau_cmd[0] #self._default_pose + action * self._config.action_scale
     data = mjx_env.step(
         self.mjx_model, state.data, motor_targets, self.n_substeps
     )
@@ -297,6 +351,11 @@ class Joystick(go1_base.Go1Env):
     for k, v in rewards.items():
       state.metrics[f"reward/{k}"] = v
     state.metrics["swing_peak"] = jp.mean(state.info["swing_peak"])
+
+    state.info["step_counter"] += 1
+    state.info["mpc_ctrl"] = mpc_ctrl
+    state.info["ctrl"] = mpc_ctrl
+    state.info["mpc_state"] = mpc_state
 
     done = done.astype(reward.dtype)
     state = state.replace(data=data, obs=obs, reward=reward, done=done)

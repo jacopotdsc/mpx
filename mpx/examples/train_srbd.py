@@ -7,12 +7,21 @@ Uses MuJoCo Playground environments.
 Usage:
     python train_srbd.py                     # train default Go1 Playground env
     python train_srbd.py --name go1          # same as default
-    python train_srbd.py --name AliengoJoystickFlatTerrain
+    python train_srbd.py --name AliengoJoystickRoughTerrain
     python train_srbd.py --eval              # eval selected Playground env
     python train_srbd.py --eval --headless   # eval without opening viewer
 """
 
-from __future__ import annotations
+import os
+import jax
+
+CACHE_DIR = os.path.expanduser("~/.jax_cache")
+jax.config.update("jax_compilation_cache_dir", CACHE_DIR)
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+
+
+#from __future__ import annotations
 
 import argparse
 import functools
@@ -27,7 +36,11 @@ import os
 import signal
 import csv
 
-import jax
+# Reduce GPU memory fragmentation (must be set before JAX/XLA initialise).
+os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.5")
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
+
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,6 +48,7 @@ import numpy as np
 from brax.training.agents.ppo import networks as ppo_networks
 from brax.training.agents.ppo import train as ppo
 from brax.training.acme import running_statistics
+from brax.training.acme import specs
 from brax.envs.wrappers.training import EpisodeWrapper, VmapWrapper, AutoResetWrapper
 import mujoco
 import mujoco.viewer
@@ -42,7 +56,16 @@ import mujoco.viewer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plot_rollout_info import plot_llc
 
-
+def get_gpu_name():
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            text=True
+        )
+        return out.strip().split("\n")[0]
+    except Exception:
+        return "Unknown GPU"
+        
 def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_fn=None, **kwargs):
     """Standard Brax wrapper: does not use mujoco_playground (which requires state.data)."""
     env = EpisodeWrapper(env, episode_length, action_repeat)
@@ -55,8 +78,8 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 
 PPO_PARAMS = dict(
-    num_timesteps          = 25_000_000,
-    num_evals              = 3,
+    num_timesteps          = 100_000_000,
+    num_evals              = 5,
     reward_scaling         = 1.0,
     episode_length         = 500,
     normalize_observations = True,
@@ -67,7 +90,7 @@ PPO_PARAMS = dict(
     discounting            = 0.97,
     learning_rate          = 3e-4,
     entropy_cost           = 0.005, #1e-2,
-    num_envs               = 1024,
+    num_envs               = 512,
     batch_size             = 256,
     seed                   = 0,
 )
@@ -207,9 +230,10 @@ def load_params(ckpt_dir: str, suffix: str = "best"):
 def run_viewer_rollout(
     eval_env,
     inference_fn=None,
-    env_name: str = "AliengoJoystickFlatTerrain",
+    env_name: str = "AliengoJoystickRoughTerrain",
     headless: bool = False,
     ckpt_dir: str = ".",
+    fixed_command: np.ndarray | None = None,
 ):
     print("\n" + "=" * 60)
     print("  Rollout viewer" + (" with loaded policy" if inference_fn else " with zero action"))
@@ -218,8 +242,10 @@ def run_viewer_rollout(
     episode_length = PPO_PARAMS["episode_length"]
 
     # cuSolver crashes on single-instance MJX; run a batch and show env 0 in viewer.
-    EVAL_BATCH = 1
+    # Batch size must be large enough to avoid cuSolver internal errors (GPU batched LU/Cholesky).
+    EVAL_BATCH = 2
     print(f"  [INFO] env_name: {env_name}")
+    print(f"  GPU: {get_gpu_name()}")
 
     batched_reset = jax.jit(jax.vmap(eval_env.reset))
     batched_step  = jax.jit(jax.vmap(eval_env.step))
@@ -230,6 +256,28 @@ def run_viewer_rollout(
     rng = jax.random.PRNGKey(42)
     rng, *reset_rngs = jax.random.split(rng, EVAL_BATCH + 1)
     state = batched_reset(jnp.stack(reset_rngs))
+
+    # Inject fixed command after reset if provided.
+    if fixed_command is not None:
+        _cmd = jnp.broadcast_to(  # (EVAL_BATCH, 3)
+            jnp.array(fixed_command, dtype=jnp.float32), (EVAL_BATCH, 3)
+        )
+        state = state.replace(info={
+            **state.info,
+            "command": jnp.zeros_like(_cmd),
+            "target_command": _cmd,
+        })
+        # Also patch the already-baked obs so the very first policy step
+        # sees the correct command (command lives at indices 45:48).
+        if isinstance(state.obs, dict):
+            patched_obs = {
+                k: (v.at[..., 45:48].set(_cmd) if v.ndim >= 2 and v.shape[-1] >= 48 else v)
+                for k, v in state.obs.items()
+            }
+            state = state.replace(obs=patched_obs)
+        elif state.obs.ndim >= 2 and state.obs.shape[-1] >= 48:
+            state = state.replace(obs=state.obs.at[..., 45:48].set(_cmd))
+        #print(f"  [CMD] Fixed command: vx={fixed_command[0]:+.2f}  vy={fixed_command[1]:+.2f}  wz={fixed_command[2]:+.2f}")
 
     viewer_model = None
     viewer_data = None
@@ -314,7 +362,27 @@ def run_viewer_rollout(
             else:
                 action = zero_action
 
+            if fixed_command is not None:
+                _cmd = jnp.broadcast_to(  # (EVAL_BATCH, 3)
+                    jnp.array(fixed_command, dtype=jnp.float32), (EVAL_BATCH, 3)
+                )
+                state = state.replace(info={
+                    **state.info,
+                    #"command": _cmd,
+                    "target_command": _cmd,
+                })
+
             state = batched_step(state, action)
+
+            # Re-inject after step: the env smooths/resamples command inside
+            # step(), so we overwrite info again to keep the fixed value
+            # visible in logs and for the next iteration's policy input.
+            if fixed_command is not None:
+                state = state.replace(info={
+                    **state.info,
+                    #"command": _cmd,
+                    "target_command": _cmd,
+                })
 
             steps_done = i + 1
             rewards.append(_get_reward(state))
@@ -345,7 +413,26 @@ def run_viewer_rollout(
                 else:
                     action = zero_action
 
+                if fixed_command is not None:
+                    _cmd = jnp.broadcast_to(  # (EVAL_BATCH, 3)
+                        jnp.array(fixed_command, dtype=jnp.float32), (EVAL_BATCH, 3)
+                    )
+                    state = state.replace(info={
+                        **state.info,
+                        #"command": _cmd,
+                        "target_command": _cmd,
+                    })
+
                 state = batched_step(state, action)
+
+                # Re-inject after step: the env smooths/resamples command
+                # inside step(), so overwrite to keep the fixed value in HUD.
+                if fixed_command is not None:
+                    state = state.replace(info={
+                        **state.info,
+                        #"command": _cmd,
+                        "target_command": _cmd,
+                    })
 
                 steps_done = i + 1
                 rewards.append(_get_reward(state))
@@ -395,6 +482,7 @@ def run_viewer_rollout(
     axes[2].grid(True, alpha=0.3)
 
     fig.tight_layout()
+    os.makedirs(ckpt_dir, exist_ok=True)
     rollout_plot_path = os.path.join(ckpt_dir, "reward_rollout.png")
     fig.savefig(rollout_plot_path, dpi=120)
     plt.close(fig)
@@ -411,6 +499,35 @@ def run_viewer_rollout(
         plot_llc(csv_path)
 
 
+def _build_fresh_networks(env):
+    """Return a ppo_networks with random hidden layers and zero-init output layer."""
+    if DISTRIBUTION_TYPE == "tanh_normal":
+        param_size = 2 * env.action_size
+    elif DISTRIBUTION_TYPE == "normal":
+        param_size = env.action_size
+    else:
+        raise ValueError(f"Unsupported distribution type: {DISTRIBUTION_TYPE}")
+
+    def _policy_kernel_init_factory(**init_kwargs):
+        base_init = jax.nn.initializers.lecun_uniform(**init_kwargs)
+
+        def _init(key, shape, dtype=jnp.float32):
+            if len(shape) >= 2 and shape[-1] == param_size:
+                return jnp.zeros(shape, dtype)
+            return base_init(key, shape, dtype)
+
+        return _init
+
+    return ppo_networks.make_ppo_networks(
+        observation_size=env.observation_size,
+        action_size=env.action_size,
+        policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
+        policy_network_kernel_init_fn=_policy_kernel_init_factory,
+        preprocess_observations_fn=running_statistics.normalize,
+        distribution_type=DISTRIBUTION_TYPE,
+    )
+
+
 def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
               load_init=None, env_name: str = "QuadrupedMPCEnv"):
     global REWARD_LOG_FILE, CKPT_DIR
@@ -424,6 +541,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         f"  date         : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"  JAX backend  : {jax.default_backend()}",
         f"  devices      : {jax.devices()}",
+        f"  GPU name:    : "
         "  --- network ---",
         f"  distribution : {DISTRIBUTION_TYPE}",
         f"  hidden layers: {POLICY_HIDDEN_LAYER_SIZES}",
@@ -453,44 +571,14 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         print("  Fresh training: zero-initializing policy output layer.")
 
         def _fresh_network_factory(observation_size, action_size, **kwargs):
-            # For tanh_normal, policy is an MLP with a final Dense(param_size).
-            # We keep hidden layers default-init and zero only layers whose output size == param_size.
-            distribution_type = DISTRIBUTION_TYPE  # use global; brax does not pass distribution_type in kwargs
-            if distribution_type == "tanh_normal":
-                param_size = 2 * action_size
-            elif distribution_type == "normal":
-                param_size = action_size
-            else:
-                raise ValueError(f"Unsupported distribution type: {distribution_type}")
-
-            def _policy_kernel_init_factory(**init_kwargs):
-                base_init = jax.nn.initializers.lecun_uniform(**init_kwargs)
-
-                def _init(key, shape, dtype=jnp.float32):
-                    if len(shape) >= 2 and shape[-1] == param_size:
-                        return jnp.zeros(shape, dtype)
-                    return base_init(key, shape, dtype)
-
-                return _init
-
             kwargs.pop("policy_network_kernel_init_fn", None)
-            return ppo_networks.make_ppo_networks(
-                observation_size=observation_size,
-                action_size=action_size,
-                policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-                policy_network_kernel_init_fn=_policy_kernel_init_factory,
-                distribution_type=DISTRIBUTION_TYPE,
-                **kwargs,
-            )
+            kwargs.pop("distribution_type", None)
+            return _build_fresh_networks(env)
 
         selected_network_factory = _fresh_network_factory
 
         # Debug check: output-layer kernels should be exactly zero at init.
-        debug_networks = selected_network_factory(
-            observation_size=env.observation_size,
-            action_size=env.action_size,
-            preprocess_observations_fn=running_statistics.normalize,
-        )
+        debug_networks = _build_fresh_networks(env)
         debug_policy_params = debug_networks.policy_network.init(jax.random.PRNGKey(PPO_PARAMS["seed"]))
         flat_debug = jax.tree_util.tree_flatten_with_path(debug_policy_params)[0]
         print("  policy param shapes:")
@@ -565,20 +653,28 @@ def main():
     parser.add_argument(
         "--name",
         type=str,
-        default="AliengoJoystickFlatTerrain",
+        default="AliengoJoystickRoughTerrain",
         help="Environment name. Use 'QuadrupedMPCEnv' for custom SRBD; otherwise a MuJoCo Playground env name.",
     )
     parser.add_argument("--load", nargs="?", const="best", default=None, metavar="FILE",
                         help="Load checkpoint weights. Optionally specify filename or suffix (e.g. 'params_crash.npz', 'crash'). Defaults to 'params_best.pkl'.")
     parser.add_argument("--zero", action="store_true", help="Force zero actions (ignore policy network)")
     parser.add_argument("--headless", action="store_true", help="Eval rollout without opening the MuJoCo viewer")
+    parser.add_argument("--cmd", nargs=3, type=float, default=None, metavar=("VX", "VY", "WZ"),
+                        help="Fix joystick command for eval rollout, e.g. --cmd 0.5 0.0 0.0")
     parser.add_argument(
         "--ckpt-dir",
         type=str,
         default="checkpoints",
         help="Checkpoint root directory (checkpoints are stored in <root>/<env_name>)",
     )
+
     args = parser.parse_args()
+
+    # Auto-set headless if DISPLAY is missing
+    if not args.train and not args.headless and (os.environ.get("DISPLAY") is None or os.environ.get("DISPLAY") == ""):
+        print("[WARN] No DISPLAY detected: forcing --headless mode (no viewer)")
+        args.headless = True
 
     # ── pick environment ────────────────────────────────────────
     env_name = args.name
@@ -598,12 +694,27 @@ def main():
 
     load_suffix = _parse_load_suffix(args.load) if args.load else "best"
     params = load_params(ckpt_dir, suffix=load_suffix)
-    if params is None or args.zero:
-        if args.zero:
-            print("  [INFO] --zero flag set: ignoring loaded checkpoint and using zero action.")
+
+    fixed_cmd = np.array(args.cmd) if args.cmd is not None else None
+
+    if args.zero:
+        print("  [INFO] --zero flag: using fresh network with zero output layer.")
+        networks = _build_fresh_networks(eval_env)
+        policy_params = networks.policy_network.init(jax.random.PRNGKey(0))
+        obs_size = eval_env.observation_size
+        if isinstance(obs_size, dict):
+            obs_proto = {k: specs.Array((int(np.prod(v)),) if not isinstance(v, int) else (v,), jnp.float32)
+                         for k, v in obs_size.items()}
         else:
-            print(f"  [WARN] No checkpoint found in '{ckpt_dir}', using zero action.")
-        run_viewer_rollout(eval_env, inference_fn=None, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir)
+            obs_proto = specs.Array((obs_size,), jnp.float32)
+        normalizer_params = running_statistics.init_state(obs_proto)
+        params_zero = (normalizer_params, policy_params)
+        inference_fn = ppo_networks.make_inference_fn(networks)
+        policy_fn = inference_fn(params_zero, deterministic=True)
+        run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd)
+    elif params is None:
+        print(f"  [WARN] No checkpoint found in '{ckpt_dir}', using zero action.")
+        run_viewer_rollout(eval_env, inference_fn=None, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd)
     else:
         print(f"  Checkpoint loaded from '{ckpt_dir}'")
         networks = ppo_networks.make_ppo_networks(
@@ -615,15 +726,32 @@ def main():
         )
         inference_fn = ppo_networks.make_inference_fn(networks)
         policy_fn = inference_fn(params, deterministic=True)
-        run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir)
+        run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd)
 
 
 if __name__ == "__main__":
+    def _input_timeout(prompt: str, timeout: int = 5, default: str = "") -> str:
+        """Read a line from stdin; return `default` if no input within `timeout` seconds."""
+        def _alarm_handler(signum, frame):
+            raise TimeoutError()
+        old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout)
+        try:
+            ans = input(prompt)
+            signal.alarm(0)
+            return ans
+        except TimeoutError:
+            print(f"\n[timeout] No input in {timeout}s — using default: '{default}'")
+            return default
+        finally:
+            signal.signal(signal.SIGALRM, old_handler)
+            signal.alarm(0)
+
     def gpu_python_process_cleanup():
         """
         - Lista tutti i processi Python che usano la GPU
-        - Se 1 solo: chiede conferma y/n
-        - Se >1: chiede di inserire PID specifico
+        - Se 1 solo: chiede conferma y/n (kill automatico dopo 5s)
+        - Se >1: chiede di inserire PID specifico (skip dopo 5s)
         - Se PID non valido: esce
         """
 
@@ -666,7 +794,7 @@ if __name__ == "__main__":
         # -------------------------
         if len(processes) == 1:
             pid, name, mem = processes[0]
-            ans = input(f"\nKill PID {pid}? [y/N]: ").strip().lower()
+            ans = _input_timeout(f"\nKill PID {pid}? [Y/n]: ", timeout=5, default="y").strip().lower()
 
             if ans in ("y", ""):
                 try:
@@ -687,7 +815,10 @@ if __name__ == "__main__":
         pid_list = [p[0] for p in processes]
 
         try:
-            user_pid = input("\nMultiple processes detected. Enter PID to kill: ").strip()
+            user_pid = _input_timeout("\nMultiple processes detected. Enter PID to kill: ", timeout=5, default="").strip()
+            if not user_pid:
+                print("No input. Exiting.")
+                exit(1)
             user_pid = int(user_pid)
         except Exception:
             print("Invalid input. Exiting.")

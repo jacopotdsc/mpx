@@ -17,6 +17,7 @@ os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 
 import jax
 import jax.numpy as jnp
+from jax.scipy.spatial.transform import Rotation
 import mujoco
 from mujoco import mjx
 
@@ -64,6 +65,7 @@ class QuadrupedMPCEnv(PipelineEnv):
         ]
         print(f"[QuadrupedMPCEnv] foot geom ids: {self._foot_geom_ids}")
 
+        self._q0 = config.q0
         self._qpos0 = jnp.concatenate([config.p0, config.quat0, config.q0])
         self._qvel0 = jnp.zeros(6 + self.n_joints)
 
@@ -86,7 +88,7 @@ class QuadrupedMPCEnv(PipelineEnv):
         command        = jnp.zeros(3) #self._sample_command(cmd_rng)
         mpc_input      = self._build_mpc_input(command)
         prev_action    = jnp.zeros((self.n_joints,), dtype=jnp.float32)
-        reward         = self._compute_reward(pipeline_state, command, delta=prev_action)
+        reward         = self._compute_reward(pipeline_state, command, nn_act=prev_action, done=False)
         mpc_state      = self.mpc.init_state()
         ctrl, mpc_state = self._compute_ctrl(pipeline_state, command, mpc_state)
         obs            = self._get_obs(pipeline_state, command, mpc_input, ctrl, prev_action)
@@ -109,22 +111,24 @@ class QuadrupedMPCEnv(PipelineEnv):
         )
 
     def step(self, state: State, action: jax.Array) -> State:
-        delta      = action*self.delta_limit #jnp.clip(action, -self.delta_limit, self.delta_limit)
+        delta      = action #jnp.clip(action, -self.delta_limit, self.delta_limit)
         command    = state.info["command"]
         mpc_input  = state.info["mpc_input"]
         step_count = state.info["step_count"]
 
-        mpc_ctrl, mpc_state = jax.lax.cond(
-            step_count % self.mpc_period == 0,
-            lambda: self._compute_ctrl(state.pipeline_state, command, state.info["mpc_state"]),
-            lambda: (state.info["mpc_ctrl"], state.info["mpc_state"]),
-        )
-        ctrl = mpc_ctrl + delta
+        #mpc_ctrl, mpc_state = jax.lax.cond(
+        #    step_count % self.mpc_period == 0,
+        #    lambda: self._compute_ctrl(state.pipeline_state, command, state.info["mpc_state"]),
+        #    lambda: (state.info["mpc_ctrl"], state.info["mpc_state"]),
+        #)
+        mpc_ctrl = jnp.zeros(self.n_joints)  # --- IGNORE MPC FOR NOW ---
+        #ctrl = mpc_ctrl + delta
+        ctrl = 50*(self._q0 + delta * 0.5)
 
         pipeline_state = self.pipeline_step(state.pipeline_state, ctrl)
         obs            = self._get_obs(pipeline_state, command, mpc_input, mpc_ctrl, action)
-        reward         = self._compute_reward(pipeline_state, command, delta)
         done           = self._is_done(pipeline_state, step_count + 1)
+        reward         = self._compute_reward(pipeline_state, command, delta, done)
 
         return state.replace(
             pipeline_state = pipeline_state,
@@ -138,7 +142,7 @@ class QuadrupedMPCEnv(PipelineEnv):
                 "ctrl": ctrl,
                 "prev_action": action,
                 "step_count": step_count + 1,
-                "mpc_state": mpc_state,
+                #"mpc_state": mpc_state,
             },
         )
 
@@ -163,7 +167,7 @@ class QuadrupedMPCEnv(PipelineEnv):
         tau, _    = self.mpc.whole_body_run(mpc_state, qpos[None], qvel[None])
 
         tau = jnp.nan_to_num(tau[0], nan=0.0, posinf=0.0, neginf=0.0)
-        tau = jnp.clip(tau, -60.0, 60.0)
+        #tau = jnp.clip(tau, -60.0, 60.0)
         return tau, mpc_state
 
     def _get_obs(
@@ -190,13 +194,60 @@ class QuadrupedMPCEnv(PipelineEnv):
         )
         return jnp.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
 
-    def _compute_reward(self, ps, command, delta):
+    def _compute_reward(self, ps, command, nn_act, done):
+        ####
+        # PROVARE E2E training
+        # AGGIUNGI ALTRE REWARD COME MIT
+        # FAI TRVAINING CON LORO SETUP,
+        # DOPO ABBASSA A 5 N/m PERHCÈ LA LORO RESIDUAL È MAX 5
+        ####
+        # Linear velocity tracking
+        error = (ps.qd[:2] - command[:2])/(1+jnp.abs(command[:2]))  # Normalizza per evitare grandi penalità a basse velocità
         r_lin = jnp.exp(-jnp.sum((ps.qd[:2] - command[:2])**2) / self.sigma)
+        
+        # Angular velocity tracking
         r_ang = jnp.exp(-(ps.qd[5] - command[2])**2 / self.sigma)
-        r_alive  = jnp.float32(1.0)
-        #r_delta  = -0.01 * jnp.sum(delta**2)
-        r_delta = -0.1 * jnp.sum((delta / self.delta_limit)**2)
-        return jnp.nan_to_num(r_lin + r_ang + r_alive + r_delta)
+        
+        # Height tracking: maintain desired height
+        r_height = jnp.exp(-((ps.q[2] - config.robot_height)**2) / (self.sigma))
+        
+        # Trajectory tracking: stay near center (position stability)
+        r_trajectory = jnp.exp(-jnp.sum(ps.q[:2]**2) / (0.5**2))
+        
+        # Orientation penalty: penalize when Z-axis is not [0, 0, 1]
+        qw, qx, qy, qz = ps.q[3], ps.q[4], ps.q[5], ps.q[6]
+        z_axis = jnp.array([
+            2.0 * (qx*qz + qw*qy),
+            2.0 * (qy*qz - qw*qx),
+            1.0 - 2.0 * (qx**2 + qy**2),
+        ])
+
+        # penalizza le prime due componenti (x, y) — devono essere 0 quando upright
+        r_orientation = jnp.sum(z_axis[:2]**2)
+
+        r_alive = jnp.float32(1.0)
+        r_joint_home = jnp.sum((nn_act - self._q0)**2)
+        
+        r_torque_reg = jnp.sum(nn_act**2)
+        r_done = done  # Penalità per cadere o terminare
+
+        # Foot contact reward: reward for each foot touching the ground
+        foot_heights = jnp.stack([ps.geom_xpos[gid, 2] for gid in self._foot_geom_ids])
+        n_contacts = jnp.sum((foot_heights < 0.035).astype(jnp.float32))
+        r_foot_contact = n_contacts / len(self._foot_geom_ids)
+
+        return jnp.nan_to_num(
+            1.0 * r_lin + 
+            0.5 * r_ang + 
+            0.5 * r_height + 
+            0.0 * r_trajectory + 
+            -5.0 * r_orientation + 
+            0.0 * r_alive + 
+            0.5 * r_joint_home +
+            0.0001 * r_torque_reg +
+            -100 * r_done +
+            0.5 * r_foot_contact
+        )
 
     def _is_done(self, ps: base.State, step_count: jax.Array) -> jax.Array:
         fallen  = ps.q[2] < self.height_threshold
