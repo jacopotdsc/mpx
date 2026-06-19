@@ -462,9 +462,9 @@ def reference_generator_dfcip_offline(
 
         return x_ref, u_ref
 
-@partial(jax.jit, static_argnums=(0,1,2,3))
+@partial(jax.jit, static_argnums=(0, 1, 2, 3))
 def reference_generator_dfcip_online(
-    N: float,
+    N: int,
     dt: float,
     m: float,
     grav: float,
@@ -497,7 +497,7 @@ def reference_generator_dfcip_online(
     """
 
     # ============================================================
-    # Fixed reference quantities, as in the C++ flat walking plan
+    # Fixed future-reference quantities
     # ============================================================
     z_com_ref = 0.4
     z_contact_ref = 0.0
@@ -505,11 +505,11 @@ def reference_generator_dfcip_online(
     vcz_ref = 0.0
 
     # Acceleration limits for online ramp
-    a_default = 1.0          # m/s^2
-    alpha_default = 1.0      # rad/s^2
+    a_default = 1.0
+    alpha_default = 1.0
 
     # ============================================================
-    # Current reduced state
+    # Current state / node 0
     # ============================================================
     pcom0 = x0[0:3]
     theta0 = x0[10]
@@ -527,14 +527,13 @@ def reference_generator_dfcip_online(
         return current + jnp.clip(delta, -max_delta, max_delta)
 
     def build_state(p_xy, theta, v, vx, vy, omega):
-
         return jnp.array([
             # CoM position
             p_xy[0],
             p_xy[1],
             z_com_ref,
 
-            # CoM velocity from reduced velocity v
+            # CoM velocity
             vx,
             vy,
             vcom_z_ref,
@@ -553,15 +552,43 @@ def reference_generator_dfcip_online(
             omega,
         ])
 
-    def scan_step(carry, j):
+    def build_u_ref():
+        return jnp.array([
+            0.0,  # a
+            0.0,  # ac_z
+            0.0,  # alpha
+
+            0.0,
+            0.0,
+            m * grav / 2.0,
+
+            0.0,
+            0.0,
+            m * grav / 2.0,
+        ])
+
+    def scan_step(carry, _):
         p_xy, theta, v, omega = carry
 
-        a_lim = jnp.where(j == 0, a_default, a_default)
-        alpha_lim = jnp.where(j == 0, alpha_default, alpha_default)
+        # --------------------------------------------------------
+        # Acceleration-limited velocity update
+        # --------------------------------------------------------
+        v_next = move_towards(
+            v,
+            v_des,
+            a_default * dt,
+        )
 
-        v_next = move_towards(v, v_des, a_lim * dt)
-        omega_next = move_towards(omega, omega_des, alpha_lim * dt)
+        omega_next = move_towards(
+            omega,
+            omega_des,
+            alpha_default * dt,
+        )
 
+        # --------------------------------------------------------
+        # C++-style unicycle Euler integration
+        # vx/vy are velocities, not displacements
+        # --------------------------------------------------------
         vx_next = v_next * jnp.cos(theta)
         vy_next = v_next * jnp.sin(theta)
 
@@ -577,23 +604,11 @@ def reference_generator_dfcip_online(
             theta=theta_next,
             v=v_next,
             vx=vx_next,
-            vy=vy_next, 
+            vy=vy_next,
             omega=omega_next,
         )
 
-        u_ref_t = jnp.array([
-            0.0,  # a
-            0.0,  # ac_z
-            0.0,  # alpha
-
-            0.0,
-            0.0,
-            m * grav / 2.0,
-
-            0.0,
-            0.0,
-            m * grav / 2.0,
-        ])
+        u_ref_t = build_u_ref()
 
         carry_next = (
             p_xy_next,
@@ -605,12 +620,21 @@ def reference_generator_dfcip_online(
         return carry_next, (x_ref_t, u_ref_t)
 
     # ============================================================
-    # Initial carry
+    # Node 0 = measured current state
     # ============================================================
-    # Start from current xy, but the generated reference always has:
-    #   pcom_z = 0.4
-    #   c_z = 0
-    #   c_xy = pcom_xy
+    x_init = build_state(
+        p_xy=pcom0[0:2],
+        theta=theta0,
+        v=v0,
+        vx=v0 * jnp.cos(theta0),
+        vy=v0 * jnp.sin(theta0),
+        omega=omega0,
+    )
+    u_init = build_u_ref()
+
+    # ============================================================
+    # Future nodes: x_ref[1], ..., x_ref[N]
+    # ============================================================
     p_xy0 = pcom0[0:2]
 
     carry0 = (
@@ -620,14 +644,25 @@ def reference_generator_dfcip_online(
         omega0,
     )
 
-    # ============================================================
-    # Generate N+1 reference samples
-    # ============================================================
-    _, (x_ref, u_ref) = jax.lax.scan(
+    _, (x_scan, u_scan) = jax.lax.scan(
         scan_step,
         carry0,
-        length=N + 1,
+        xs=None,
+        length=N,
     )
+
+    # ============================================================
+    # Final reference arrays
+    # ============================================================
+    x_ref = jnp.concatenate([
+        x_init[None, :],
+        x_scan,
+    ], axis=0)
+
+    u_ref = jnp.concatenate([
+        u_init[None, :],
+        u_scan,
+    ], axis=0)
 
     return x_ref, u_ref
 

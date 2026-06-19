@@ -492,7 +492,7 @@ def build_tita_state(model, data, base_body_name, contact_ids) -> jnp.ndarray:
         )
         omega_world = vel[0:3]
         v_center_world = vel[3:6]
-        return v_center_world + np.cross(omega_world, rcp_world)
+        return v_center_world #+ np.cross(omega_world, rcp_world)
 
     dpl_world = jnp.asarray(geom_contact_velocity(data, l_geom, l_rcp))
     dpr_world = jnp.asarray(geom_contact_velocity(data, r_geom, r_rcp))
