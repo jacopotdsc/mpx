@@ -26,7 +26,7 @@ class MPCState:
     sol          : ControlSol
     X0_shifted           : jax.Array
     U0_shifted           : jax.Array
-    V0_shifted           : jax.Array
+    D0_shifted           : jax.Array
     X_prediction         : jax.Array
     U_prediction         : jax.Array
     # WBC warm-start
@@ -161,11 +161,11 @@ class BatchedMPCControllerWrapper:
 
         U0 = jnp.tile(config.u_ref, (config.N, 1))
         X0 = jnp.tile(self.initial_state, (config.N + 1, 1))
-        V0 = jnp.zeros((config.N + 1, config.nx))
+        D0 = jnp.zeros((config.N + 1, config.nx))
 
         self._U0_init = jnp.tile(U0, (n_env, 1, 1))
         self._X0_init = jnp.tile(X0, (n_env, 1, 1))
-        self._V0_init = jnp.tile(V0, (n_env, 1, 1))
+        self._D0_init = jnp.tile(D0, (n_env, 1, 1))
         
     def init_state(self) -> MPCState:
         n, cfg = self.n_env, self.config
@@ -178,12 +178,12 @@ class BatchedMPCControllerWrapper:
             sol= ControlSol(a=a, ac_z=ac_z, alpha=alpha, grf=grf),
             X0_shifted=self._X0_init, 
             U0_shifted=self._U0_init,
-            V0_shifted=self._V0_init,
+            D0_shifted=self._D0_init,
             X_prediction=self._X0_init,
             U_prediction=self._U0_init,
         )
 
-    def run(self, state: MPCState, x0, cmd, time_frame, horizon):
+    def run(self, state: MPCState, x0, cmd):
         """
         Runs one MPC update using the current state, input, and foot positions.
         
@@ -196,47 +196,20 @@ class BatchedMPCControllerWrapper:
         """
         # Generate reference trajectory and additional MPC parameters.
         
-        x_T = self._x_reference.shape[0]
-        u_T = self._u_reference.shape[0]
-
-        x_idx = time_frame + jnp.arange(horizon + 1)
-        u_idx = time_frame + jnp.arange(horizon)
-
-        x_idx = jnp.clip(x_idx, 0, x_T - 1)
-        u_idx = jnp.clip(u_idx, 0, u_T - 1)
-
-        x_slice = self._x_reference[x_idx, :]   # (horizon+1, nx)
-        u_slice = self._u_reference[u_idx, :]   # (horizon,   nu)
-        u_slice_pad = jnp.concatenate([u_slice, u_slice[-1:, :]], axis=0)
-        ref_slice_offline = jnp.concatenate([x_slice, u_slice_pad], axis=1)  # (horizon+1, nx + nu)
-        reference_offline = jnp.tile(ref_slice_offline[None, :, :], (self.n_env, 1, 1))
-        
         x_ref, u_ref = self._ref_gen(x0, cmd)
         reference = jnp.concatenate([x_ref, u_ref], axis=-1)
 
         parameter = None
 
-        X, U, V = self._solve(
+        X, U, D = self._solve(
             reference,
-            #reference_offline,
             parameter,
             jnp.tile(self.config.W, (self.n_env, 1, 1)),
             x0,
             state.X0_shifted,
             state.U0_shifted,
-            #state.V0_shifted
-            )
+        )
 
-        #jax.debug.print("x0: {value}", value=x0[0])
-        #jax.debug.print("X0_warm: {value}", value=X_warm[0,0])
-        #jax.debug.print("XN_warm: {value}", value=X_warm[0,-1])
-        #jax.debug.print("U0_warm: {value}", value=U_warm[0,0])
-        #jax.debug.print("UN_warm: {value}", value=U_warm[0,-1])
-        #jax.debug.print("X0_pred: {value}", value=X[0,0])
-        #jax.debug.print("XN_pred: {value}", value=X[0,-1])
-        #jax.debug.print("U0_warm: {value}", value=U[0,0])
-        #jax.debug.print("UN_warm: {value}", value=U[0,-1])
-        
         new_a = U[:,0,0]
         new_ac_z = U[:,0,1]
         new_alpha = U[:,0,2]
@@ -246,13 +219,13 @@ class BatchedMPCControllerWrapper:
         s = self.shift
         new_X0  = jnp.concatenate([X[:, s:, :], jnp.tile(X[:, -1:, :], (1, s, 1))], axis=1)
         new_U0  = jnp.concatenate([U[:, s:, :], jnp.tile(U[:, -1:, :], (1, s, 1))], axis=1)
-        new_V0  = jnp.concatenate([V[:, s:, :], jnp.tile(V[:, -1:, :], (1, s, 1))], axis=1)
+        new_D0  = jnp.concatenate([D[:, s:, :], jnp.tile(D[:, -1:, :], (1, s, 1))], axis=1)
         
         new_state = MPCState(
             sol=ControlSol(a=new_a, ac_z=new_ac_z, alpha=new_alpha, grf=new_grf),
             X0_shifted=new_X0, 
             U0_shifted=new_U0, 
-            V0_shifted=new_V0,
+            D0_shifted=new_D0,
             X_prediction=X,
             U_prediction=U,
         )

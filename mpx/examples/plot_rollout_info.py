@@ -23,11 +23,37 @@ import mpx.config.config_dfcip as config
 _DEFAULT_DIR = os.path.join(os.path.dirname(__file__), "plots", "test")
 _MPC_DIR = os.path.join(_DEFAULT_DIR, "mpc_prediction")
 
+def _save_sim_video(
+        video_dir,
+        frames,
+        video_fps=30,
+        slowdown_factor=1.0,
+    ) -> None:
+        print("Saving simulation video... ", end="\n", flush=True)
+        try:
+            import imageio
+        except ImportError:
+            print("imageio not installed, skipping video saving.")
+            return
+        if not frames:
+            print("No frames captured, skipping video saving.")
+            return
+        print(f"Captured {len(frames)} frames at {video_fps} fps.")
+        video_dir = os.path.join(video_dir)
+        os.makedirs(video_dir, exist_ok=True)
+        video_path = os.path.join(video_dir, "simulation_video.mp4")
+        try:
+            imageio.mimwrite(video_path, frames, fps=video_fps, macro_block_size=1)
+            print(
+                f"[sim_video] saved ({len(frames)} frames, {video_fps} fps, slowdown x{slowdown_factor:.2f}): {video_path}"
+            )
+        except Exception as e:
+            print(f"[sim_video] failed to save video: {e}")
+
 def _extract_step_idx(path: str) -> int:
     name = os.path.basename(path)
     match = re.search(r"_t(\d+)\.png$", name)
     return int(match.group(1)) if match else -1
-
 
 def get_cols(df, prefix):
     """Return sorted list of columns that start with prefix."""
@@ -47,9 +73,6 @@ def plot_mpc_state_and_output(
     save_csv: bool = True,
 ):
     os.makedirs(out_dir, exist_ok=True)
-    
-    title_state += f"\n{cmd}" if cmd is not None else ""
-    title_u0 += f"\n{cmd}" if cmd is not None else ""
 
     x0 = np.asarray(x0_list, dtype=float)
     u0 = np.asarray(u0_list, dtype=float)
@@ -68,6 +91,29 @@ def plot_mpc_state_and_output(
 
     if u_ref is not None and u_ref.ndim == 1:
         u_ref = u_ref[None, :]
+
+    # ============================================================
+    # CMD PREPROCESS
+    # cmd layout:
+    #   cmd[0] = v_cmd
+    #   cmd[1] = vz_cmd
+    #   cmd[2] = omega_cmd
+    #
+    # cmd can be:
+    #   - single command: [v, vz, omega]
+    #   - time series:    [[v0, vz0, omega0], [v1, vz1, omega1], ...]
+    # ============================================================
+    cmd_arr = None
+
+    if cmd is not None:
+        tmp = np.asarray(cmd, dtype=float)
+        tmp = np.squeeze(tmp)
+
+        if tmp.ndim == 1 and tmp.shape[0] >= 3:
+            cmd_arr = tmp[None, :]
+
+        elif tmp.ndim == 2 and tmp.shape[1] >= 3:
+            cmd_arr = tmp
 
     state_names = [
         "pcom_x", "pcom_y", "pcom_z",
@@ -121,6 +167,20 @@ def plot_mpc_state_and_output(
         _save_df_csv(df_u, out_dir, filename_u0)
 
     # ============================================================
+    # CMD REFERENCES FOR STATE PLOTS
+    # ============================================================
+    cmd_ref_map = {}
+
+    if cmd_arr is not None:
+        n_cmd = min(cmd_arr.shape[0], x0.shape[0])
+
+        cmd_ref_map = {
+            11: ("v_cmd", cmd_arr[:n_cmd, 0]),      # v     -> cmd[0]
+            12: ("omega_cmd", cmd_arr[:n_cmd, 2]),  # omega -> cmd[2]
+            5:  ("vz_cmd", cmd_arr[:n_cmd, 1]),     # vz    -> cmd[1]
+        }
+
+    # ============================================================
     # STATES FIGURE — 5 x 3
     # ============================================================
     fig1, axes1 = plt.subplots(5, 3, figsize=(18, 12), sharex=True)
@@ -135,6 +195,27 @@ def plot_mpc_state_and_output(
             if x_ref is not None and i < x_ref.shape[1]:
                 n = min(x0.shape[0], x_ref.shape[0])
                 ax.plot(np.arange(n), x_ref[:n, i], "--", label="ref")
+
+            if i in cmd_ref_map:
+                label_cmd, value_cmd = cmd_ref_map[i]
+
+                if len(value_cmd) == 1:
+                    ax.axhline(
+                        float(value_cmd[0]),
+                        linestyle=":",
+                        linewidth=2.0,
+                        label=label_cmd,
+                    )
+                else:
+                    n = min(len(value_cmd), x0.shape[0])
+                    ax.plot(
+                        np.arange(n),
+                        value_cmd[:n],
+                        ":",
+                        linewidth=2.0,
+                        label=label_cmd,
+                        color="orange",
+                    )
 
             ax.set_title(state_names[i] if i < len(state_names) else f"x{i}")
             ax.grid(True, alpha=0.3)

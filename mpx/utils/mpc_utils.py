@@ -505,8 +505,8 @@ def reference_generator_dfcip_online(
     vcz_ref = 0.0
 
     # Acceleration limits for online ramp
-    a_default = 1.0
-    alpha_default = 1.0
+    a_default = 5.0
+    alpha_default = 5.0
 
     # ============================================================
     # Current state / node 0
@@ -520,7 +520,7 @@ def reference_generator_dfcip_online(
     # Desired command
     # ============================================================
     v_des = cmd[0]
-    omega_des = cmd[1]
+    omega_des = cmd[2]
 
     def move_towards(current, target, max_delta):
         delta = target - current

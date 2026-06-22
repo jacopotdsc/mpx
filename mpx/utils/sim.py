@@ -76,6 +76,7 @@ class KeyboardVelocityCommand:
         self,
         vx: float = 0.0,
         vy: float = 0.0,
+        vz: float = 0.0,
         wz: float = 0.0,
         forward_step: float = 0.1,
         yaw_step: float = 0.2,
@@ -84,6 +85,7 @@ class KeyboardVelocityCommand:
     ):
         self.vx = float(vx)
         self.vy = float(vy)
+        self.vz = float(vz)
         self.wz = float(wz)
         self.forward_step = float(forward_step)
         self.yaw_step = float(yaw_step)
@@ -98,6 +100,7 @@ class KeyboardVelocityCommand:
     def reset(self):
         self.vx = 0.0
         self.vy = 0.0
+        self.vz = 0.0
         self.wz = 0.0
         self._overlay_dirty = True
 
@@ -138,10 +141,10 @@ class KeyboardVelocityCommand:
         )
     
     def mpc_wheeled_input(self, com_z_to_track: float) -> np.ndarray:
-        """Return the 7D locomotion command used by the MPC examples."""
+        """Return the 4D locomotion command used wheeled MPC examples."""
 
         return np.array(
-            [self.vx, self.vy, 0.0, 0.0, 0.0, self.wz, com_z_to_track],
+            [self.vx, self.vz, self.wz, com_z_to_track],
             dtype=np.float64,
         )
 

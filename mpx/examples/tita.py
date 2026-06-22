@@ -12,9 +12,9 @@ jax.config.update("jax_enable_x64", True)
 print(jax.config.jax_enable_x64)
 CACHE_DIR = os.path.expanduser("~/.jax_cache")
 print(CACHE_DIR)
-#jax.config.update("jax_compilation_cache_dir", CACHE_DIR)
-#jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
-#jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+jax.config.update("jax_compilation_cache_dir", "./jax_cache")
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 
 
 import sys
@@ -55,7 +55,8 @@ U_DES_LIST = []
 WBC_DESIRED_LIST = []
 WBC_CURRENT_LIST = []
 MPC_PREDICTION_FRAMES = {}
-CMD = [0.5, 0.0, 0.0] 
+CMD_LIST = []
+CMD = [0.0, 0.0, 0.5] 
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -74,7 +75,22 @@ from plot_rollout_info import (
     plot_torques_and_contacts,
     plot_mpc_state_and_output,
     plot_wbc_desired,
+    _save_sim_video,
 )
+
+def _build_solve_fn(mpc):
+    @jax.jit
+    def solve_mpc(x0, command, counter):
+        return mpc.run(x0, command, counter)
+
+    return solve_mpc
+
+def _build_wbc(mpc):
+    @jax.jit
+    def solve_wbc(mpc_state, x0, qpos, qvel, pl_world, pr_world, dpl_world, dpr_world):
+        return mpc.whole_body_run(mpc_state, x0, qpos, qvel, pl_world, pr_world, dpl_world, dpr_world)
+
+    return solve_wbc
 
 def update_com_tracking_camera(cam, model, data, base_body_id, alpha=0.10):
     """
@@ -689,6 +705,10 @@ def main(headless=False, steps=500, scene="flat"):
     # TODO: use mpc_wrapper_dfcip
     mpc = mpc_wrapper_dfcip.BatchedMPCControllerWrapper(config, n_env=1)
 
+    solve_mpc = _build_solve_fn(mpc)
+    reset_mpc = jax.jit(mpc.reset)
+    solve_wbc = _build_wbc(mpc)
+
     _reset_to_initial_state(model, data)
     mujoco.mj_forward(model, data)
     data.qvel[:] = 0.0          # ← forza velocità a zero
@@ -742,7 +762,7 @@ def main(headless=False, steps=500, scene="flat"):
     cmd = command_handle.mpc_wheeled_input(config.com_z_to_track) 
     cmd = jnp.asarray(CMD)[None, :]
     _t0 = timer()
-    mpc_state, reference = mpc.run(mpc_state, x0[None, :], cmd, counter, config.N)
+    mpc_state, reference = solve_mpc(mpc_state, x0[None, :], cmd)
     jax.block_until_ready(mpc_state.U0_shifted)
     _dt = timer() - _t0
     print(f"{int(_dt // 60)}m {_dt % 60:.1f}s")
@@ -836,7 +856,7 @@ def main(headless=False, steps=500, scene="flat"):
     pr_world_wbc = tita_state_wbc[9:12][None, :]
     dpl_world_wbc = tita_state_wbc[12:15][None, :]
     dpr_world_wbc = tita_state_wbc[15:18][None, :]
-    mpc_state, tau_cmd, qddot, fl, fr, desired = mpc.whole_body_run(
+    mpc_state, tau_cmd, qddot, fl, fr, desired = solve_wbc(
         mpc_state,
         x0,
         qpos_np,
@@ -930,7 +950,7 @@ def main(headless=False, steps=500, scene="flat"):
     mpc_state = mpc.init_state()
 
     def do_print(*args, **kwargs):
-        debug_print = True
+        debug_print = False
         if debug_print:
             print(*args, **kwargs)
 
@@ -951,7 +971,16 @@ def main(headless=False, steps=500, scene="flat"):
             if counter % 1 == 0:
                 print(f"calling mpc.run at step {counter} with x0={x0}")
                 start_time_mpc = timer()
-                mpc_state, reference = mpc.run(mpc_state, x0[None, :], cmd, counter, config.N)
+                mpc_state, reference = solve_mpc(mpc_state, x0[None, :], cmd)
+                jax.block_until_ready((
+                    reference,
+                    mpc_state.X_prediction,
+                    mpc_state.U_prediction,
+                    mpc_state.sol.a,
+                    mpc_state.sol.ac_z,
+                    mpc_state.sol.alpha,
+                    mpc_state.sol.grf,
+                ))
                 end_time_mpc = timer()
                 mpc_duration = end_time_mpc - start_time_mpc
                 print(f"[timing] mpc.run {mpc_duration * 1000:.2f} ms")
@@ -962,7 +991,7 @@ def main(headless=False, steps=500, scene="flat"):
             dpr_world_wbc = tita_state[15:18][None, :]
 
             start_time_wbc = timer()
-            mpc_state, tau_cmd, qddot, fl, fr, desired = mpc.whole_body_run(
+            mpc_state, tau_cmd, qddot, fl, fr, desired = solve_wbc(
                 mpc_state,
                 x0,
                 jnp.asarray(qpos)[None, :],
@@ -972,6 +1001,13 @@ def main(headless=False, steps=500, scene="flat"):
                 dpl_world_wbc,
                 dpr_world_wbc,
             )
+            jax.block_until_ready((
+                tau_cmd,
+                qddot,
+                fl,
+                fr,
+                desired,
+            ))
             
             end_time_wbc = timer()
             wbc_duration = end_time_wbc - start_time_wbc
@@ -1138,7 +1174,7 @@ def main(headless=False, steps=500, scene="flat"):
 
         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
         
-        if (counter % 100 == 0) or touch_floor:
+        if False and (counter % 100 == 0) or touch_floor:
             print(f"[step {counter}] touch_floor={touch_floor}, saving MPC prediction plots...")
             X0_np = np.asarray(mpc_state.X_prediction[0])   # (N+1, 13)
             U0_np = np.asarray(mpc_state.U_prediction[0])  
@@ -1163,7 +1199,7 @@ def main(headless=False, steps=500, scene="flat"):
             plot_mpc_state_and_output(
                 x0_list=MPC_INPUT_LIST,
                 u0_list=MPC_OUTPUT_LIST,
-                cmd=CMD,
+                cmd=CMD_LIST,
                 x_ref_list=None,
                 u_ref_list=None,
                 out_dir=TITA_PATH,
@@ -1186,35 +1222,19 @@ def main(headless=False, steps=500, scene="flat"):
             _sim_base_body_id,
             alpha=0.10,
         )
+        update_com_tracking_camera(
+            viewer.cam,
+            model,
+            data,
+            _sim_base_body_id,
+            alpha=0.10,
+        )
         _renderer.update_scene(data, camera=_sim_cam)
         if counter % 2 == 0:  # record every 2nd frame to reduce video size
             _sim_frames.append(_renderer.render().copy())
         counter += 1
         return mpc_state, reference, theta_prev, touch_floor
     
-    def _save_sim_video() -> None:
-        print("Saving simulation video... ", end="\n", flush=True)
-        try:
-            import imageio
-        except ImportError:
-            print("imageio not installed, skipping video saving.")
-            return
-        if not _sim_frames:
-            print("No frames captured, skipping video saving.")
-            return
-        print(f"Captured {len(_sim_frames)} frames at {video_fps} fps.")
-        video_dir = os.path.join(TITA_PATH)
-        os.makedirs(video_dir, exist_ok=True)
-        video_path = os.path.join(video_dir, "simulation_video.mp4")
-        try:
-            imageio.mimwrite(video_path, _sim_frames, fps=video_fps, macro_block_size=1)
-            print(
-                f"[sim_video] saved ({len(_sim_frames)} frames, {video_fps} fps, slowdown x{DEFAULT_VIDEO_SLOWDOWN_FACTOR:.2f}): {video_path}"
-            )
-        except Exception as e:
-            print(f"[sim_video] failed to save video: {e}")
-        finally:
-            _renderer.close()
 
     if headless:
         for _ in range(steps):
@@ -1223,7 +1243,6 @@ def main(headless=False, steps=500, scene="flat"):
             if touch_floor:
                 print(f"Base touched the floor at step {counter}. Ending simulation.")
                 break
-        _save_sim_video()
         return
 
     with mujoco.viewer.launch_passive(
@@ -1237,23 +1256,12 @@ def main(headless=False, steps=500, scene="flat"):
         while viewer.is_running():
             overlay_text = command_handle.consume_overlay_text()
             tic = timer()
-
-            texts = []
-
             if overlay_text is not None:
-                texts.append((None, None, *overlay_text))
-
-            texts.append((
-                None,
-                None,
-                "Info",
-                f"step: {counter}/{MAX_STEPS}\nsim time: {data.time:.3f} s"
-            ))
-
-            viewer.set_texts(texts)
+                viewer.set_texts((None, None, *overlay_text))
 
             cmd = command_handle.mpc_wheeled_input(config.com_z_to_track)  # dummy command for now
-            cmd = jnp.asarray(CMD)[None, :]
+            cmd = jnp.asarray([cmd[0], cmd[1], cmd[2]])[None, :]
+            CMD_LIST.append(cmd[0].copy())
             mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, cmd, theta_prev=theta_prev)
 
             toc = timer()
@@ -1273,7 +1281,11 @@ def main(headless=False, steps=500, scene="flat"):
     step_duration = end_time - start_time
     print(f"[timing] step {counter}/{MAX_STEPS}: {step_duration // 60:.0f}m {step_duration % 60:.1f}s")
     
-    _save_sim_video()
+    try:
+        _save_sim_video(video_dir=TITA_PATH, video_fps=video_fps, frames=_sim_frames, slowdown_factor=DEFAULT_VIDEO_SLOWDOWN_FACTOR)
+        _renderer.close()
+    except Exception as e:
+        print(f"Failed to save simulation video: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -1300,7 +1312,7 @@ if __name__ == "__main__":
         plot_mpc_state_and_output(
             x0_list=MPC_INPUT_LIST,
             u0_list=MPC_OUTPUT_LIST,
-            cmd=CMD,
+            cmd=CMD_LIST,
             x_ref_list=None,
             u_ref_list=None,
             out_dir=TITA_PATH,
