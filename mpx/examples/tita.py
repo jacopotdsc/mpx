@@ -39,7 +39,7 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.abspath(os.path.join(dir_path, "..")))
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 
-
+BASE_DIR = dir_path
 TITA_PATH = os.path.join(dir_path, "plots","tita_outputs")
 os.makedirs(TITA_PATH, exist_ok=True)
 
@@ -76,6 +76,13 @@ from plot_rollout_info import (
     plot_mpc_state_and_output,
     plot_wbc_desired,
     _save_sim_video,
+)
+from plot_validation import (
+    SimLogger,
+    plot_velocity_tracking,
+    plot_velocity_error,
+    plot_com_and_forces,
+    plot_all,
 )
 
 def _build_solve_fn(mpc):
@@ -188,20 +195,38 @@ def plot_mpc_prediction_frames(
     print(f"[plot_mpc_prediction_frames] saved {len(prediction_frames)} frames in {out_dir}")
 
 def _snapshot_config_to_txt(output_dir: str = TITA_PATH) -> None:
-    """Copy the active MPC config file to txt so run weights are traceable."""
-    config_src = getattr(config, "__file__", None)
-    if not config_src:
-        print("[config_snapshot] Could not resolve config file path.")
-        return
+    """Copy selected files from BASE_DIR to txt so run settings/code are traceable."""
+    print("oooooooooooooooooooooo")
+    output_dir = os.path.join(output_dir, "snapshot_files")
+    files_to_copy = [
+        "../config/config_dfcip.py",
+        "../utils/mpc_utils.py",
+        "../utils/mpc_wrapper.py",
+        "../utils/models.py",
+        "../utils/objectives.py"
+    ]
 
-    config_src = os.path.abspath(config_src)
-    dst_path = os.path.join(output_dir, "config_dfcip.txt")
     try:
         os.makedirs(output_dir, exist_ok=True)
-        shutil.copy2(config_src, dst_path)
-        print(f"[config_snapshot] Saved config snapshot: {dst_path}")
+
+        for rel_path in files_to_copy:
+            src_path = os.path.join(BASE_DIR, rel_path)
+            src_path = os.path.abspath(src_path)
+
+            if not os.path.isfile(src_path):
+                print(f"[snapshot] File not found, skipping: {src_path}")
+                continue
+
+            filename = os.path.basename(src_path)
+            name_no_ext, _ = os.path.splitext(filename)
+
+            dst_path = os.path.join(output_dir, f"{name_no_ext}.txt")
+
+            shutil.copy2(src_path, dst_path)
+            print(f"[snapshot] Saved: {dst_path}")
+
     except Exception as e:
-        print(f"[config_snapshot] Failed to save config snapshot: {e}")
+        print(f"[snapshot] Failed to save snapshots: {e}")
 
 def _append_llc_row(
     csv_path: str,
@@ -666,6 +691,7 @@ def main(headless=False, steps=500, scene="flat"):
     if os.path.exists(LLC_ROLLOUT_CSV):
         os.remove(LLC_ROLLOUT_CSV)
 
+    sim_logger = SimLogger()
     model = mujoco.MjModel.from_xml_path(
         dir_path + f"/../data/tita/tita_world.xml"
     )
@@ -781,6 +807,10 @@ def main(headless=False, steps=500, scene="flat"):
     _PREFIX = "  step  0: "   # 11 chars — aligns header with data rows
 
     def clean_plots_prediction(path: str):
+        if not os.path.exists(path):
+            os.makedirs(path)
+            return
+
         n_removed = 0
         for name in os.listdir(path):
             item_path = os.path.join(path, name)
@@ -962,6 +992,7 @@ def main(headless=False, steps=500, scene="flat"):
         
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
+        base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, config.base_body_name)
 
         if True:
             contact_ids = sim_utils.geom_ids(model, config.contact_frame)
@@ -1013,6 +1044,18 @@ def main(headless=False, steps=500, scene="flat"):
             wbc_duration = end_time_wbc - start_time_wbc
             print(f"[timing] wbc.run {wbc_duration * 1000:.2f} ms")
             
+            sim_logger.append(
+                t=counter, 
+                model=model,
+                data=data,
+                tita_state=tita_state,
+                x0=x0,
+                cmd=cmd[0],
+                ext_force=data.xfrc_applied[base_body_id, 0:3],
+                fl=fl,
+                fr=fr,
+            )
+
             tau_to_apply = tau_cmd[0].copy()
 
             #debug_dfcip_ref0_cost_terms(
@@ -1174,7 +1217,7 @@ def main(headless=False, steps=500, scene="flat"):
 
         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
         
-        if False and (counter % 100 == 0) or touch_floor:
+        if (counter % 100 == 0) or touch_floor:
             print(f"[step {counter}] touch_floor={touch_floor}, saving MPC prediction plots...")
             X0_np = np.asarray(mpc_state.X_prediction[0])   # (N+1, 13)
             U0_np = np.asarray(mpc_state.U_prediction[0])  
@@ -1235,58 +1278,102 @@ def main(headless=False, steps=500, scene="flat"):
         counter += 1
         return mpc_state, reference, theta_prev, touch_floor
     
+    def finalize_outputs():
+        print("\n[finalize] Saving outputs...")
 
-    if headless:
-        for _ in range(steps):
-            cmd = command_handle.get_command()
-            mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, cmd, theta_prev=theta_prev)
-            if touch_floor:
-                print(f"Base touched the floor at step {counter}. Ending simulation.")
-                break
-        return
+        try:
+            # Se catturi ogni 2 step, hai 250 frame/s simulati se sim_frequency=500.
+            # Quindi fps corretto per video real-time:
+            video_fps = int(sim_frequency / 2)
 
-    with mujoco.viewer.launch_passive(
-        model,
-        data,
-        key_callback=command_handle.key_callback,
-    ) as viewer:
-        viewer.cam.distance *= 5.5
-        viewer.sync()
-        start_time = timer()
-        while viewer.is_running():
-            overlay_text = command_handle.consume_overlay_text()
-            tic = timer()
-            if overlay_text is not None:
-                viewer.set_texts((None, None, *overlay_text))
+            _save_sim_video(
+                video_dir=TITA_PATH,
+                video_fps=video_fps,
+                frames=_sim_frames,
+                slowdown_factor=1.0,
+                name_video="simulation_video.mp4"
+            )
+            _save_sim_video(
+                video_dir=TITA_PATH,
+                video_fps=video_fps,
+                frames=_sim_frames,
+                slowdown_factor=4.0,
+                name_video="simulation_video_slow4.mp4"
+            )
+            _save_sim_video(
+                video_dir=TITA_PATH,
+                video_fps=video_fps,
+                frames=_sim_frames,
+                slowdown_factor=15.0,
+                name_video="simulation_video_slow15.mp4"
+            )
+        except Exception as e:
+            print(f"[finalize] failed to save video: {e}")
 
-            cmd = command_handle.mpc_wheeled_input(config.com_z_to_track)  # dummy command for now
-            cmd = jnp.asarray([cmd[0], cmd[1], cmd[2]])[None, :]
-            CMD_LIST.append(cmd[0].copy())
-            mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, cmd, theta_prev=theta_prev)
+        try:
+            plot_all(
+                sim_logger,
+                save_path=os.path.join(TITA_PATH, "plots"),
+                show=False,
+            )
+        except Exception as e:
+            print(f"[finalize] failed to save plots: {e}")
 
-            toc = timer()
-            if toc - tic < model.opt.timestep:
-                time.sleep(model.opt.timestep - (toc - tic))
+        try:
+            _renderer.close()
+        except Exception:
+            pass
 
-            if touch_floor:
-                print(f"Base touched the floor at step {counter}. Ending simulation.")
-                break
-
-            if counter >= MAX_STEPS:
-                print(f"Reached max steps ({MAX_STEPS}). Exiting.")
-                break
-            viewer.sync()
-
-    end_time = timer()
-    step_duration = end_time - start_time
-    print(f"[timing] step {counter}/{MAX_STEPS}: {step_duration // 60:.0f}m {step_duration % 60:.1f}s")
-    
     try:
-        _save_sim_video(video_dir=TITA_PATH, video_fps=video_fps, frames=_sim_frames, slowdown_factor=DEFAULT_VIDEO_SLOWDOWN_FACTOR)
-        _renderer.close()
-    except Exception as e:
-        print(f"Failed to save simulation video: {e}")
+        if headless:
+            for _ in range(steps):
+                cmd = command_handle.get_command()
+                mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, cmd, theta_prev=theta_prev)
+                if touch_floor:
+                    print(f"Base touched the floor at step {counter}. Ending simulation.")
+                    break
+            return
 
+        with mujoco.viewer.launch_passive(
+            model,
+            data,
+            key_callback=command_handle.key_callback,
+        ) as viewer:
+            viewer.cam.distance *= 5.5
+            viewer.sync()
+            start_time = timer()
+            while viewer.is_running():
+                overlay_text = command_handle.consume_overlay_text()
+                tic = timer()
+                if overlay_text is not None:
+                    viewer.set_texts((None, None, *overlay_text))
+
+                cmd = command_handle.mpc_wheeled_input(config.com_z_to_track)  # dummy command for now
+                cmd = jnp.asarray([cmd[0], cmd[1], cmd[2]])[None, :]
+                CMD_LIST.append(cmd[0].copy())
+                mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, cmd, theta_prev=theta_prev)
+
+                toc = timer()
+                if toc - tic < model.opt.timestep:
+                    time.sleep(model.opt.timestep - (toc - tic))
+
+                if touch_floor:
+                    print(f"Base touched the floor at step {counter}. Ending simulation.")
+                    break
+
+                if counter >= MAX_STEPS:
+                    print(f"Reached max steps ({MAX_STEPS}). Exiting.")
+                    break
+                viewer.sync()
+
+        end_time = timer()
+        step_duration = end_time - start_time
+        print(f"[timing] step {counter}/{MAX_STEPS}: {step_duration // 60:.0f}m {step_duration % 60:.1f}s")
+    except KeyboardInterrupt:
+        print("\n[interrupt] Ctrl+C received. Finalizing outputs...")
+    finally:
+        finalize_outputs()
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=500)
@@ -1304,11 +1391,11 @@ if __name__ == "__main__":
             dir_path + f"/../data/tita/tita_world.xml"
         )
         
-        plot_torques_and_contacts(
-            torques=TORQUE_LIST,
-            contact_forces=FC_LIST,
-            out_dir=TITA_PATH,
-        )
+        #plot_torques_and_contacts(
+        #    torques=TORQUE_LIST,
+        #    contact_forces=FC_LIST,
+        #    out_dir=TITA_PATH,
+        #)
         plot_mpc_state_and_output(
             x0_list=MPC_INPUT_LIST,
             u0_list=MPC_OUTPUT_LIST,
@@ -1318,13 +1405,13 @@ if __name__ == "__main__":
             out_dir=TITA_PATH,
         )
 
-        plot_wbc_desired(
-            desired_list=WBC_DESIRED_LIST,
-            current_list=WBC_CURRENT_LIST,
-            mpc_utils=mpc_utils,
-            nj=model.nv - 6,
-            out_dir=TITA_PATH,
-        )
+        #plot_wbc_desired(
+        #    desired_list=WBC_DESIRED_LIST,
+        #    current_list=WBC_CURRENT_LIST,
+        #    mpc_utils=mpc_utils,
+        #    nj=model.nv - 6,
+        #    out_dir=TITA_PATH,
+        #)
 
         if len(MPC_PREDICTION_FRAMES.keys()) > 0:
             plot_mpc_prediction_frames(
@@ -1341,5 +1428,6 @@ if __name__ == "__main__":
             scene=args.scene,
         )
     except Exception as e:
+        print(f"[ERROR] Exception occurred: {e}")
         do_plots()
     do_plots()

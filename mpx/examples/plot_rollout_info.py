@@ -28,6 +28,7 @@ def _save_sim_video(
         frames,
         video_fps=30,
         slowdown_factor=1.0,
+        name_video="simulation_video.mp4",
     ) -> None:
         print("Saving simulation video... ", end="\n", flush=True)
         try:
@@ -41,9 +42,9 @@ def _save_sim_video(
         print(f"Captured {len(frames)} frames at {video_fps} fps.")
         video_dir = os.path.join(video_dir)
         os.makedirs(video_dir, exist_ok=True)
-        video_path = os.path.join(video_dir, "simulation_video.mp4")
+        video_path = os.path.join(video_dir, name_video)
         try:
-            imageio.mimwrite(video_path, frames, fps=video_fps, macro_block_size=1)
+            imageio.mimwrite(video_path, frames, fps=video_fps/slowdown_factor, macro_block_size=1)
             print(
                 f"[sim_video] saved ({len(frames)} frames, {video_fps} fps, slowdown x{slowdown_factor:.2f}): {video_path}"
             )
@@ -183,7 +184,7 @@ def plot_mpc_state_and_output(
     # ============================================================
     # STATES FIGURE — 5 x 3
     # ============================================================
-    fig1, axes1 = plt.subplots(5, 3, figsize=(18, 12), sharex=True)
+    fig1, axes1 = plt.subplots(5, 3, figsize=(18, 12), sharex=False)
     axes1 = axes1.flatten()
 
     for i in range(15):
@@ -235,7 +236,7 @@ def plot_mpc_state_and_output(
     # ============================================================
     # CONTROL FIGURE — 3 x 3
     # ============================================================
-    fig2, axes2 = plt.subplots(3, 3, figsize=(12, 10), sharex=True)
+    fig2, axes2 = plt.subplots(3, 3, figsize=(12, 10), sharex=False)
     axes2 = axes2.flatten()
 
     for i in range(9):
@@ -442,7 +443,7 @@ def plot_wbc_desired(
     # ============================================================
     # FIGURE 1 — COM / BASE — 3 rows x 2 cols
     # ============================================================
-    fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex=True)
+    fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex=False)
     axes = axes.reshape(3, 2)
 
     _plot_xyz(
@@ -496,7 +497,7 @@ def plot_wbc_desired(
     # ============================================================
     # FIGURE 2 — WHEELS — 3 rows x 2 cols
     # ============================================================
-    fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex=True)
+    fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex=False)
     axes = axes.reshape(3, 2)
 
     _plot_xyz(
@@ -555,7 +556,7 @@ def plot_wbc_desired(
     dq_start = mpc_utils._REF_JOINTS + nj
     ddq_start = mpc_utils._REF_JOINTS + 2 * nj
 
-    fig, axes = plt.subplots(4, 2, figsize=(16, 14), sharex=True)
+    fig, axes = plt.subplots(4, 2, figsize=(16, 14), sharex=False)
     axes = axes.reshape(4, 2)
 
     for j in range(nj):
@@ -672,7 +673,7 @@ def plot_torques_and_contacts(
     # ============================================================
     frames = np.arange(U.shape[0])
 
-    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
+    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=False)
 
     cmap = plt.get_cmap("tab10")
 
@@ -727,7 +728,7 @@ def plot_torques_and_contacts(
         n_feet,
         1,
         figsize=(11, 3 * n_feet),
-        sharex=True,
+        sharex=False,
     )
 
     if n_feet == 1:
@@ -798,7 +799,7 @@ def plot_llc(csv_path: str, out_path: str | None = None) -> str | None:
     fig, axes = plt.subplots(
         3, 2,
         figsize=(14, 10),
-        sharex=True,
+        sharex=False,
         gridspec_kw={"width_ratios": [1, 1]},
     )
     ax_tff = fig.add_subplot(3, 1, 1)
@@ -1256,7 +1257,7 @@ def plot_rewards(
     steps = np.arange(len(rewards))
     cumulative = np.cumsum(rewards)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=False)
     fig.suptitle(title, fontsize=13)
 
     ax1.plot(steps, rewards, color="steelblue", linewidth=1.2)
@@ -1321,7 +1322,7 @@ def plot_velocity(
     T, D = v_cmd.shape
     time = np.arange(T) * dt
 
-    fig, axes = plt.subplots(D, 1, figsize=(10, 3 * D), sharex=True)
+    fig, axes = plt.subplots(D, 1, figsize=(10, 3 * D), sharex=False)
     if D == 1:
         axes = [axes]
     fig.suptitle(title, fontsize=13)

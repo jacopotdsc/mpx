@@ -199,7 +199,7 @@ def main(headless=False, steps=500, scene="flat"):
 
     sim_logger = SimLogger()
     model = mujoco.MjModel.from_xml_path(
-        dir_path + f"/../data/tita/tita_world.xml"
+        dir_path + f"/../data/tita/scene_{scene}.xml"
     )
     data = mujoco.MjData(model)
     sim_frequency = float(config.whole_body_frequency)
@@ -384,6 +384,21 @@ def main(headless=False, steps=500, scene="flat"):
                 video_fps=video_fps,
                 frames=_sim_frames,
                 slowdown_factor=1.0,
+                name_video="simulation_video.mp4"
+            )
+            _save_sim_video(
+                video_dir=TITA_PATH,
+                video_fps=video_fps,
+                frames=_sim_frames,
+                slowdown_factor=4.0,
+                name_video="simulation_video_slow4.mp4"
+            )
+            _save_sim_video(
+                video_dir=TITA_PATH,
+                video_fps=video_fps,
+                frames=_sim_frames,
+                slowdown_factor=15.0,
+                name_video="simulation_video_slow15.mp4"
             )
         except Exception as e:
             print(f"[finalize] failed to save video: {e}")
@@ -425,7 +440,11 @@ def main(headless=False, steps=500, scene="flat"):
                 if overlay_text is not None:
                     viewer.set_texts((None, None, *overlay_text))
 
+                start_step = timer()
                 mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, theta_prev=theta_prev)
+                end_step = timer()
+                step_time = end_step - start_step
+                print(f"Step time: {1e3 * step_time:.2f} ms")
 
                 toc = timer()
                 if toc - tic < model.opt.timestep:

@@ -98,7 +98,7 @@ class BatchedMPCControllerWrapper:
 
         self.ref_substeps = int(round(config.dt_mpc / config.dt_ref))  # 5
         self.N_dense = config.N * self.ref_substeps                # 50 * 5 = 250
-        reference_generator = partial(mpc_utils.reference_generator_dfcip_online, config.N, config.dt_mpc, config.mass, config.grav)
+        reference_generator = partial(mpc_utils.reference_generator_dfcip_online, self.N_dense, config.dt_ref, config.mass, config.grav)
 
         # Whole-body controller: static args frozen via partial, runtime args
         # (X0_prev, U0_prev, V0_prev, qpos, qvel, desired) passed at call time.
@@ -197,8 +197,9 @@ class BatchedMPCControllerWrapper:
         # Generate reference trajectory and additional MPC parameters.
         
         x_ref, u_ref = self._ref_gen(x0, cmd)
-        reference = jnp.concatenate([x_ref, u_ref], axis=-1)
-
+        reference_full = jnp.concatenate([x_ref, u_ref], axis=-1)
+        reference = reference_full[:, ::self.ref_substeps, :]
+        
         parameter = None
 
         X, U, D = self._solve(

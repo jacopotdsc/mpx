@@ -1,5 +1,5 @@
 <mujoco model="tita">
-  <compiler angle="radian" meshdir="/home/ubuntu/Desktop/repo_rl/TITA-dynamic-obstacle-avoidance/TITA_MJ/tita_mj_description" autolimits="true"/>
+  <compiler angle="radian" meshdir=".assets/" autolimits="true"/>
 
   <default>
     <default class="robot">
@@ -39,11 +39,6 @@
   </visual>
 
   <asset>
-    <texture type="skybox" builtin="flat" rgb1="0 0 0" rgb2="0 0 0" width="512" height="3072"/>
-    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
-    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
-    <hfield name="hf1" size="15 15 1e-9 1e-9" file="meshes/texture/heightmap.png" />
-
     <material name="black" rgba="0.19607843137254902 0.19607843137254902 0.19607843137254902 1.0" />
     <material name="blue" rgba="0.0 0.0 0.8 1.0" />
     <material name="green" rgba="0.0 0.8 0.0 1.0" />
@@ -70,9 +65,6 @@
 
   <worldbody>
     <!-- <geom name="floor" size="0 0 1e-12" type="plane" material="grid" condim="3"/> -->
-
-    <light pos="1 0 3.5" dir="0 0 -1" directional="true"/>
-    <geom name="floor" pos="0 0 0" type="hfield" condim="3" conaffinity="15" hfield="hf1" friction=".8 .1 .1" priority="1" material="groundplane" />
 
     <body name="base_link" pos="0.00000000 0.00000000 0.41700019" quat="1 0 0 0" childclass="robot">
       <inertial 

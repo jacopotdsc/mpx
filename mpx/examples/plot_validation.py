@@ -284,17 +284,17 @@ def plot_velocity_tracking(log, save_path=None, csv_path="vel_tracking.csv", sho
     fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
 
     ax = axes[0]
-    ax.plot(t, vc_body[:, 0], color="tab:blue", label="vx measured (body)")
+    ax.plot(t, vc_body[:, 0], color="tab:blue", label="vx measured")
     ax.plot(t, cmd[:, 0], "--", color="tab:blue", label="vx commanded")
-    ax.plot(t, vc_body[:, 1], color="tab:orange", label="vy measured (body)")
-    ax.plot(t, cmd[:, 1], "--", color="tab:orange", label="vy commanded")
+    #ax.plot(t, vc_body[:, 1], color="tab:orange", label="vy measured (body)")
+    #ax.plot(t, cmd[:, 1], "--", color="tab:orange", label="vy commanded")
     ax.set_ylabel("linear velocity [m/s]")
     ax.set_title("Center linear velocity tracking")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", ncol=2)
 
     ax = axes[1]
-    ax.plot(t, w_meas, color="tab:green", label="w measured (MuJoCo)")
+    ax.plot(t, w_meas, color="tab:green", label="w measured")
     ax.plot(t, cmd[:, 2], "--", color="tab:green", label="wz commanded")
     ax.set_ylabel("angular velocity [rad/s]")
     ax.set_xlabel("time [s]")
@@ -316,14 +316,15 @@ def plot_velocity_tracking(log, save_path=None, csv_path="vel_tracking.csv", sho
 # --------------------------------------------------------------------------- #
 def plot_velocity_error(log, save_path=None, csv_path="vel_error.csv", show=True):
     """
-    Same structure as function 1 but plots the ERRORS (cmd - meas) together
-    with the commanded signals:
-      - linear error:   (vx_cmd - vx_meas), (vy_cmd - vy_meas)  + vx_cmd, vy_cmd
-      - angular error:  (wz_cmd - w_meas)                       + wz_cmd
-    (w_meas from MuJoCo)
-    Saves CSV with: t, err_vx, err_vy, err_w, vx_cmd, vy_cmd, wz_cmd
+    Plots the velocity tracking errors together with their corresponding commands:
+      - linear plot:   vx_cmd - vx_meas, vy_cmd - vy_meas, plus vx_cmd, vy_cmd
+      - angular plot:  wz_cmd - wz_meas, plus wz_cmd
+
+    Saves CSV with:
+      t, err_vx, err_vy, err_w, vx_cmd, vy_cmd, wz_cmd
     """
     d = log.arrays() if isinstance(log, SimLogger) else log
+
     t = d["t"]
     vc_body = _vc_body(d)
     cmd = d["cmd"]
@@ -339,32 +340,125 @@ def plot_velocity_error(log, save_path=None, csv_path="vel_error.csv", show=True
         [t, err_vx, err_vy, err_w, cmd[:, 0], cmd[:, 1], cmd[:, 2]],
     )
 
-    fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
 
+    # ============================================================
+    # LINEAR VELOCITY ERROR + LINEAR COMMANDS
+    # ============================================================
     ax = axes[0]
+
     ax.plot(t, err_vx, color="tab:blue", label="vx error (cmd - meas)")
-    ax.plot(t, err_vy, color="tab:orange", label="vy error (cmd - meas)")
-    ax.axhline(0.0, color="k", lw=0.8, alpha=0.5)
-    ax.set_ylabel("linear error [m/s]")
-    ax.set_title("Tracking error - linear velocity")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
+    # ax.plot(t, err_vy, color="tab:orange", label="vy error (cmd - meas)")
 
-    ax = axes[1]
-    ax.plot(t, err_w, color="tab:green", label="w error (cmd - meas)")
-    ax.axhline(0.0, color="k", lw=0.8, alpha=0.5)
-    ax.set_ylabel("angular error [rad/s]")
-    ax.set_title("Tracking error - angular velocity (yaw)")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
+    ax.plot(
+        t,
+        cmd[:, 0],
+        linestyle="--",
+        color="tab:blue",
+        label="vx cmd",
+    )
 
-    ax = axes[2]
-    ax.plot(t, cmd[:, 0], color="tab:blue", label="vx commanded")
-    ax.plot(t, cmd[:, 2], color="tab:green", label="omega (wz) commanded")
-    ax.axhline(0.0, color="k", lw=0.8, alpha=0.5)
-    ax.set_ylabel("command")
+    # Se vuoi anche vy, decommenta queste due righe
+    # ax.plot(
+    #     t,
+
+# --------------------------------------------------------------------------- #
+#  Function 3: CoM position (X, Y, Z) + forces at the CoM
+# --------------------------------------------------------------------------- #
+def plot_com_and_forces(log, save_path=None, csv_path="com_forces.csv", show=True):
+    """
+    Four subplots:
+      - CoM X position
+      - CoM Y position
+      - CoM Z position
+      - external disturbance force applied at the CoM (x, y, z components)
+    Saves CSV with: t, x, y, z, Fx, Fy, Fz   (F = external force at the CoM)
+    """
+    d = log.arrays() if isinstance(log, SimLogger) else log
+    t = d["t"]
+    pcom = d["pcom"]
+    F = d["ext_force"]
+
+    _save_csv(
+        csv_path,
+        ["t", "x", "y", "z", "Fx", "Fy", "Fz"],
+        [t, pcom[:, 0], pcom[:, 1], pcom[:, 2], F[:, 0], F[:, 1], F[:, 2]],
+    )
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    ax = axes[0, 0]
+    ax.plot(t, pcom[:, 0], color="tab:blue")
+    ax.set_ylabel("X [m]")
+    ax.set_title("CoM position - X")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 1]
+    ax.plot(t, pcom[:, 1], color="tab:orange")
+    ax.set_ylabel("Y [m]")
+    ax.set_title("CoM position - Y")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    ax.plot(t, pcom[:, 2], color="tab:green")
+    ax.set_ylabel("Z [m]")
     ax.set_xlabel("time [s]")
-    ax.set_title("Commanded velocities")
+    ax.set_title("CoM position - Z")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 1]
+
+# --------------------------------------------------------------------------- #
+#  Function 3: CoM position (X, Y, Z) + forces at the CoM
+# --------------------------------------------------------------------------- #
+def plot_com_and_forces(log, save_path=None, csv_path="com_forces.csv", show=True):
+    """
+    Four subplots:
+      - CoM X position
+      - CoM Y position
+      - CoM Z position
+      - external disturbance force applied at the CoM (x, y, z components)
+    Saves CSV with: t, x, y, z, Fx, Fy, Fz   (F = external force at the CoM)
+    """
+    d = log.arrays() if isinstance(log, SimLogger) else log
+    t = d["t"]
+    pcom = d["pcom"]
+    F = d["ext_force"]
+
+    _save_csv(
+        csv_path,
+        ["t", "x", "y", "z", "Fx", "Fy", "Fz"],
+        [t, pcom[:, 0], pcom[:, 1], pcom[:, 2], F[:, 0], F[:, 1], F[:, 2]],
+    )
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    ax = axes[0, 0]
+    ax.plot(t, pcom[:, 0], color="tab:blue")
+    ax.set_ylabel("X [m]")
+    ax.set_title("CoM position - X")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 1]
+    ax.plot(t, pcom[:, 1], color="tab:orange")
+    ax.set_ylabel("Y [m]")
+    ax.set_title("CoM position - Y")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    ax.plot(t, pcom[:, 2], color="tab:green")
+    ax.set_ylabel("Z [m]")
+    ax.set_xlabel("time [s]")
+    ax.set_title("CoM position - Z")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 1]
+    ax.plot(t, F[:, 0], color="tab:red", label="Fx")
+    ax.plot(t, F[:, 1], color="tab:purple", label="Fy")
+    ax.plot(t, F[:, 2], color="tab:brown", label="Fz")
+    ax.set_ylabel("force [N]")
+    ax.set_xlabel("time [s]")
+    ax.set_title("External disturbance force at the CoM")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best")
 
@@ -372,10 +466,59 @@ def plot_velocity_error(log, save_path=None, csv_path="vel_error.csv", show=True
     if save_path:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    ax.plot(t, F[:, 0], color="tab:red", label="Fx")
+    ax.plot(t, F[:, 1], color="tab:purple", label="Fy")
+    ax.plot(t, F[:, 2], color="tab:brown", label="Fz")
+    ax.set_ylabel("force [N]")
+    ax.set_xlabel("time [s]")
+    ax.set_title("External disturbance force at the CoM")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    ax.axhline(0.0, color="k", lw=0.8, alpha=0.5)
+    ax.set_ylabel("linear velocity [m/s]")
+    ax.set_title("Tracking error and command - linear velocity")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    # ============================================================
+    # ANGULAR VELOCITY ERROR + ANGULAR COMMAND
+    # ============================================================
+    ax = axes[1]
+
+    ax.plot(t, err_w, color="tab:green", label="omega error (cmd - meas)")
+
+    ax.plot(
+        t,
+        cmd[:, 2],
+        linestyle="--",
+        color="tab:green",
+        label="omega cmd",
+    )
+
+    ax.axhline(0.0, color="k", lw=0.8, alpha=0.5)
+    ax.set_ylabel("angular velocity [rad/s]")
+    ax.set_xlabel("time [s]")
+    ax.set_title("Tracking error and command - angular velocity")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    fig.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
     if show:
         plt.show()
-    return fig
 
+    return fig
 
 # --------------------------------------------------------------------------- #
 #  Function 3: CoM position (X, Y, Z) + forces at the CoM
@@ -468,10 +611,13 @@ def plot_all(log, save_path, prefix="tita", show=False):
 if __name__ == "__main__":
     import argparse
 
+
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    TITA_PATH = os.path.join(dir_path, "plots","tita_validation","plots")
     parser = argparse.ArgumentParser(
         description="Reload a logged run from the raw CSV and regenerate the plots."
     )
-    parser.add_argument("--path", default="validation_output",
+    parser.add_argument("--path", default=TITA_PATH,
                         help="Output directory used by plot_all (contains the csv/ subfolder).")
     parser.add_argument("--prefix", default="tita", help="File prefix used by plot_all.")
     parser.add_argument("--show", action="store_true", help="Show the figures interactively.")
