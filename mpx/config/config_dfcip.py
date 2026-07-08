@@ -3,7 +3,9 @@ import jax
 import os 
 import sys 
 dir_path = os.path.dirname(os.path.realpath(__file__))
-model_path = os.path.abspath(os.path.join(dir_path, '..')) + '/data/tita/tita_world.xml'  # Path to the MuJoCo model XML file
+model_path = os.path.abspath(os.path.join(dir_path, '..')) + '/data/tita/tita.xml'  # Path to the MuJoCo model XML file
+#model_path = "/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/tita.xml"
+
 # Joint names and related configuration
 joints_name = [
     'joint_left_leg_1', 'joint_left_leg_2', 'joint_left_leg_3', 'joint_left_leg_4',
@@ -19,7 +21,7 @@ body_name = ['left_leg_4', 'right_leg_4']
 dt_mpc = 0.002
 N = 50        # Number of stages
 T_TRAJECTORY = 60
-mpc_frequency = 500  # Frequency of MPC updates in Hz
+mpc_frequency = 100  # Frequency of MPC updates in Hz
 grav = 9.81
 whole_body_frequency = 500
 dt_ref = 1.0 / whole_body_frequency
@@ -116,9 +118,9 @@ w_v      = 3e3      # velocità com_ground projection
 w_omega  = 5e3      # velocità angolare
 
 # Control weights – ruote (attuatori principali, non troppo economici)
-w_a      = 1e-5      # accelerazione lineare
-w_ac_z   = 1e-5      # accelerazione verticale
-w_alpha  = 1e-5      # accelerazione angolare
+w_a      = 1e-1      # accelerazione lineare
+w_ac_z   = 1e-1      # accelerazione verticale
+w_alpha  = 1e-3      # accelerazione angolare
 
 # Control weights – GRF (gambe = supporto verticale, non locomozione)
 w_fcxy   = 1e-7      # forze orizzontali → penalizza, devono stare ~0

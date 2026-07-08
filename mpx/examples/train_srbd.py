@@ -15,6 +15,7 @@ Usage:
 import os
 import jax
 
+jax.config.update("jax_enable_x64", True)
 CACHE_DIR = os.path.expanduser("~/.jax_cache")
 jax.config.update("jax_compilation_cache_dir", CACHE_DIR)
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
@@ -54,7 +55,7 @@ import mujoco
 import mujoco.viewer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_rollout_info import plot_llc
+from plot_rollout_info import plot_llc,  _save_sim_video
 
 def get_gpu_name():
     try:
@@ -81,7 +82,7 @@ PPO_PARAMS = dict(
     num_timesteps          = 100_000_000,
     num_evals              = 5,
     reward_scaling         = 1.0,
-    episode_length         = 500,
+    episode_length         = 5000,
     normalize_observations = True,
     action_repeat          = 1,
     unroll_length          = 20,
@@ -90,7 +91,7 @@ PPO_PARAMS = dict(
     discounting            = 0.97,
     learning_rate          = 3e-4,
     entropy_cost           = 0.005, #1e-2,
-    num_envs               = 512,
+    num_envs               = 64,
     batch_size             = 256,
     seed                   = 0,
 )
@@ -281,6 +282,49 @@ def run_viewer_rollout(
 
     viewer_model = None
     viewer_data = None
+
+    # ── Video recording setup ───────────────────────────────
+    record_video = True                 # metti a False per disattivare
+    render_w, render_h = 640, 480
+    render_camera = -1                  # -1 = free camera; oppure "track" se esiste nell'XML
+    frames = []
+    renderer = None
+    render_data = None
+    renderer = mujoco.Renderer(eval_env.mj_model, height=render_h, width=render_w)
+    render_data = mujoco.MjData(eval_env.mj_model)
+    render_cam = mujoco.MjvCamera()
+    mujoco.mjv_defaultCamera(render_cam)
+    render_cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    render_cam.distance = 8.0
+    render_cam.elevation = -15.0
+    render_cam.azimuth = 60.0
+
+    #render_camera.distance = 8.0
+    #render_camera.elevation = -15.0
+    #render_camera.azimuth = 60.0
+
+    _base_body_id = mujoco.mj_name2id(
+        eval_env.mj_model,
+        mujoco.mjtObj.mjOBJ_BODY,
+        'base_link',
+    )
+
+    def _update_com_camera(alpha=0.10):
+        mujoco.mj_subtreeVel(eval_env.mj_model, render_data)
+        com = np.asarray(render_data.subtree_com[_base_body_id]).copy()
+        render_cam.lookat[:] = (1.0 - alpha) * render_cam.lookat + alpha * com
+        
+    def _record_frame(st):
+        if not record_video:
+            return
+        render_data.qpos[:] = np.array(st.data.qpos[0])
+        render_data.qvel[:] = np.array(st.data.qvel[0])
+        mujoco.mj_forward(eval_env.mj_model, render_data)
+        _update_com_camera(alpha=0.10)
+        renderer.update_scene(render_data, camera=render_cam)
+        
+        frames.append(renderer.render())
+
     if not headless:
         viewer_model = eval_env.mj_model
         viewer_data = mujoco.MjData(viewer_model)
@@ -399,11 +443,19 @@ def run_viewer_rollout(
             hud = _cmd_text(state)
             if hud:
                 viewer.set_texts(hud)
-            viewer.sync()
-
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+            viewer.cam.distance = 8.0
+            viewer.cam.elevation = -15.0
+            viewer.cam.azimuth = 60.0
+            alpha = 0.1
+            renderer.update_scene(render_data, camera=render_cam)
             for i in range(episode_length):
                 if not viewer.is_running():
                     break
+
+                com = np.asarray(render_data.subtree_com[_base_body_id]).copy()
+                viewer.cam.lookat[:] = (1.0 - alpha) * viewer.cam.lookat + alpha * com
+                viewer.sync()
 
                 if inference_fn is not None:
                     rng, act_rng = jax.random.split(rng)
@@ -449,7 +501,8 @@ def run_viewer_rollout(
                 if _get_done(state):
                     print(f"  Episode ended at step {steps_done}")
                     break
-
+                
+                _record_frame(state)
                 time.sleep(eval_env.dt)
 
     if steps_done > 0:
@@ -458,6 +511,15 @@ def run_viewer_rollout(
     print(f"  Steps done   : {steps_done}")
     print(f"  Mean reward  : {np.mean(rewards):.3f}")
     print(f"  Total reward : {np.sum(rewards):.3f}")
+    if frames:
+        _save_sim_video(
+            ckpt_dir,
+            frames,
+            video_fps=1.0 / float(eval_env.dt),   # 500 fps reali
+            slowdown_factor=4.0,                   # x4 slow-motion
+            name_video="rollout.mp4",
+        )
+        renderer.close()
 
     steps = np.arange(steps_done)
 
@@ -598,6 +660,8 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
             print(f"  policy output-kernel init norms: min={min(norms):.3e}, max={max(norms):.3e}, count={len(norms)}")
         else:
             print("  [WARN] Could not find output-kernel candidates for init check.")
+        
+        print(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     latest_params = restore_params
     latest_step = 0
@@ -835,7 +899,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[GPU CHECK] Failed to kill {user_pid}: {e}")
 
-    gpu_python_process_cleanup()
+    #gpu_python_process_cleanup()
     
     main()
 

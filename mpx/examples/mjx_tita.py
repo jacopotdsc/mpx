@@ -195,6 +195,57 @@ def get_dfip_current_state(self, tita_state: jax.Array, theta_prev: float) -> ja
 
     return x0, theta
 
+@jax.jit
+def process_tita_state(pcom, vcom, centers, Rs, radii, feet_vel, theta_prev):
+    # get_rCP dentro il jit, per entrambe le ruote
+    l_rcp = mpc_utils.get_rCP(Rs[0], radii[0])
+    r_rcp = mpc_utils.get_rCP(Rs[1], radii[1])
+
+    pl_world = centers[0] + l_rcp
+    pr_world = centers[1] + r_rcp
+    dpl_world, dpr_world = feet_vel[0], feet_vel[1]
+
+    tita_state = jnp.concatenate([pcom, vcom, pl_world, pr_world,
+                                  dpl_world, dpr_world])
+
+    # --- get_dfip_current_state, identica ma dentro il jit ---
+    c_world  = (pl_world + pr_world) / 2.0
+    vc_world = (dpl_world + dpr_world) / 2.0
+    diff = pl_world - pr_world
+    theta_wrapped = jnp.arctan2(-diff[0], diff[1])
+    a = (theta_wrapped - theta_prev + jnp.pi) % (2 * jnp.pi)
+    a = jnp.where(a < 0, a + 2 * jnp.pi, a) - jnp.pi
+    theta = theta_prev + a
+
+    ct, st = jnp.cos(theta), jnp.sin(theta)
+    R = jnp.array([[ct, -st, 0.], [st, ct, 0.], [0., 0., 1.]])
+    dpl_b = R.T @ dpl_world
+    dpr_b = R.T @ dpr_world
+    w = (dpr_b[0] - dpl_b[0]) / config.d
+    v = (dpr_b[0] + dpl_b[0]) / 2.0
+
+    x0 = jnp.concatenate([pcom, vcom, c_world,
+                          jnp.array([vc_world[2]]), jnp.array([theta]),
+                          jnp.array([v]), jnp.array([w])])
+    return tita_state, x0, theta
+
+def gather_raw_state(model, data, base_body_id, contact_ids):
+    mujoco.mj_subtreeVel(model, data)
+    pcom = data.subtree_com[base_body_id].copy()
+    vcom = data.subtree_linvel[base_body_id].copy()
+
+    centers = data.geom_xpos[contact_ids].copy()                    # (2,3)
+    Rs = data.geom_xmat[contact_ids].reshape(2, 3, 3).copy()        # (2,3,3)
+    radii = model.geom_size[contact_ids, 0].copy()                  # (2,)
+
+    feet_vel = np.zeros((2, 3))
+    vel = np.zeros(6)
+    for i, g in enumerate(contact_ids):
+        mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_GEOM,
+                                 int(g), vel, 0)
+        feet_vel[i] = vel[3:6]
+    return pcom, vcom, centers, Rs, radii, feet_vel
+
 def main(headless=False, steps=500, scene="flat"):
 
     sim_logger = SimLogger()
@@ -277,11 +328,12 @@ def main(headless=False, steps=500, scene="flat"):
     theta_prev = 0.0
     mpc_state = mpc.init_state()
 
-    def step_controller(mpc_state, reference, theta_prev=theta_prev):
+    def step_controller(mpc_state, tau, reference, theta_prev=theta_prev):
         nonlocal counter
 
         print(f"\n=== step {counter} ===")
         
+        init_start = timer()
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
 
@@ -295,51 +347,65 @@ def main(headless=False, steps=500, scene="flat"):
                 data.xfrc_applied[base_body_id, 0:3] = force_world
             
             contact_ids = sim_utils.geom_ids(model, config.contact_frame)
-            tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
-            x0, theta_prev = get_dfip_current_state(mpc, tita_state, theta_prev=theta_prev)
 
+            init_stop = timer()
+
+            raw_start = timer()
+            #tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
+            #x0, theta_prev = get_dfip_current_state(mpc, tita_state, theta_prev=theta_prev)
+            raw = gather_raw_state(model, data, base_body_id, contact_ids)
+            raw_stop = timer()
+            print(f"[timing] gather_raw_state {1e3 * (raw_stop - raw_start):.2f} ms")
+            state_start = timer()
+            tita_state, x0, theta_prev = process_tita_state(*raw, theta_prev)
+            state_stop = timer()
+            print(f"[timing] state {1e3 * (state_stop - state_start):.2f} ms")
             command = jnp.asarray(command_handle.mpc_wheeled_input(config.com_z_to_track))
-            print(F"command: {command[0]:.2f} m/s forward, {command[1]:.2f} m/s lateral, {command[2]:.2f} rad/s angular")
+            #print(F"command: {command[0]:.2f} m/s forward, {command[1]:.2f} m/s lateral, {command[2]:.2f} rad/s angular")
 
-            mpc_start = timer()
-            mpc_state, reference = solve_mpc(mpc_state, x0[None, :], command[None, :])
-            jax.block_until_ready((
-                reference,
-                mpc_state.X_prediction,
-                mpc_state.U_prediction,
-                mpc_state.sol.a,
-                mpc_state.sol.ac_z,
-                mpc_state.sol.alpha,
-                mpc_state.sol.grf,
-            ))
-            mpc_stop = timer()
-            print(f"MPC time: {1e3 * (mpc_stop - mpc_start):.2f} ms")
+            print(f"[timing] init time: {1e3 * (init_stop - init_start):.2f} ms")
+            print(f"---- {counter}%{period} = {counter % period} ----")
+            if counter % period == 0:
+                mpc_start = timer()
+                mpc_state, reference = solve_mpc(mpc_state, x0[None, :], command[None, :])
+                jax.block_until_ready((
+                    reference,
+                    mpc_state.X_prediction,
+                    mpc_state.U_prediction,
+                    mpc_state.sol.a,
+                    mpc_state.sol.ac_z,
+                    mpc_state.sol.alpha,
+                    mpc_state.sol.grf,
+                ))
+                mpc_stop = timer()
+                print(f"[timing] MPC time: {1e3 * (mpc_stop - mpc_start):.2f} ms")
 
-            pl_world_wbc = tita_state[6:9][None, :]
-            pr_world_wbc = tita_state[9:12][None, :]
-            dpl_world_wbc = tita_state[12:15][None, :]
-            dpr_world_wbc = tita_state[15:18][None, :]
+                pl_world_wbc = tita_state[6:9][None, :]
+                pr_world_wbc = tita_state[9:12][None, :]
+                dpl_world_wbc = tita_state[12:15][None, :]
+                dpr_world_wbc = tita_state[15:18][None, :]
 
-            wbc_start = timer()
-            mpc_state, tau, qddot, fl, fr, desired = solve_wbc(
-                mpc_state,
-                x0,
-                jnp.asarray(qpos)[None, :],
-                jnp.asarray(qvel)[None, :],
-                pl_world_wbc,
-                pr_world_wbc,
-                dpl_world_wbc,
-                dpr_world_wbc,
-            )
-            jax.block_until_ready((
-                tau,
-                qddot,
-                fl,
-                fr,
-                desired,
-            ))
-            wbc_stop = timer()
-            print(f"[timing] wbc.run {1e3 * (wbc_stop - wbc_start):.2f} ms")
+                wbc_start = timer()
+                mpc_state, tau, qddot, fl, fr, desired = solve_wbc(
+                    mpc_state,
+                    x0,
+                    jnp.asarray(qpos)[None, :],
+                    jnp.asarray(qvel)[None, :],
+                    pl_world_wbc,
+                    pr_world_wbc,
+                    dpl_world_wbc,
+                    dpr_world_wbc,
+                )
+                jax.block_until_ready((
+                    tau,
+                    qddot,
+                    fl,
+                    fr,
+                    desired,
+                ))
+                wbc_stop = timer()
+                print(f"[timing] wbc.run {1e3 * (wbc_stop - wbc_start):.2f} ms")
+            logger_start = timer()
             sim_logger.append(
                 t=counter, 
                 model=model,
@@ -348,10 +414,14 @@ def main(headless=False, steps=500, scene="flat"):
                 x0=x0,
                 cmd=command,
                 ext_force=data.xfrc_applied[base_body_id, 0:3],
-                fl=fl,
-                fr=fr,
+                fl=None,
+                fr=None,
             )
-            print(f"timestep: {counter}, force: {data.xfrc_applied[base_body_id, 0:3]}")
+            logger_stop = timer()
+            print(f"[timing] logger.append {1e3 * (logger_stop - logger_start):.2f} ms")
+            #print(f"timestep: {counter}, force: {data.xfrc_applied[base_body_id, 0:3]}")
+
+        extra_start = timer()
         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
 
         q_target = np.array([0.0, 0.5, -1.0, 0.0,]*2)
@@ -369,7 +439,9 @@ def main(headless=False, steps=500, scene="flat"):
         if counter % 2 == 0:  
             _sim_frames.append(_renderer.render().copy())
         counter += 1
-        return mpc_state, reference, theta_prev, touch_floor
+        extra_stop = timer()
+        print(f"[timing] extra time: {1e3 * (extra_stop - extra_start):.2f} ms")
+        return mpc_state, tau, reference, theta_prev, touch_floor
     
     def finalize_outputs():
         print("\n[finalize] Saving outputs...")
@@ -421,7 +493,7 @@ def main(headless=False, steps=500, scene="flat"):
         if headless:
             for _ in range(steps):
                 cmd = command_handle.get_command()
-                mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, theta_prev=theta_prev)
+                mpc_state, tau, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, reference, theta_prev=theta_prev)
                 if touch_floor:
                     print(f"Base touched the floor at step {counter}. Ending simulation.")
                     break
@@ -441,7 +513,7 @@ def main(headless=False, steps=500, scene="flat"):
                     viewer.set_texts((None, None, *overlay_text))
 
                 start_step = timer()
-                mpc_state, reference, theta_prev, touch_floor = step_controller(mpc_state, reference, theta_prev=theta_prev)
+                mpc_state, tau, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, reference, theta_prev=theta_prev)
                 end_step = timer()
                 step_time = end_step - start_step
                 print(f"Step time: {1e3 * step_time:.2f} ms")

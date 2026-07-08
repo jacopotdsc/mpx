@@ -52,7 +52,7 @@ class BatchedMPCControllerWrapper:
         mjx_model = mjx.put_model(model)
         self.config = config
         self.mpc_frequency = config.mpc_frequency
-        self.shift = 1# int(1 / (config.dt_mpc * config.mpc_frequency))
+        self.shift = int(1 / (config.dt_mpc * config.mpc_frequency))
         print(f"MPC update every {self.shift} simulation steps (mpc_frequency={self.mpc_frequency} Hz, dt={config.dt_mpc} s)")
         
         # Timer and liftoff states for the reference generator.
@@ -92,12 +92,8 @@ class BatchedMPCControllerWrapper:
 
         work = partial(optimizers.fddp_mpc, self.cost, self.dynamics, self.hessian_approx, False)
         
-        reference_generator_offline = partial(mpc_utils.reference_generator_dfcip_offline,
-            pcom=(0.0, 0.0, 0.4), nx=config.nx, nu=config.nu, 
-            t_sec=config.T_TRAJECTORY, dt=config.dt_mpc, m=config.mass, grav=config.grav)
-
-        self.ref_substeps = int(round(config.dt_mpc / config.dt_ref))  # 5
-        self.N_dense = config.N * self.ref_substeps                # 50 * 5 = 250
+        self.ref_substeps = int(round(config.dt_mpc / config.dt_ref))
+        self.N_dense = config.N * self.ref_substeps                
         reference_generator = partial(mpc_utils.reference_generator_dfcip_online, self.N_dense, config.dt_ref, config.mass, config.grav)
 
         # Whole-body controller: static args frozen via partial, runtime args
@@ -152,12 +148,9 @@ class BatchedMPCControllerWrapper:
             )
 
         self._solve = jax.jit(jax.vmap(work))
-        self._ref_gen_offline = jax.jit(reference_generator_offline)
         self._ref_gen = jax.jit(jax.vmap(reference_generator))
         self._build_desired_jit = jax.jit(self._build_desired_impl)
         self._whole_body_interface = jax.jit(jax.vmap(whole_body_control))
-
-        self._x_reference, self._u_reference = self._ref_gen_offline(vel_lin=0.5, vel_ang=0.0, vel_z=0.0)
 
         U0 = jnp.tile(config.u_ref, (config.N, 1))
         X0 = jnp.tile(self.initial_state, (config.N + 1, 1))

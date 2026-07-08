@@ -103,11 +103,27 @@
      -->
     
   
-    <!--
-    <geom type="box" size="0.1 0.1 0.0305" pos="0.3 0.3 0.0" material="red" contype="1" conaffinity="1"/>
-    <geom type="box" size="0.1 0.1 0.024" pos="0.6 -0.3 0.0" material="red" contype="1" conaffinity="1"/>
-    <geom type="box" size="0.1 0.1 0.024" pos="0.6 0.3 0.0" material="red" contype="1" conaffinity="1"/>
-    -->
+    
+    <!--geom type="capsule"
+      fromto="0.3 0.3 0.0 0.3 0.3 0.001"
+      size="0.015"
+      material="red"
+      contype="1"
+      conaffinity="1"/>
+
+    <geom type="capsule"
+          fromto="0.6 -0.3 0.0 0.6 -0.3 0.001"
+          size="0.05"
+          material="red"
+          contype="1"
+          conaffinity="1"/>
+
+    <geom type="capsule"
+          fromto="0.6 0.3 0.0 0.6 0.3 0.001"
+          size="0.05"
+          material="red"
+          contype="1"
+          conaffinity="1"/--> 
     <!--
     <geom type="box"
       size="0.2 0.3 0.001"   
