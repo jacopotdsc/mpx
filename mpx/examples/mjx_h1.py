@@ -112,7 +112,11 @@ def main(steps=500):
             overlay_text = command_handle.consume_overlay_text()
             if overlay_text is not None:
                 viewer.set_texts((None, None, *overlay_text))
+            start_step = timer()
             step_controller()
+            end_step = timer()
+            step_time = end_step - start_step
+            print(f"Step time: {1e3 * step_time:.2f} ms")
             viewer.sync()
 
 

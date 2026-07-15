@@ -16,6 +16,7 @@ import os
 import jax
 
 jax.config.update("jax_enable_x64", True)
+os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 CACHE_DIR = os.path.expanduser("~/.jax_cache")
 jax.config.update("jax_compilation_cache_dir", CACHE_DIR)
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
@@ -39,8 +40,8 @@ import csv
 
 # Reduce GPU memory fragmentation (must be set before JAX/XLA initialise).
 os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
-os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.5")
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
+os.environ.setdefault("[XLA_PYTHON_CLIENT_MEM_FRACTION]", "0.75")
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.75"
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -79,19 +80,19 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 
 PPO_PARAMS = dict(
-    num_timesteps          = 100_000_000,
-    num_evals              = 5,
+    num_timesteps          = 200_000_000,
+    num_evals              = 10,
     reward_scaling         = 1.0,
-    episode_length         = 5000,
+    episode_length         = 2000,
     normalize_observations = True,
     action_repeat          = 1,
     unroll_length          = 20,
     num_minibatches        = 32,
     num_updates_per_batch  = 4,
-    discounting            = 0.97,
+    discounting            = 0.99,
     learning_rate          = 3e-4,
-    entropy_cost           = 0.005, #1e-2,
-    num_envs               = 64,
+    entropy_cost           = 0.01, #0.005, #1e-2,
+    num_envs               = 2048,
     batch_size             = 256,
     seed                   = 0,
 )
@@ -235,6 +236,7 @@ def run_viewer_rollout(
     headless: bool = False,
     ckpt_dir: str = ".",
     fixed_command: np.ndarray | None = None,
+    zero_command: bool = False,
 ):
     print("\n" + "=" * 60)
     print("  Rollout viewer" + (" with loaded policy" if inference_fn else " with zero action"))
@@ -244,7 +246,7 @@ def run_viewer_rollout(
 
     # cuSolver crashes on single-instance MJX; run a batch and show env 0 in viewer.
     # Batch size must be large enough to avoid cuSolver internal errors (GPU batched LU/Cholesky).
-    EVAL_BATCH = 2
+    EVAL_BATCH = 1
     print(f"  [INFO] env_name: {env_name}")
     print(f"  GPU: {get_gpu_name()}")
 
@@ -290,18 +292,16 @@ def run_viewer_rollout(
     frames = []
     renderer = None
     render_data = None
-    renderer = mujoco.Renderer(eval_env.mj_model, height=render_h, width=render_w)
-    render_data = mujoco.MjData(eval_env.mj_model)
-    render_cam = mujoco.MjvCamera()
-    mujoco.mjv_defaultCamera(render_cam)
-    render_cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-    render_cam.distance = 8.0
-    render_cam.elevation = -15.0
-    render_cam.azimuth = 60.0
 
-    #render_camera.distance = 8.0
-    #render_camera.elevation = -15.0
-    #render_camera.azimuth = 60.0
+    if not headless:
+        renderer = mujoco.Renderer(eval_env.mj_model, height=render_h, width=render_w)
+        render_data = mujoco.MjData(eval_env.mj_model)
+        render_cam = mujoco.MjvCamera()
+        mujoco.mjv_defaultCamera(render_cam)
+        render_cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        render_cam.distance = 8.0
+        render_cam.elevation = -15.0
+        render_cam.azimuth = 60.0
 
     _base_body_id = mujoco.mj_name2id(
         eval_env.mj_model,
@@ -398,13 +398,22 @@ def run_viewer_rollout(
     if headless:
         print("  [INFO] Running rollout in headless mode (no viewer).")
         for i in range(episode_length):
-            if inference_fn is not None:
+            if inference_fn is not None and not zero_command:
                 rng, act_rng = jax.random.split(rng)
                 obs0 = _get_obs(state)
                 action0, _ = jit_infer(obs0, act_rng)
                 action = jnp.broadcast_to(action0, (EVAL_BATCH, eval_env.action_size))
             else:
                 action = zero_action
+                if "use_only_mpc" in state.info:
+                    state = state.replace(info={
+                        **state.info,
+                        "use_only_mpc": jnp.full(
+                            (EVAL_BATCH,),
+                            True,
+                            dtype=jnp.bool_,
+                        ),
+                    })
 
             if fixed_command is not None:
                 _cmd = jnp.broadcast_to(  # (EVAL_BATCH, 3)
@@ -448,22 +457,30 @@ def run_viewer_rollout(
             viewer.cam.elevation = -15.0
             viewer.cam.azimuth = 60.0
             alpha = 0.1
-            renderer.update_scene(render_data, camera=render_cam)
+            viewer.sync()
+            #renderer.update_scene(render_data, camera=render_cam)
             for i in range(episode_length):
                 if not viewer.is_running():
                     break
 
-                com = np.asarray(render_data.subtree_com[_base_body_id]).copy()
-                viewer.cam.lookat[:] = (1.0 - alpha) * viewer.cam.lookat + alpha * com
-                viewer.sync()
-
-                if inference_fn is not None:
+                if inference_fn is not None and not zero_command:
                     rng, act_rng = jax.random.split(rng)
                     obs0 = _get_obs(state)
                     action0, _ = jit_infer(obs0, act_rng)
                     action = jnp.broadcast_to(action0, (EVAL_BATCH, eval_env.action_size))
                 else:
                     action = zero_action
+
+                    if "use_only_mpc" in state.info:
+                        state = state.replace(info={
+                            **state.info,
+                            "use_only_mpc": jnp.full(
+                                (EVAL_BATCH,),
+                                True,
+                                dtype=jnp.bool_,
+                            ),
+                        })
+
 
                 if fixed_command is not None:
                     _cmd = jnp.broadcast_to(  # (EVAL_BATCH, 3)
@@ -496,6 +513,9 @@ def run_viewer_rollout(
                 hud = _cmd_text(state)
                 if hud:
                     viewer.set_texts(hud)
+                
+                com = np.asarray(render_data.subtree_com[_base_body_id]).copy()
+                viewer.cam.lookat[:] = (1.0 - alpha) * viewer.cam.lookat + alpha * com
                 viewer.sync()
 
                 if _get_done(state):
@@ -604,7 +624,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         f"  JAX backend  : {jax.default_backend()}",
         f"  devices      : {jax.devices()}",
         f"  GPU name:    : "
-        "  --- network ---",
+        "  \n--- network ---",
         f"  distribution : {DISTRIBUTION_TYPE}",
         f"  hidden layers: {POLICY_HIDDEN_LAYER_SIZES}",
         f"  obs size     : {env.observation_size}",
@@ -660,7 +680,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
             print(f"  policy output-kernel init norms: min={min(norms):.3e}, max={max(norms):.3e}, count={len(norms)}")
         else:
             print("  [WARN] Could not find output-kernel candidates for init check.")
-        
+
         print(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     latest_params = restore_params
@@ -775,10 +795,10 @@ def main():
         params_zero = (normalizer_params, policy_params)
         inference_fn = ppo_networks.make_inference_fn(networks)
         policy_fn = inference_fn(params_zero, deterministic=True)
-        run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd)
+        run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd, zero_command=True)
     elif params is None:
         print(f"  [WARN] No checkpoint found in '{ckpt_dir}', using zero action.")
-        run_viewer_rollout(eval_env, inference_fn=None, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd)
+        run_viewer_rollout(eval_env, inference_fn=None, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd, zero_command=True)
     else:
         print(f"  Checkpoint loaded from '{ckpt_dir}'")
         networks = ppo_networks.make_ppo_networks(
@@ -790,7 +810,7 @@ def main():
         )
         inference_fn = ppo_networks.make_inference_fn(networks)
         policy_fn = inference_fn(params, deterministic=True)
-        run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd)
+        run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd, zero_command=False)
 
 
 if __name__ == "__main__":
