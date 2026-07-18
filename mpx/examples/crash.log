@@ -1,0 +1,382 @@
+E0714 12:02:35.931800  385406 pjrt_stream_executor_client.cc:2916] Execution of replica 0 failed: INTERNAL: CUDA error: Failed to launch CUDA kernel: loop_gather_fusion_9; block dims: 128x1x1; grid dims: 60x1x1; shared memory size: 0: CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+PPO_PARAMS: 
+{'num_timesteps': 100000000, 'num_evals': 10, 'reward_scaling': 1.0, 'episode_length': 5000, 'normalize_observations': True, 'action_repeat': 1, 'unroll_length': 20, 'num_minibatches': 32, 'num_updates_per_batch': 4, 'discounting': 0.97, 'learning_rate': 0.0003, 'entropy_cost': 0.005, 'num_envs': 512, 'batch_size': 256, 'seed': 0}
+============================================================
+  PPO Training  —  TitaJoystickE2EFlatTerrain
+  date         : 2026-07-14 11:59:15
+  JAX backend  : gpu
+  devices      : [CudaDevice(id=0)]
+  GPU name:    :   
+--- network ---
+  distribution : tanh_normal
+  hidden layers: (512, 256, 128)
+  obs size     : {'privileged_state': (82,), 'state': (31,)}
+  action size  : 8
+  --- ppo params ---
+  num_timesteps            : 100000000
+  num_evals                : 10
+  reward_scaling           : 1.0
+  episode_length           : 5000
+  normalize_observations   : True
+  action_repeat            : 1
+  unroll_length            : 20
+  num_minibatches          : 32
+  num_updates_per_batch    : 4
+  discounting              : 0.97
+  learning_rate            : 0.0003
+  entropy_cost             : 0.005
+  num_envs                 : 512
+  batch_size               : 256
+  seed                     : 0
+============================================================
+
+  Fresh training: zero-initializing policy output layer.
+  policy param shapes:
+    ['params']/['hidden_0']/['bias']: (512,)
+    ['params']/['hidden_0']/['kernel']: (31, 512)
+    ['params']/['hidden_1']/['bias']: (256,)
+    ['params']/['hidden_1']/['kernel']: (512, 256)
+    ['params']/['hidden_2']/['bias']: (128,)
+    ['params']/['hidden_2']/['kernel']: (256, 128)
+    ['params']/['hidden_3']/['bias']: (16,)
+    ['params']/['hidden_3']/['kernel']: (128, 16)
+    Distribution_type: tanh_normal
+  policy output-kernel init norms: min=0.000e+00, max=0.000e+00, count=1
+Start: 2026-07-14 11:59:17
+  eval#0             0 | reward = +0.035 ± 0.030 | elapsed 03:17 | time 12:02:32
+
+[ERROR] Training crashed: INTERNAL: CUDA error: Failed to launch CUDA kernel: loop_gather_fusion_9; block dims: 128x1x1; grid dims: 60x1x1; shared memory size: 0: CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+[ERROR] Checkpoint saved at step ~0 → params_crash.pkl
+Traceback (most recent call last):
+  File "/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/train_srbd.py", line 924, in <module>
+    main()
+  File "/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/train_srbd.py", line 771, in main
+    run_train(env, eval_env, wrap_fn, ckpt_dir,
+  File "/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/train_srbd.py", line 699, in run_train
+    make_inference_fn, params, _ = train_fn(
+                                   ^^^^^^^^^
+  File "/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/brax/training/agents/ppo/train.py", line 809, in train
+    training_epoch_with_timing(training_state, env_state, epoch_keys)
+  File "/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/brax/training/agents/ppo/train.py", line 680, in training_epoch_with_timing
+    result = training_epoch(training_state, env_state, key)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/jax/_src/traceback_util.py", line 182, in reraise_with_filtered_traceback
+    return fun(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/jax/_src/api.py", line 1709, in cache_miss
+    out = execute(*p.flat_args)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/jax/_src/profiler.py", line 354, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/jax/_src/interpreters/pxla.py", line 1306, in __call__
+    results = self.xla_executable.execute_sharded(input_bufs)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jaxlib._jax.XlaRuntimeError: INTERNAL: CUDA error: Failed to launch CUDA kernel: loop_gather_fusion_9; block dims: 128x1x1; grid dims: 60x1x1; shared memory size: 0: CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.948686  385406 cuda_executor.cc:251] failed to unload module 0x5b9672a04670; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.949203  385406 cuda_executor.cc:251] failed to unload module 0x5b9672bd01a0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.950076  385406 cuda_executor.cc:251] failed to unload module 0x5b967373a9e0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.950958  385406 cuda_executor.cc:251] failed to unload module 0x5b967363c290; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.951772  385406 cuda_executor.cc:251] failed to unload module 0x5b96767cdfc0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.954802  385406 cuda_executor.cc:251] failed to unload module 0x5b9688470c00; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.957129  385406 cuda_executor.cc:251] failed to unload module 0x5b9688aaccd0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.957163  385406 cuda_executor.cc:251] failed to unload module 0x5b968824b000; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.957190  385406 cuda_executor.cc:251] failed to unload module 0x5b9678b539e0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.957218  385406 cuda_executor.cc:251] failed to unload module 0x5b96783a7130; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.957247  385406 cuda_executor.cc:251] failed to unload module 0x5b9677a51270; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.957274  385406 cuda_executor.cc:251] failed to unload module 0x5b96770f6730; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.957881  385406 cuda_executor.cc:251] failed to unload module 0x5b9676def910; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.958406  385406 cuda_executor.cc:251] failed to unload module 0x5b9688d72b40; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.958754  385406 cuda_executor.cc:251] failed to unload module 0x5b9688e73d30; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.959110  385406 cuda_executor.cc:251] failed to unload module 0x5b967809f0f0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.959458  385406 cuda_executor.cc:251] failed to unload module 0x5b9688f955a0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.959803  385406 cuda_executor.cc:251] failed to unload module 0x5b967885a470; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.960145  385406 cuda_executor.cc:251] failed to unload module 0x5b9678762d60; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.960500  385406 cuda_executor.cc:251] failed to unload module 0x5b968906e040; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.960844  385406 cuda_executor.cc:251] failed to unload module 0x5b967772e950; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.961180  385406 cuda_executor.cc:251] failed to unload module 0x5b968915dec0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.961812  385406 cuda_executor.cc:251] failed to unload module 0x5b968925ede0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.962930  385406 cuda_executor.cc:251] failed to unload module 0x5b96894673a0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.963645  385406 cuda_executor.cc:251] failed to unload module 0x5b9689560d80; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.992587  385406 cuda_executor.cc:251] failed to unload module 0x5b968835bf60; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993305  385406 cuda_executor.cc:251] failed to unload module 0x5b9687f69240; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993498  385406 cuda_executor.cc:251] failed to unload module 0x5b9678953460; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993527  385406 cuda_executor.cc:251] failed to unload module 0x5b96889976b0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993551  385406 cuda_executor.cc:251] failed to unload module 0x5b96782731d0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993577  385406 cuda_executor.cc:251] failed to unload module 0x5b96781749f0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993612  385406 cuda_executor.cc:251] failed to unload module 0x5b9678a575c0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993648  385406 cuda_executor.cc:251] failed to unload module 0x5b9688899f20; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993708  385406 cuda_executor.cc:251] failed to unload module 0x5b9676eea470; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993735  385406 cuda_executor.cc:251] failed to unload module 0x5b967783b0e0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993801  385406 cuda_executor.cc:251] failed to unload module 0x5b9676fec8a0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:35.993852  385406 cuda_executor.cc:251] failed to unload module 0x5b9677929120; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.054993  385406 cuda_executor.cc:251] failed to unload module 0x5b9672ee1e20; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.056410  385406 cuda_executor.cc:251] failed to unload module 0x5b9673000070; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057063  385406 cuda_executor.cc:251] failed to unload module 0x5b96732fbb90; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057100  385406 cuda_executor.cc:251] failed to unload module 0x5b9672dd5c80; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057142  385406 cuda_executor.cc:251] failed to unload module 0x5b9673942c20; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057184  385406 cuda_executor.cc:251] failed to unload module 0x5b9673a68ee0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057222  385406 cuda_executor.cc:251] failed to unload module 0x5b9698c0cad0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057256  385406 cuda_executor.cc:251] failed to unload module 0x5b96776565b0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057286  385406 cuda_executor.cc:251] failed to unload module 0x5b9676ae3640; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057327  385406 cuda_executor.cc:251] failed to unload module 0x5b9677fa0290; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057382  385406 cuda_executor.cc:251] failed to unload module 0x5b9676cf8900; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057429  385406 cuda_executor.cc:251] failed to unload module 0x5b96734117a0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057469  385406 cuda_executor.cc:251] failed to unload module 0x5b96730ef160; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057500  385406 cuda_executor.cc:251] failed to unload module 0x5b9673b3dc00; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057534  385406 cuda_executor.cc:251] failed to unload module 0x5b9687d8fcf0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057570  385406 cuda_executor.cc:251] failed to unload module 0x5b9687f07370; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057606  385406 cuda_executor.cc:251] failed to unload module 0x5b96886d2b60; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057649  385406 cuda_executor.cc:251] failed to unload module 0x5b9673c8e1c0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057690  385406 cuda_executor.cc:251] failed to unload module 0x5b9676c0d730; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057727  385406 cuda_executor.cc:251] failed to unload module 0x5b96964ee8c0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057798  385406 cuda_executor.cc:251] failed to unload module 0x5b9698ae7950; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057853  385406 cuda_executor.cc:251] failed to unload module 0x5b9678e4ea50; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.057920  385406 cuda_executor.cc:251] failed to unload module 0x5b9698499420; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.058030  385406 cuda_executor.cc:251] failed to unload module 0x5b968a6a7ef0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.058173  385406 cuda_executor.cc:251] failed to unload module 0x5b9679458020; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.058306  385406 cuda_executor.cc:251] failed to unload module 0x5b967925c7c0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.058436  385406 cuda_executor.cc:251] failed to unload module 0x5b9678e67a60; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.058553  385406 cuda_executor.cc:251] failed to unload module 0x5b9679350ac0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.058597  385406 cuda_executor.cc:251] failed to unload module 0x5b96790a3460; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.058683  385406 cuda_executor.cc:251] failed to unload module 0x5b9676127b00; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.058773  385406 cuda_executor.cc:251] failed to unload module 0x5b9688603e50; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.058902  385406 cuda_executor.cc:251] failed to unload module 0x5b9687cbf4b0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059071  385406 cuda_executor.cc:251] failed to unload module 0x5b9687f97360; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059227  385406 cuda_executor.cc:251] failed to unload module 0x5b9677ebc5f0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059380  385406 cuda_executor.cc:251] failed to unload module 0x5b96775863c0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059522  385406 cuda_executor.cc:251] failed to unload module 0x5b96765f8330; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059645  385406 cuda_executor.cc:251] failed to unload module 0x5b9698cdcae0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059695  385406 cuda_executor.cc:251] failed to unload module 0x5b9688ca8d40; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059734  385406 cuda_executor.cc:251] failed to unload module 0x5b9675fc28d0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059773  385406 cuda_executor.cc:251] failed to unload module 0x5b9677c1cf80; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059812  385406 cuda_executor.cc:251] failed to unload module 0x5b9678d58830; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059850  385406 cuda_executor.cc:251] failed to unload module 0x5b96772ceeb0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059885  385406 cuda_executor.cc:251] failed to unload module 0x5b967869de10; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059923  385406 cuda_executor.cc:251] failed to unload module 0x5b9677d07700; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.059963  385406 cuda_executor.cc:251] failed to unload module 0x5b96773db1a0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.060031  385406 cuda_executor.cc:251] failed to unload module 0x5b9676744180; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.071622  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6800c00: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.072107  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6800a00: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.072114  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6800800: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.072188  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6801400: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.072227  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6801200: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.072310  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6801000: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.072342  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6800e00: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.072432  385406 cuda_executor.cc:251] failed to unload module 0x5b968ca58f50; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.093217  385406 cuda_executor.cc:251] failed to unload module 0x5b968d964a70; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.093610  385406 cuda_executor.cc:251] failed to unload module 0x5b968d536a10; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.093670  385406 cuda_executor.cc:251] failed to unload module 0x5b9696403760; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.093710  385406 cuda_executor.cc:251] failed to unload module 0x5b96972b5af0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139093  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6608400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139212  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6608c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139216  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6609e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139219  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660ae00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139221  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660c400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139223  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660c600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139225  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660d400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139228  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660d600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139230  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660da00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139232  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660e200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139234  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660e800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139236  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660ec00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139239  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660ee00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139241  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660f600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139243  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660f800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139245  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660fc00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139247  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660fe00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139250  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6610c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139253  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6610e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139255  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6611000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139257  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6612000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139260  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6612e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139263  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6615800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139265  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6615a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139267  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6616c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139270  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6617600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139272  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6617a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139276  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6617e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.139278  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6618000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.143123  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6800600: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.143524  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6800400: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.143537  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6800200: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.143592  385406 cuda_executor.cc:251] failed to unload module 0x5b9679b63cf0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287196  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660d800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287715  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6610600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287718  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6611600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287720  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660dc00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287723  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66b9e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287725  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66ba200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287727  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66ba000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287730  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6611800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287734  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6611a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287736  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66ba400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287738  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66b9c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287742  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66b9a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287744  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66b9800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287748  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6608200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287751  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6608800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287753  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6608600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287756  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6609200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287758  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6609800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287760  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6609a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287762  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660a000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287764  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6609000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287768  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6609600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287770  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6608e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287773  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660a600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287776  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66ba600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287779  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6617200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287783  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660bc00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287785  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660be00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287786  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bd400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287788  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660ac00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287790  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bde00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287792  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bd200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287793  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bd000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287796  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660d200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287798  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660c000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287800  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66ba800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287802  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bc800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287804  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bc600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287806  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bc400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287808  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66be000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287810  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660ce00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287812  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660c200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287815  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660f000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287817  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660f200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287819  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6614e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287824  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660d000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287826  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660e400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287828  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bdc00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287830  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bda00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287832  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bd800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287834  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660b600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287836  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bec00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287838  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660c800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287840  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bb800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287842  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bb200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287844  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bd600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287846  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6609400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287848  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6608a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287850  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660b800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287852  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660ba00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287854  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6612400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287856  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6612600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287858  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660de00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287860  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660e000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287862  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66be800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287864  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660e600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287865  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66be600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287867  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660ea00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287870  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6613e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287872  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660aa00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287874  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6614600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287876  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bc000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287878  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bbc00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287880  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6613800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287882  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bf600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287884  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6610000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287886  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6610400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287891  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6610200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287893  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66be400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287894  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66c0800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287896  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66c0400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287898  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66c0200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287899  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bf000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287902  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6618200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287903  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6617800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287905  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6617400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287907  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bee00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287909  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6611400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287911  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6611c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287912  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6611e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287914  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6612200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287916  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6617c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287918  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6610a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287920  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66c0a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287923  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6613a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287924  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6613c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287926  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660a200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287928  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660a400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287930  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6614000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287932  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6614200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287934  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6614400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287936  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6615000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287938  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6615200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287939  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6615400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287941  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6615600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287943  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bce00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287945  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6612800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287947  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6612a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287948  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bf200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287950  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660a800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287951  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bf800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287953  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6612c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287955  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bfa00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287957  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6617000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287959  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6614800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287961  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6614a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287963  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6614c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287964  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660f400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287968  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bc200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287970  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bbe00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287972  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660fa00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287974  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bba00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287977  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bb600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287979  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bb400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287981  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bb000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287982  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bae00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287984  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bac00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287986  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66baa00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287987  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bea00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287989  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6613000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287991  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6613200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287994  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6613400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287996  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6613600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287997  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bca00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.287999  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bcc00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288000  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b660ca00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288002  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66bf400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288004  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6615c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288006  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6615e00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288008  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6616000; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288009  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6616200; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288011  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6616400; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288013  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6616600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288015  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6609c00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288017  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b66c0600; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288018  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6616800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288020  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6616a00; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.288021  385406 cuda_executor.cc:526] failed to free device memory at 0x7e85b6610800; result: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.296689  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6802600: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.297219  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6801e00: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.297281  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6801c00: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.297310  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6801a00: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.297476  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6801800: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.297551  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6801600: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.297624  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6802400: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.297703  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6802200: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.297742  385406 cuda_executor.cc:582] error deallocating host memory at 0x7e85b6802000: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+E0714 12:02:36.297805  385406 cuda_executor.cc:251] failed to unload module 0x5b96a9693ee0; leaking: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+F0714 12:02:36.315844  385406 pjrt_stream_executor_client.cc:1393] Non-OK-status: Release( false).status()
+Status: INTERNAL: CUDA error: : CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+*** Check failure stack trace: ***
+    @     0x7e86b9d3f754  absl::lts_20230802::log_internal::LogMessage::SendToLog()
+    @     0x7e86b9d3f5c4  absl::lts_20230802::log_internal::LogMessage::Flush()
+    @     0x7e86b9d3faf9  absl::lts_20230802::log_internal::LogMessageFatal::~LogMessageFatal()
+    @     0x7e86b1a7c020  xla::PjRtStreamExecutorBuffer::Delete()
+    @     0x7e86b1a7bdb8  xla::PjRtStreamExecutorBuffer::~PjRtStreamExecutorBuffer()
+    @     0x7e86b19f2eca  PJRT_Buffer::~PJRT_Buffer()
+    @     0x7e86b19f2dd4  pjrt::PJRT_Buffer_Destroy()
+    @     0x7e89d0502eb0  std::_Function_handler<>::_M_invoke()
+    @     0x7e89d04f6a2d  xla::PjRtCApiBuffer::~PjRtCApiBuffer()
+    @     0x7e89d04f6a8e  xla::PjRtCApiBuffer::~PjRtCApiBuffer()
+    @     0x7e89d6b80e79  absl::lts_20230802::inlined_vector_internal::Storage<>::DestroyContents()
+    @     0x7e89d84c3eca  xla::ifrt::PjRtArray::~PjRtArray()
+    @     0x7e89d84c3f8e  xla::ifrt::PjRtArray::~PjRtArray()
+    @     0x7e89d6b94892  xla::PyArray_Storage::~PyArray_Storage()
+    @     0x7e89d6b86df3  PyArray_tp_dealloc
+    @     0x7e89d6b94941  xla::PyArray_Storage::~PyArray_Storage()
+    @     0x7e89d6b86df3  PyArray_tp_dealloc
+    @     0x5b9662a2df84  subtype_dealloc

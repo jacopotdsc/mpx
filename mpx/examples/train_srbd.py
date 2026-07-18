@@ -27,6 +27,7 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 
 import argparse
 import functools
+import inspect
 import os
 import pickle
 import sys
@@ -51,6 +52,11 @@ from brax.training.agents.ppo import networks as ppo_networks
 from brax.training.agents.ppo import train as ppo
 from brax.training.acme import running_statistics
 from brax.training.acme import specs
+from brax.training.agents.ppo.optimizer import LRSchedule
+from flax import linen
+import jax.numpy as jnp
+import dataclasses
+from flax.core import freeze, unfreeze
 from brax.envs.wrappers.training import EpisodeWrapper, VmapWrapper, AutoResetWrapper
 import mujoco
 import mujoco.viewer
@@ -80,8 +86,8 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 
 PPO_PARAMS = dict(
-    num_timesteps          = 200_000_000,
-    num_evals              = 10,
+    num_timesteps          = 50_000_000,
+    num_evals              = 5,
     reward_scaling         = 1.0,
     episode_length         = 2000,
     normalize_observations = True,
@@ -90,10 +96,14 @@ PPO_PARAMS = dict(
     num_minibatches        = 32,
     num_updates_per_batch  = 4,
     discounting            = 0.99,
-    learning_rate          = 3e-4,
-    entropy_cost           = 0.01, #0.005, #1e-2,
-    num_envs               = 2048,
-    batch_size             = 256,
+    gae_lambda             = 0.95, #default 0.95
+    clipping_epsilon       = 0.3, # default 0.3
+    learning_rate          = jnp.asarray(1e-5, dtype=jnp.float32),
+    #learning_rate_schedule = LRSchedule.ADAPTIVE_KL,
+    entropy_cost           = 0.005, #0.005, #1e-2,
+    desired_kl             = 0.01, # default 0.01
+    num_envs               = 4096,
+    batch_size             = 1024,
     seed                   = 0,
 )
 print(f"PPO_PARAMS: \n{PPO_PARAMS}")
@@ -183,7 +193,6 @@ network_factory = functools.partial(
 train_fn = functools.partial(
     ppo.train,
     **PPO_PARAMS,
-    #network_factory=network_factory,
     progress_fn=progress,
 )
 
@@ -232,7 +241,7 @@ def load_params(ckpt_dir: str, suffix: str = "best"):
 def run_viewer_rollout(
     eval_env,
     inference_fn=None,
-    env_name: str = "AliengoJoystickRoughTerrain",
+    env_name: str = "",
     headless: bool = False,
     ckpt_dir: str = ".",
     fixed_command: np.ndarray | None = None,
@@ -589,25 +598,161 @@ def _build_fresh_networks(env):
         param_size = env.action_size
     else:
         raise ValueError(f"Unsupported distribution type: {DISTRIBUTION_TYPE}")
-
+    
     def _policy_kernel_init_factory(**init_kwargs):
         base_init = jax.nn.initializers.lecun_uniform(**init_kwargs)
-
+        
         def _init(key, shape, dtype=jnp.float32):
-            if len(shape) >= 2 and shape[-1] == param_size:
+            if len(shape) == 2 and shape[-1] == param_size:
                 return jnp.zeros(shape, dtype)
+            #if len(shape) == 1 and shape[0] == param_size:
+            #    # std_param (se il fork usa questo init anche per lui)
+            #    return jnp.full(shape, jnp.log(0.1), dtype)  # o 0.1 se diretto
             return base_init(key, shape, dtype)
 
         return _init
 
-    return ppo_networks.make_ppo_networks(
+    print(inspect.signature(ppo_networks.make_ppo_networks))
+    network_create = ppo_networks.make_ppo_networks(
         observation_size=env.observation_size,
         action_size=env.action_size,
         policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
         policy_network_kernel_init_fn=_policy_kernel_init_factory,
         preprocess_observations_fn=running_statistics.normalize,
         distribution_type=DISTRIBUTION_TYPE,
+        activation=linen.elu,
+        mean_kernel_init_fn=lambda **kw: jax.nn.initializers.zeros,
+        init_noise_std=1e-7,
     )
+    if DISTRIBUTION_TYPE == "tanh_normal":
+        base_policy_network = network_create.policy_network
+
+        target_std = 0.1
+        min_std = 0.0001
+
+        # Inversa di softplus:
+        # softplus(scale_raw) + min_std = target_std
+        initial_scale_raw = float(
+            np.log(np.expm1(target_std - min_std))
+        )
+
+        def _init_policy_with_small_std(key):
+            params = unfreeze(base_policy_network.init(key))
+
+            output_layers = [
+                name
+                for name, layer_params in params["params"].items()
+                if (
+                    "bias" in layer_params
+                    and layer_params["bias"].shape
+                    == (2 * env.action_size,)
+                )
+            ]
+
+            if len(output_layers) != 1:
+                raise RuntimeError(
+                    "Impossibile identificare univocamente il layer "
+                    f"finale della policy: {output_layers}"
+                )
+
+            output_name = output_layers[0]
+            bias = params["params"][output_name]["bias"]
+
+            # Prima metà: loc = 0
+            bias = bias.at[:env.action_size].set(0.0)
+
+            # Seconda metà: scale_raw ≈ -2.263
+            bias = bias.at[env.action_size:].set(initial_scale_raw)
+
+            params["params"][output_name]["bias"] = bias
+            return freeze(params)
+
+        patched_policy_network = dataclasses.replace(
+            base_policy_network,
+            init=_init_policy_with_small_std,
+        )
+
+        network_create = network_create.replace(
+            policy_network=patched_policy_network,
+        )
+
+    self_test = True
+    if self_test:
+        print(f"  [SELF-TEST] Checking fresh '{DISTRIBUTION_TYPE}' policy...")
+
+        policy_params = network_create.policy_network.init(jax.random.PRNGKey(0))
+
+        obs_size = env.observation_size
+        if isinstance(obs_size, dict):
+            obs_proto = {
+                k: specs.Array((int(np.prod(v)),) if not isinstance(v, int) else (v,), jnp.float32)
+                for k, v in obs_size.items()
+            }
+            dummy_obs = {k: jnp.zeros(a.shape, dtype=jnp.float32) for k, a in obs_proto.items()}
+        else:
+            obs_proto = specs.Array((obs_size,), jnp.float32)
+            dummy_obs = jnp.zeros((obs_size,), dtype=jnp.float32)
+
+        normalizer_params = running_statistics.init_state(obs_proto)
+        full_params = (normalizer_params, policy_params)
+
+        # ── output grezzo della rete (robusto a tuple/array) ──
+        raw_out = network_create.policy_network.apply(
+            normalizer_params, policy_params, dummy_obs
+        )
+        if isinstance(raw_out, tuple):
+            print(f"    apply() -> tuple di {len(raw_out)}: shapes "
+                  f"{[np.shape(np.array(o)) for o in raw_out]}")
+            for i, o in enumerate(raw_out):
+                print(f"      out[{i}] = {np.array(o)}")
+            loc_raw = jnp.asarray(raw_out[0])
+        else:
+            arr = jnp.asarray(raw_out)
+            if DISTRIBUTION_TYPE == "tanh_normal":
+                loc_raw, scale_raw = jnp.split(arr, 2, axis=-1)
+                MIN_STD, VAR_SCALE = 0.001, 1.0
+                pre_tanh_std = np.array(jax.nn.softplus(scale_raw) * VAR_SCALE + MIN_STD)
+                print(f"    scale raw           : {np.array(scale_raw)}")
+                print(f"    pre-tanh std        : {pre_tanh_std}")
+            else:
+                loc_raw = arr
+
+        print(f"    loc raw             : {np.array(loc_raw)}  (atteso: tutti 0)")
+
+        # ── std_param, se esiste (tipico di 'normal') ──
+        params_dict = policy_params.get("params", policy_params)
+        if "std_param" in params_dict:
+            std_raw = np.array(params_dict["std_param"]["value"])
+            print(f"    std_param raw       : {std_raw}")
+            print(f"    exp(std_param)      : {np.exp(std_raw)}  (se mappatura exp)")
+            print(f"    softplus(std_param) : {np.array(jax.nn.softplus(jnp.asarray(std_raw)))}  (se mappatura softplus)")
+        else:
+            print("    (nessun std_param nei parametri)")
+
+        # ── azione deterministica: deve essere 0 ──
+        inference_fn = ppo_networks.make_inference_fn(network_create)
+        det_policy = inference_fn(full_params, deterministic=True)
+        det_action, _ = det_policy(dummy_obs, jax.random.PRNGKey(0))
+        det_norm = float(jnp.linalg.norm(det_action))
+        print(f"    |det action|        : {det_norm:.3e}  (atteso: 0)")
+
+        # ── std empirica: la verità, qualunque sia la mappatura interna ──
+        stoch_policy = inference_fn(full_params, deterministic=False)
+        keys = jax.random.split(jax.random.PRNGKey(1), 2000)
+        actions = jax.vmap(lambda k: stoch_policy(dummy_obs, k)[0])(keys)
+        act_mean, act_std = np.array(actions.mean(0)), np.array(actions.std(0))
+        print(f"    sampled mean        : {act_mean}")
+        print(f"    sampled std         : {act_std}")
+
+        assert det_norm < 1e-8, f"[SELF-TEST FAILED] det action non-zero: {det_norm}"
+        if np.any(act_std < 1e-3):
+            print("    [FAIL] std ~0: niente esplorazione, PPO non imparerà "
+                  "e i log-prob rischiano di esplodere. Sistemare l'init della std.")
+        elif np.any(act_std > 1.0):
+            print("    [WARN] std >1: esplorazione molto ampia per action_scale=0.1.")
+        print("  [SELF-TEST] done.\n")
+
+    return network_create
 
 
 def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
@@ -670,6 +815,9 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
                 print(f"    {path_str}: {tuple(value.shape)}")
 
         print(f"    Distribution_type: {DISTRIBUTION_TYPE}")
+        policy_module = inspect.getclosurevars(debug_networks.policy_network.apply).nonlocals["policy_module"]
+        activation_fn = policy_module.activation
+        print(f"    Activation (read from policy_network module): {getattr(activation_fn, '__name__', activation_fn)}")
         out_dim = debug_networks.parametric_action_distribution.param_size
         candidate_kernels = [
             x for x in jax.tree_util.tree_leaves(debug_policy_params)
@@ -737,11 +885,12 @@ def main():
     parser.add_argument(
         "--name",
         type=str,
-        default="AliengoJoystickRoughTerrain",
+        default="TitaJoystickFlatTerrain",
         help="Environment name. Use 'QuadrupedMPCEnv' for custom SRBD; otherwise a MuJoCo Playground env name.",
     )
     parser.add_argument("--load", nargs="?", const="best", default=None, metavar="FILE",
                         help="Load checkpoint weights. Optionally specify filename or suffix (e.g. 'params_crash.npz', 'crash'). Defaults to 'params_best.pkl'.")
+    parser.add_argument("--no-load", action="store_true", help="Ignore any checkpoint and start fresh (overrides --load)")
     parser.add_argument("--zero", action="store_true", help="Force zero actions (ignore policy network)")
     parser.add_argument("--headless", action="store_true", help="Eval rollout without opening the MuJoCo viewer")
     parser.add_argument("--cmd", nargs=3, type=float, default=None, metavar=("VX", "VY", "WZ"),
@@ -781,7 +930,7 @@ def main():
 
     fixed_cmd = np.array(args.cmd) if args.cmd is not None else None
 
-    if args.zero:
+    if args.zero or args.no_load:
         print("  [INFO] --zero flag: using fresh network with zero output layer.")
         networks = _build_fresh_networks(eval_env)
         policy_params = networks.policy_network.init(jax.random.PRNGKey(0))
@@ -831,93 +980,128 @@ if __name__ == "__main__":
             signal.signal(signal.SIGALRM, old_handler)
             signal.alarm(0)
 
+    def _get_proc_state(pid: int) -> str:
+        """Ritorna lo stato del processo ('R','S','D','T','Z',...) da /proc, '?' se non leggibile."""
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                # formato: pid (comm) state ...  — comm può contenere spazi/parentesi,
+                # quindi prendiamo il campo dopo l'ultima ')'
+                content = f.read()
+            return content.rsplit(")", 1)[1].split()[0]
+        except Exception:
+            return "?"
+
+
+    def _mem_to_mib(mem_str: str) -> float:
+        """Converte '1234 MiB' di nvidia-smi in float (MiB)."""
+        try:
+            return float(mem_str.split()[0])
+        except Exception:
+            return 0.0
+
+
     def gpu_python_process_cleanup():
         """
-        - Lista tutti i processi Python che usano la GPU
+        - Lista i processi Python su GPU che NON sono in stato Running (S/D/T/Z)
+        - Esclude il processo corrente
         - Se 1 solo: chiede conferma y/n (kill automatico dopo 5s)
-        - Se >1: chiede di inserire PID specifico (skip dopo 5s)
-        - Se PID non valido: esce
+        - Se >1: propone di killare quello con piu' memoria GPU (kill automatico dopo 5s)
         """
-
         try:
             output = subprocess.check_output(
                 [
                     "nvidia-smi",
                     "--query-compute-apps=pid,process_name,used_memory",
-                    "--format=csv,noheader"
+                    "--format=csv,noheader",
                 ],
-                text=True
+                text=True,
             )
         except Exception as e:
             print(f"[GPU CHECK] nvidia-smi failed: {e}")
             return
 
         processes = []
-
         for line in output.strip().split("\n"):
             if not line:
                 continue
-
             try:
                 pid, name, mem = [x.strip() for x in line.split(",")]
-                if "python" in name.lower():
-                    processes.append((int(pid), name, mem))
+                pid = int(pid)
             except ValueError:
                 continue
 
+            if "python" not in name.lower():
+                continue
+            if pid == os.getpid():          # non proporre di killare se stessi
+                continue
+
+            state = _get_proc_state(pid)
+            if state == "R":                # in running: lo lasciamo stare
+                continue
+
+            processes.append((pid, name, mem, state))
+
         if not processes:
-            print("[GPU CHECK] No Python GPU processes found.")
+            print("[GPU CHECK] No non-running Python GPU processes found.")
             return
 
-        print("\n⚠️ Python GPU processes found:\n")
-        for pid, name, mem in processes:
-            print(f"  PID {pid} | {name} | {mem}")
+        print("\n⚠️ Non-running Python GPU processes found:\n")
+        for pid, name, mem, state in processes:
+            print(f"  PID {pid} | state {state} | {mem} | {name}")
+
+        def _kill(pid: int):
+            try:
+                print(f"Killing {pid} ...")
+                os.kill(pid, signal.SIGKILL)
+                print("Done.")
+            except Exception as e:
+                print(f"[GPU CHECK] Failed to kill {pid}: {e}")
+                exit(1)
 
         # -------------------------
         # CASE 1: single process
         # -------------------------
         if len(processes) == 1:
-            pid, name, mem = processes[0]
-            ans = _input_timeout(f"\nKill PID {pid}? [Y/n]: ", timeout=5, default="y").strip().lower()
-
+            pid, name, mem, state = processes[0]
+            ans = _input_timeout(
+                f"\nKill PID {pid} (state {state}, {mem})? [Y/n]: ",
+                timeout=5, default="y",
+            ).strip().lower()
             if ans in ("y", ""):
-                try:
-                    print(f"Killing {pid} ...")
-                    os.kill(pid, signal.SIGKILL)
-                    print("Done.")
-                except Exception as e:
-                    print(f"[GPU CHECK] Failed to kill {pid}: {e}")
-                    exit(1)
+                _kill(pid)
             else:
                 print("Skipped. Exiting.")
                 exit(1)
             return
 
         # -------------------------
-        # CASE 2: multiple processes
+        # CASE 2: multiple -> propone quello con piu' memoria GPU
         # -------------------------
-        pid_list = [p[0] for p in processes]
+        top = max(processes, key=lambda p: _mem_to_mib(p[2]))
+        pid, name, mem, state = top
+        ans = _input_timeout(
+            f"\nMultiple candidates. Kill the biggest one: PID {pid} "
+            f"(state {state}, {mem})? [Y/n, or enter another PID]: ",
+            timeout=5, default="y",
+        ).strip().lower()
 
-        try:
-            user_pid = _input_timeout("\nMultiple processes detected. Enter PID to kill: ", timeout=5, default="").strip()
-            if not user_pid:
-                print("No input. Exiting.")
-                exit(1)
-            user_pid = int(user_pid)
-        except Exception:
-            print("Invalid input. Exiting.")
+        if ans in ("y", ""):
+            _kill(pid)
+            return
+        if ans == "n":
+            print("Skipped. Exiting.")
             exit(1)
 
-        if user_pid not in pid_list:
-            print("PID not in GPU Python list. Exiting.")
-            return
-
+        # l'utente ha digitato un PID alternativo
         try:
-            print(f"Killing {user_pid} ...")
-            os.kill(user_pid, signal.SIGKILL)
-            print("Done.")
-        except Exception as e:
-            print(f"[GPU CHECK] Failed to kill {user_pid}: {e}")
+            user_pid = int(ans)
+        except ValueError:
+            print("Invalid input. Exiting.")
+            exit(1)
+        if user_pid not in [p[0] for p in processes]:
+            print("PID not in candidate list. Exiting.")
+            return
+        _kill(user_pid)
 
     #gpu_python_process_cleanup()
     
