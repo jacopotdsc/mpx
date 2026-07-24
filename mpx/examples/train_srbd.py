@@ -50,6 +50,8 @@ import numpy as np
 
 from brax.training.agents.ppo import networks as ppo_networks
 from brax.training.agents.ppo import train as ppo
+from brax.training.agents.sac import networks as sac_networks
+from brax.training.agents.sac import train as sac
 from brax.training.acme import running_statistics
 from brax.training.acme import specs
 from brax.training.agents.ppo.optimizer import LRSchedule
@@ -62,7 +64,7 @@ import mujoco
 import mujoco.viewer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_rollout_info import plot_llc,  _save_sim_video
+from plot_rollout_info import plot_llc,  _save_sim_video, plot_reward_terms, plot_reward_terms_separate
 
 def get_gpu_name():
     try:
@@ -86,8 +88,8 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 
 PPO_PARAMS = dict(
-    num_timesteps          = 50_000_000,
-    num_evals              = 5,
+    num_timesteps          = 100_000_000,
+    num_evals              = 10,
     reward_scaling         = 1.0,
     episode_length         = 2000,
     normalize_observations = True,
@@ -102,11 +104,28 @@ PPO_PARAMS = dict(
     #learning_rate_schedule = LRSchedule.ADAPTIVE_KL,
     entropy_cost           = 0.005, #0.005, #1e-2,
     desired_kl             = 0.01, # default 0.01
-    num_envs               = 4096,
-    batch_size             = 1024,
+    num_envs               = 1024,
+    batch_size             = 256,
     seed                   = 0,
 )
 print(f"PPO_PARAMS: \n{PPO_PARAMS}")
+
+SAC_PARAMS = dict(
+    num_timesteps          = 50_000_000,
+    num_evals              = 5,
+    reward_scaling         = 1.0,
+    episode_length         = 2000,
+    normalize_observations = True,
+    action_repeat          = 1,
+    discounting            = 0.99,
+    learning_rate          = 3e-4,
+    num_envs               = 128,          # SAC off-policy: molti meno env di PPO
+    batch_size             = 256,
+    grad_updates_per_step  = 32,
+    min_replay_size        = 8192,
+    max_replay_size        = 8192*128,
+    seed                   = 0,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Environment factories
@@ -152,7 +171,7 @@ def progress(num_steps, metrics):
     eval_idx = len(x_data) - 1
 
     plt.clf()
-    plt.xlim([0, PPO_PARAMS["num_timesteps"] * 1.25])
+    plt.xlim([0, ALGO_PARAMS["num_timesteps"] * 1.25])
     plt.xlabel("# environment steps")
     plt.ylabel("reward per episode")
     plt.title(f"y={y_data[-1]:.3f}")
@@ -180,21 +199,18 @@ def progress(num_steps, metrics):
 POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
 DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match checkpoint
 
-network_factory = functools.partial(
-    ppo_networks.make_ppo_networks,
-    policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-    distribution_type=DISTRIBUTION_TYPE,
-)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  train_fn
 # ─────────────────────────────────────────────────────────────────────────────
 
-train_fn = functools.partial(
-    ppo.train,
-    **PPO_PARAMS,
-    progress_fn=progress,
-)
+ALGO = "ppo"              # sovrascritto in main() dal flag --algo
+ALGO_PARAMS = SAC_PARAMS if ALGO == "sac" else PPO_PARAMS  # sovrascritto in main()
+
+def make_train_fn(algo: str):
+    if algo == "sac":
+        return functools.partial(sac.train, **SAC_PARAMS, progress_fn=progress)
+    return functools.partial(ppo.train, **PPO_PARAMS, progress_fn=progress)
 
 def save_params(params, ckpt_dir: str, suffix: str = "final"):
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -258,6 +274,100 @@ def run_viewer_rollout(
     EVAL_BATCH = 1
     print(f"  [INFO] env_name: {env_name}")
     print(f"  GPU: {get_gpu_name()}")
+
+    batched_reset = jax.jit(jax.vmap(eval_env.reset))
+    batched_step = jax.jit(jax.vmap(eval_env.step))
+
+    rng = jax.random.PRNGKey(42)
+    rng, *reset_rngs = jax.random.split(rng, EVAL_BATCH + 1)
+    state = batched_reset(jnp.stack(reset_rngs))
+    #nference_fn = None
+
+    # ------------------------------------------------------------------
+    # Se non è stata caricata una policy, crea una vera rete PPO casuale.
+    # ------------------------------------------------------------------
+    if inference_fn is None:
+        print("  [TEST-NON-ZERO] Initializing a random PPO neural network")
+
+        rng, policy_key, value_key = jax.random.split(rng, 3)
+
+        random_ppo_networks = ppo_networks.make_ppo_networks(
+            observation_size=eval_env.observation_size,
+            action_size=eval_env.action_size,
+
+            preprocess_observations_fn=running_statistics.normalize,
+
+            policy_hidden_layer_sizes=(256, 256),
+            value_hidden_layer_sizes=(256, 256),
+
+            activation=linen.swish,
+            distribution_type="tanh_normal",
+
+            # Inizializzazione casuale, non zero.
+            policy_network_kernel_init_fn=jax.nn.initializers.lecun_uniform,
+            value_network_kernel_init_fn=jax.nn.initializers.lecun_uniform,
+        )
+
+        # Prende l'osservazione del primo ambiente, eliminando la dimensione batch.
+        observation_example = jax.tree_util.tree_map(
+            lambda x: x[0],
+            state.obs,
+        )
+
+        # Normalizzatore identità iniziale:
+        # mean = 0, std = 1.
+        normalizer_params = running_statistics.init_state(
+            observation_example
+        )
+
+        # Inizializzazione realmente casuale dei pesi.
+        policy_params = random_ppo_networks.policy_network.init(
+            policy_key
+        )
+
+        value_params = random_ppo_networks.value_network.init(
+            value_key
+        )
+
+        random_params = (
+            normalizer_params,
+            policy_params,
+            value_params,
+        )
+
+        make_random_inference_fn = ppo_networks.make_inference_fn(
+            random_ppo_networks
+        )
+
+        inference_fn = make_random_inference_fn(
+            random_params,
+            deterministic=False,
+        )
+
+
+        jit_infer = jax.jit(inference_fn)
+
+        value_params = random_ppo_networks.value_network.init(
+            value_key
+        )
+
+        random_params = (
+            normalizer_params,
+            policy_params,
+            value_params,
+        )
+
+        make_random_inference_fn = ppo_networks.make_inference_fn(
+            random_ppo_networks
+        )
+
+        inference_fn = make_random_inference_fn(
+            random_params,
+            deterministic=False,
+        )
+
+
+    jit_infer = jax.jit(inference_fn)
 
     batched_reset = jax.jit(jax.vmap(eval_env.reset))
     batched_step  = jax.jit(jax.vmap(eval_env.step))
@@ -588,6 +698,8 @@ def run_viewer_rollout(
             writer.writerows(info_log)
         print(f"  Info CSV     : {csv_path}")
         plot_llc(csv_path)
+        plot_reward_terms(info_log, out_dir=ckpt_dir, threshold=3.0)
+        plot_reward_terms_separate(info_log, out_dir=ckpt_dir)
 
 
 def _build_fresh_networks(env):
@@ -627,8 +739,9 @@ def _build_fresh_networks(env):
     if DISTRIBUTION_TYPE == "tanh_normal":
         base_policy_network = network_create.policy_network
 
-        target_std = 0.1
-        min_std = 0.0001
+        target_std = 0.01
+        min_std = 0.001
+        print(f"  [INFO] Target std: {target_std}, Min std: {min_std}")
 
         # Inversa di softplus:
         # softplus(scale_raw) + min_std = target_std
@@ -710,10 +823,7 @@ def _build_fresh_networks(env):
             arr = jnp.asarray(raw_out)
             if DISTRIBUTION_TYPE == "tanh_normal":
                 loc_raw, scale_raw = jnp.split(arr, 2, axis=-1)
-                MIN_STD, VAR_SCALE = 0.001, 1.0
-                pre_tanh_std = np.array(jax.nn.softplus(scale_raw) * VAR_SCALE + MIN_STD)
                 print(f"    scale raw           : {np.array(scale_raw)}")
-                print(f"    pre-tanh std        : {pre_tanh_std}")
             else:
                 loc_raw = arr
 
@@ -727,7 +837,7 @@ def _build_fresh_networks(env):
             print(f"    exp(std_param)      : {np.exp(std_raw)}  (se mappatura exp)")
             print(f"    softplus(std_param) : {np.array(jax.nn.softplus(jnp.asarray(std_raw)))}  (se mappatura softplus)")
         else:
-            print("    (nessun std_param nei parametri)")
+            print("    (no std_param in parameters)")
 
         # ── azione deterministica: deve essere 0 ──
         inference_fn = ppo_networks.make_inference_fn(network_create)
@@ -756,7 +866,7 @@ def _build_fresh_networks(env):
 
 
 def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
-              load_init=None, env_name: str = "QuadrupedMPCEnv"):
+              load_init=None, env_name: str = "QuadrupedMPCEnv", algo: str = "ppo"):
     global REWARD_LOG_FILE, CKPT_DIR
     os.makedirs(ckpt_dir, exist_ok=True)
     CKPT_DIR = ckpt_dir
@@ -764,7 +874,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
 
     header_lines = [
         "=" * 60,
-        f"  PPO Training  —  {env_name}",
+        f"  {algo.upper()} Training  —  {env_name}",
         f"  date         : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"  JAX backend  : {jax.default_backend()}",
         f"  devices      : {jax.devices()}",
@@ -774,8 +884,8 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         f"  hidden layers: {POLICY_HIDDEN_LAYER_SIZES}",
         f"  obs size     : {env.observation_size}",
         f"  action size  : {env.action_size}",
-        "  --- ppo params ---",
-        *[f"  {k:25s}: {v}" for k, v in PPO_PARAMS.items()],
+        f"  --- {algo.upper()} params ---",
+        *[f"  {k:25s}: {v}" for k, v in ALGO_PARAMS.items()],
         "=" * 60,
         "",
     ]
@@ -783,6 +893,19 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         print(l)
     with open(REWARD_LOG_FILE, "a") as _f:
         _f.write("\n".join(header_lines) + "\n")
+
+    if algo == "sac":
+        network_factory = functools.partial(
+            ppo_networks.make_sac_networks,
+            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
+            distribution_type=DISTRIBUTION_TYPE,
+        )
+    else:
+        network_factory = functools.partial(
+            ppo_networks.make_ppo_networks,
+            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
+            distribution_type=DISTRIBUTION_TYPE,
+        )
 
     restore_params = None
     selected_network_factory = network_factory
@@ -806,7 +929,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
 
         # Debug check: output-layer kernels should be exactly zero at init.
         debug_networks = _build_fresh_networks(env)
-        debug_policy_params = debug_networks.policy_network.init(jax.random.PRNGKey(PPO_PARAMS["seed"]))
+        debug_policy_params = debug_networks.policy_network.init(jax.random.PRNGKey(ALGO_PARAMS["seed"]))
         flat_debug = jax.tree_util.tree_flatten_with_path(debug_policy_params)[0]
         print("  policy param shapes:")
         for path, value in flat_debug:
@@ -842,6 +965,22 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         if y_data and y_data[-1] > best_reward:
             best_reward = y_data[-1]
             save_params(cb_params, ckpt_dir, suffix="best")
+
+    train_fn = make_train_fn(algo)
+    train_kwargs = dict(
+        environment=env,
+        eval_env=eval_env,
+        wrap_env_fn=wrap_env_fn,
+        network_factory=selected_network_factory,
+        restore_params=restore_params,
+        policy_params_fn=_policy_params_cb,
+    )
+    
+    accepted = inspect.signature(train_fn.func).parameters
+    dropped = [k for k in train_kwargs if k not in accepted]
+    if dropped:
+        print(f"  [WARN] {algo}.train non supporta: {dropped} — ignorati.")
+    train_kwargs = {k: v for k, v in train_kwargs.items() if k in accepted}
 
     try:
         make_inference_fn, params, _ = train_fn(
@@ -888,6 +1027,8 @@ def main():
         default="TitaJoystickFlatTerrain",
         help="Environment name. Use 'QuadrupedMPCEnv' for custom SRBD; otherwise a MuJoCo Playground env name.",
     )
+    parser.add_argument("--algo", type=str, choices=["ppo", "sac"], default="ppo",
+                        help="RL algorithm: 'ppo' (default) o 'sac'")
     parser.add_argument("--load", nargs="?", const="best", default=None, metavar="FILE",
                         help="Load checkpoint weights. Optionally specify filename or suffix (e.g. 'params_crash.npz', 'crash'). Defaults to 'params_best.pkl'.")
     parser.add_argument("--no-load", action="store_true", help="Ignore any checkpoint and start fresh (overrides --load)")
@@ -903,6 +1044,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    global ALGO, ALGO_PARAMS
+    ALGO = args.algo
+    ALGO_PARAMS = SAC_PARAMS if args.algo == "sac" else PPO_PARAMS
 
     # Auto-set headless if DISPLAY is missing
     if not args.train and not args.headless and (os.environ.get("DISPLAY") is None or os.environ.get("DISPLAY") == ""):
@@ -922,7 +1067,7 @@ def main():
         return
 
     print("=" * 60)
-    print(f"  PPO Eval  —  {env_name}")
+    print(f"  {ALGO.upper()} Eval  —  {env_name}")
     print("=" * 60)
 
     load_suffix = _parse_load_suffix(args.load) if args.load else "best"
@@ -950,14 +1095,24 @@ def main():
         run_viewer_rollout(eval_env, inference_fn=None, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd, zero_command=True)
     else:
         print(f"  Checkpoint loaded from '{ckpt_dir}'")
-        networks = ppo_networks.make_ppo_networks(
-            observation_size=eval_env.observation_size,
-            action_size=eval_env.action_size,
-            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-            preprocess_observations_fn=running_statistics.normalize,
-            distribution_type=DISTRIBUTION_TYPE,
-        )
-        inference_fn = ppo_networks.make_inference_fn(networks)
+        if args.algo == "ppo":
+            networks = ppo_networks.make_ppo_networks(
+                observation_size=eval_env.observation_size,
+                action_size=eval_env.action_size,
+                policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
+                preprocess_observations_fn=running_statistics.normalize,
+                distribution_type=DISTRIBUTION_TYPE,
+            )
+            inference_fn = ppo_networks.make_inference_fn(networks)
+        else:
+            networks = sac_networks.make_sac_networks(
+                observation_size=eval_env.observation_size,
+                action_size=eval_env.action_size,
+                policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
+                preprocess_observations_fn=running_statistics.normalize,
+                distribution_type=DISTRIBUTION_TYPE,
+            )
+            inference_fn = sac_networks.make_inference_fn(networks)
         policy_fn = inference_fn(params, deterministic=True)
         run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd, zero_command=False)
 

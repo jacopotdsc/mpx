@@ -975,6 +975,7 @@ def whole_body_interface_wheeled_legged_qp(
     Kp_motion,    Kd_motion,     # params_.Kp_motion   / Kd_motion
     Kp_wheel,     Kd_wheel,      # params_.Kp_wheel    / Kd_wheel
     Kp_regulation, Kd_regulation, # params_.Kp_regulation / Kd_regulation
+    w_posture,
     # ── weights ───────────────────────────────────────────────────────────
     w_qddot,    # params_.weight_q_ddot
     w_com,      # params_.weight_com
@@ -1199,6 +1200,8 @@ def whole_body_interface_wheeled_legged_qp(
     #     H_force_one (3 x 3),  f_force_one (3,)
     # ══════════════════════════════════════════════════════════════════════
 
+    S = err_posture_selection_matrix
+
     # H_acc += params_.weight_q_ddot * I
     H_acc = w_qddot * jnp.eye(nv)
     # H_acc += params_.weight_com * J_com' * J_com
@@ -1209,7 +1212,8 @@ def whole_body_interface_wheeled_legged_qp(
     H_acc = H_acc + w_rwheel * (J_right_wheel_lin.T @ J_right_wheel_lin)
     # H_acc += params_.weight_base * J_base_link_.bottomRows(3)' * J_base_link_.bottomRows(3)
     H_acc = H_acc + w_base   * (J_base_link_rot.T   @ J_base_link_rot)
-
+    H_acc = H_acc + w_posture * S
+    
     # f_acc += weight_com    * J_com'            * (a_com_drift              - a_com_total)
     f_acc  = w_com    * J_com.T            @ (a_com_drift              - a_com_total)
     # f_acc += weight_lwheel * J_left_wheel.top' * (a_lwheel_drift           - a_lwheel_total)
@@ -1218,7 +1222,9 @@ def whole_body_interface_wheeled_legged_qp(
     f_acc  = f_acc + w_rwheel * J_right_wheel_lin.T @ (a_rwheel_drift           - a_rwheel_total)
     # f_acc += weight_base   * J_base_link.bot'  * (a_base_orientation_drift - a_base_orientation_total)
     f_acc  = f_acc + w_base   * J_base_link_rot.T   @ (a_base_orientation_drift - a_base_orientation_total)
+    f_acc = f_acc - w_posture * (S @ a_jnt_total)
 
+    
     # H_force_one = 1e-9 * I(3)   f_force_one = 0(3)
     H_force_one = 1e-9 * jnp.eye(n_f * n_contacts)
     f_force_one = jnp.zeros(n_f * n_contacts)
@@ -1242,7 +1248,7 @@ def whole_body_interface_wheeled_legged_qp(
     q_jnt_max     = mjx_model.jnt_range[jnt_ids, 1]  # (nj,)
     # MuJoCo non ha velocity limit esplicito per ogni joint → usa dof_armature o un valore fisso
     # Se il tuo XML definisce <joint ... range="..." /> userai jnt_range; per vel usa un valore generoso
-    vel_limit     = 20.0 * jnp.ones(nj)              # rad/s — adatta al tuo URDF
+    vel_limit     = 100.0 * jnp.ones(nj)              # rad/s — adatta al tuo URDF
 
 
     # C_acc.rightCols(nj).topRows(nj).diagonal()    = sample_time

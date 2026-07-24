@@ -129,6 +129,7 @@ class BatchedMPCControllerWrapper:
         _Kpm   = config.Kp_motion;  _Kdm  = config.Kd_motion
         _Kpw   = config.Kp_wheel;   _Kdw  = config.Kd_wheel
         _Kpr   = config.Kp_reg;     _Kdr  = config.Kd_reg
+        _w_ps  = config.w_posture
         _wq    = config.w_qddot;    _wc   = config.w_com
         _wl    = config.w_lwheel;   _wrr  = config.w_rwheel;  _wb = config.w_base
         _mu    = config.mu               # 0.5 in C++
@@ -142,6 +143,7 @@ class BatchedMPCControllerWrapper:
                 _cid, _bid, _bbid,
                 _wr, _st, _nc,
                 _Kpm, _Kdm, _Kpw, _Kdw, _Kpr, _Kdr,   # ← ora 6 gains
+                _w_ps,
                 _wq, _wc, _wl, _wrr, _wb,
                 _mu,
                 qpos, qvel, desired
@@ -149,7 +151,10 @@ class BatchedMPCControllerWrapper:
 
         self._solve = jax.jit(jax.vmap(work))
         self._ref_gen = jax.jit(jax.vmap(reference_generator))
-        self._build_desired_jit = jax.jit(self._build_desired_impl)
+        self._build_desired_jit = jax.jit(
+            self._build_desired_impl,
+            static_argnames=("use_nn",),
+        )
         self._whole_body_interface = jax.jit(jax.vmap(whole_body_control))
 
         U0 = jnp.tile(config.u_ref, (config.N, 1))
@@ -234,7 +239,9 @@ class BatchedMPCControllerWrapper:
         pl_world,
         pr_world,
         dpl_world,
-        dpr_world
+        dpr_world,
+        action_nn=None,
+        use_nn=False,
     ):
         B = qpos.shape[0]
         desired = jnp.zeros((B, self._desired_size))
@@ -259,6 +266,22 @@ class BatchedMPCControllerWrapper:
         alpha = u_mpc[:, 2]    # (B,)
         fcl   = u_mpc[:, 3:6]  # (B, 3)
         fcr   = u_mpc[:, 6:9]  # (B, 3)
+
+        if use_nn:
+            mg = self.config.mass * self.config.grav
+            fxy_scale = 0.5
+            fz_scale = 0.8
+            weights_action = jnp.array([
+                0.5, 0.5, 0.3,                    # a, ac_z, alpha
+                #fxy_scale*mg, fxy_scale*mg, fz_scale*mg,          # fcl x,y,z
+                #fxy_scale*mg, fxy_scale*mg, fz_scale*mg,          # fcr x,y,z
+            ])
+
+            a = a + action_nn[:, 0] * weights_action[0]
+            ac_z = ac_z + action_nn[:, 1] * weights_action[1]
+            alpha = alpha + action_nn[:, 2] * weights_action[2]
+            #fcl = fcl + scaled_action[:, 3:6]
+            #fcr = fcr + scaled_action[:, 6:9]
 
         # ── current state ────────────────────────────────────────────────
         # Eigen::Vector3d pcom_curr = x_IN.segment<3>(0);
@@ -324,6 +347,11 @@ class BatchedMPCControllerWrapper:
         # ── pos_com_ = pcom_curr + dt_ * vcom_curr ───────────────────────
         dt = 1.0 / self.config.whole_body_frequency
         acc_com_ = (fcl + fcr) / self.config.mass + g_vec[None, :]
+        if use_nn:
+            weights_acc = jnp.array([0.5, 0.5, 0.5])
+            scaled_acc = action_nn[:, 3:6] * weights_acc[None, :]
+            acc_com_ = acc_com_.at[:, 0:3].add(scaled_acc)
+
         vel_com_ = vcom_curr + dt * acc_com_
         pos_com_ = pcom_curr + dt * vcom_curr
 
@@ -431,7 +459,7 @@ class BatchedMPCControllerWrapper:
         return desired
     
     def whole_body_run(self, state: MPCState, x0, qpos, qvel,
-                   pl_world, pr_world, dpl_world, dpr_world):
+                   pl_world, pr_world, dpl_world, dpr_world, action_nn=None, use_nn=False):
 
         desired = self._build_desired_jit(
             x0,
@@ -441,11 +469,26 @@ class BatchedMPCControllerWrapper:
             pr_world,
             dpl_world,
             dpr_world,
+            action_nn=action_nn,
+            use_nn=use_nn,
         )
 
         tau_cmd, qddot, fl, fr = self._whole_body_interface(
             qpos, qvel, desired
         )
+
+        #if use_nn:
+        #    jax.debug.print(
+        #        "\nWBC DIFFERENCE:"
+        #        "\nΔ tau_cmd:\n{}"
+        #        "\nΔ qddot:\n{}"
+        #        "\nΔ fl:\n{}"
+        #        "\nΔ fr:\n{}\n",
+        #        tau_cmd - tau_cmd_before,
+        #        qddot - qddot_before,
+        #        fl - fl_before,
+        #        fr - fr_before,
+        #    )
 
         return state, tau_cmd, qddot, fl, fr, desired
 

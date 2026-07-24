@@ -76,8 +76,9 @@ Kp_motion = 5e1
 Kd_motion = 3e1
 Kp_wheel  = 5e1
 Kd_wheel  = 3e1 
-Kp_reg    = 1e3 
-Kd_reg    = 5e1 
+Kp_reg    = 1e2 
+Kd_reg    = 2e1 
+w_posture = 1e-1
 
 w_qddot     = 1e-12
 w_com       = 1e0

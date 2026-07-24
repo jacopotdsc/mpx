@@ -838,6 +838,207 @@ def plot_llc(csv_path: str, out_path: str | None = None) -> str | None:
     print(f"  Saved: {out_path}")
     return out_path
 
+def plot_reward_terms(
+    terms,
+    prefix: str = "reward_terms/",
+    threshold: float = 10.0,
+    filename: str = "reward_terms.png",
+    out_dir: str = _DEFAULT_DIR,
+    title: str = "Reward terms",
+    verbose: bool = True,
+):
+    """Plot dei termini di reward su due subplot.
+
+    terms     : dict {nome: array (T,)} oppure lista di dict (uno per step).
+    prefix    : prefisso delle chiavi da selezionare ("" o None = tutte).
+    threshold : chi ha almeno un |valore| > threshold va sopra, gli altri sotto.
+    verbose   : stampa lunghezza / min / max / NaN di ogni serie.
+    """
+    _ensure_dir(out_dir)
+
+    # ── lista di dict (uno per step) -> dict di serie temporali ───────────
+    if isinstance(terms, (list, tuple)):
+        if len(terms) == 0:
+            print("[plot] info log vuoto")
+            return None
+        terms = {
+            k: np.asarray([np.asarray(d[k]).reshape(-1)[0] for d in terms])
+            for k in terms[0]
+        }
+
+    if prefix:
+        selected = {k[len(prefix):]: v for k, v in terms.items() if k.startswith(prefix)}
+        if selected:
+            terms = selected
+
+    data = {k: np.asarray(v, dtype=float).reshape(-1) for k, v in terms.items()}
+
+    if not data:
+        print(f"[plot] nessuna chiave con prefisso '{prefix}'")
+        return None
+
+    # ── diagnostica ───────────────────────────────────────────────────────
+    if verbose:
+        print(f"[plot] {len(data)} serie:")
+        for k, v in sorted(data.items()):
+            finite = v[np.isfinite(v)]
+            if finite.size:
+                print(f"       {k:<28} len={v.size:<6} "
+                      f"min={finite.min():<12.4g} max={finite.max():<12.4g} "
+                      f"non-finite={v.size - finite.size}")
+            else:
+                print(f"       {k:<28} len={v.size:<6} ALL non-finite (NaN/inf)")
+
+    # ── scarta le serie non plottabili ────────────────────────────────────
+    dropped = [k for k, v in data.items() if not np.isfinite(v).any()]
+    for k in dropped:
+        data.pop(k)
+
+    if dropped:
+        print(f"[plot] serie senza valori finiti, escluse: {dropped}")
+
+    if not data:
+        print("[plot] nessuna serie plottabile")
+        return None
+
+    n_pts = max(len(v) for v in data.values())
+    if n_pts < 2:
+        print(f"[plot] attenzione: solo {n_pts} punto per serie "
+              f"(passa la lista completa info_log, non info_log[0])")
+
+    big = sorted([k for k, v in data.items() if np.nanmax(np.abs(v[np.isfinite(v)])) > threshold])
+    small = sorted([k for k in data if k not in big])
+
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(13, 9), sharex=True)
+    fig.suptitle(title, fontsize=13)
+
+    cmap = plt.get_cmap("tab20")
+    marker = "o" if n_pts < 2 else None
+
+    for ax, names, subtitle in (
+        (ax_top, big, f"|max| > {threshold:g}"),
+        (ax_bot, small, f"|max| <= {threshold:g}"),
+    ):
+        for i, k in enumerate(names):
+            v = np.where(np.isfinite(data[k]), data[k], np.nan)  # inf -> gap
+            ax.plot(v, linewidth=1.2, marker=marker, color=cmap(i % 20), label=k)
+
+        ax.set_title(subtitle)
+        ax.set_ylabel("value")
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0.0, color="k", linewidth=0.6, alpha=0.4)
+
+        if names:
+            ax.legend(fontsize=8, ncol=2, loc="upper right")
+
+    ax_bot.set_xlabel("Step")
+
+    fig.tight_layout()
+    path = os.path.join(out_dir, filename)
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    print(f"[plot] saved → {path}")
+
+    return path
+
+def plot_reward_terms_separate(
+    terms,
+    prefix: str = "reward_terms/",
+    dir_name: str = None,
+    out_dir: str = _DEFAULT_DIR,
+    verbose: bool = True,
+):
+    """Come plot_reward_terms, ma salva un PNG separato per ogni termine.
+
+    terms    : dict {nome: array (T,)} oppure lista di dict (uno per step).
+    prefix   : prefisso delle chiavi da selezionare ("" o None = tutte).
+               Da qui viene ricavato anche il nome della cartella.
+    dir_name : per forzare un nome cartella diverso da quello del prefix.
+    verbose  : stampa lunghezza / min / max / NaN di ogni serie.
+    """
+    # ── nome cartella dal prefix ──────────────────────────────────────────
+    if dir_name is None:
+        dir_name = prefix.strip("/").replace("/", "_") if prefix else "plots"
+
+    plots_dir = os.path.join(out_dir, dir_name)
+    _ensure_dir(plots_dir)
+
+    # ── lista di dict (uno per step) -> dict di serie temporali ───────────
+    if isinstance(terms, (list, tuple)):
+        if len(terms) == 0:
+            print("[plot] info log vuoto")
+            return None
+        terms = {
+            k: np.asarray([np.asarray(d[k]).reshape(-1)[0] for d in terms])
+            for k in terms[0]
+        }
+
+    if prefix:
+        selected = {k[len(prefix):]: v for k, v in terms.items() if k.startswith(prefix)}
+        if selected:
+            terms = selected
+
+    data = {k: np.asarray(v, dtype=float).reshape(-1) for k, v in terms.items()}
+
+    if not data:
+        print(f"[plot] nessuna chiave con prefisso '{prefix}'")
+        return None
+
+    # ── diagnostica ───────────────────────────────────────────────────────
+    if verbose:
+        print(f"[plot] {len(data)} serie:")
+        for k, v in sorted(data.items()):
+            finite = v[np.isfinite(v)]
+            if finite.size:
+                print(f"       {k:<28} len={v.size:<6} "
+                      f"min={finite.min():<12.4g} max={finite.max():<12.4g} "
+                      f"non-finiti={v.size - finite.size}")
+            else:
+                print(f"       {k:<28} len={v.size:<6} TUTTI non-finiti (NaN/inf)")
+
+    # ── una figura per termine ────────────────────────────────────────────
+    paths = {}
+
+    for k in sorted(data):
+        v = data[k]
+
+        if not np.isfinite(v).any():
+            print(f"[plot] '{k}' senza valori finiti, saltato")
+            continue
+
+        v = np.where(np.isfinite(v), v, np.nan)  # inf -> gap
+        marker = "o" if v.size < 2 else None
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+
+        ax.plot(v, linewidth=1.2, marker=marker, color="steelblue")
+        ax.set_title(k)
+        ax.set_xlabel("Step")
+        ax.set_ylabel("value")
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0.0, color="k", linewidth=0.6, alpha=0.4)
+
+        finite = v[np.isfinite(v)]
+        ax.text(
+            0.01, 0.02,
+            f"mean={finite.mean():.4g}   min={finite.min():.4g}   "
+            f"max={finite.max():.4g}   sum={finite.sum():.4g}",
+            transform=ax.transAxes, fontsize=8, color="gray",
+        )
+
+        fig.tight_layout()
+
+        safe = k.replace("/", "_")
+        path = os.path.join(plots_dir, f"{safe}.png")
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+
+        paths[k] = path
+
+    print(f"[plot] {len(paths)} figure salvate → {plots_dir}")
+
+    return paths
+    
 def _ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 

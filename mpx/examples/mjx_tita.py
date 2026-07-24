@@ -1,3 +1,4 @@
+
 import argparse
 import os
 import sys
@@ -282,7 +283,15 @@ def main(headless=False, steps=500, scene="flat"):
     
     contact_ids = sim_utils.geom_ids(model, config.contact_frame)
     mpc = mpc_wrapper_dfcip.BatchedMPCControllerWrapper(config, n_env=1)
-    command_handle = sim_utils.KeyboardVelocityCommand(vx=0.0, vy=0.0, wz=0.0)
+    command_handle = sim_utils.KeyboardVelocityCommand(
+        vx=0.0, 
+        vy=0.0, 
+        wz=0.0,
+        forward_step=0.1,
+        yaw_step=0.2,
+        forward_limits=(-10.0, 10.0),
+        yaw_limits=(-1.5, 1.5),
+    )
     
     solve_mpc = _build_solve_fn(mpc)
     reset_mpc = jax.jit(mpc.reset)
@@ -326,9 +335,10 @@ def main(headless=False, steps=500, scene="flat"):
     period = int(sim_frequency / config.mpc_frequency)
     counter = 0
     theta_prev = 0.0
+    qddot = np.zeros_like(model.nv)
     mpc_state = mpc.init_state()
 
-    def step_controller(mpc_state, tau, reference, theta_prev=theta_prev):
+    def step_controller(mpc_state, tau, qddot, reference, theta_prev=theta_prev):
         nonlocal counter
 
         print(f"\n=== step {counter} ===")
@@ -426,7 +436,22 @@ def main(headless=False, steps=500, scene="flat"):
 
         q_target = np.array([0.0, 0.5, -1.0, 0.0,]*2)
 
-        data.ctrl = np.asarray(tau[0])
+        dt = model.opt.timestep
+        qpos_joint  = qpos[7:]
+        qvel_joint  = qvel[6:]
+        qddot_joint = np.asarray(qddot[0, 6:])   # JAX → numpy una volta sola, a monte
+
+        dq_desired = qvel_joint + qddot_joint * dt
+        q_desired  = qpos_joint + qvel_joint * dt + 0.5 * qddot_joint * dt**2
+
+        p_ctrl = 35.0 * (q_desired - qpos_joint)
+        d_ctrl = 10.0 * (dq_desired - qvel_joint)
+
+        p_ctrl[[3, 7]] = 0.0        # ruote: niente termine P
+
+        total_ctrl = p_ctrl + d_ctrl + np.asarray(tau[0])
+        data.ctrl = total_ctrl
+
         mujoco.mj_step(model, data)
         update_com_tracking_camera(
             _sim_cam,
@@ -441,7 +466,7 @@ def main(headless=False, steps=500, scene="flat"):
         counter += 1
         extra_stop = timer()
         print(f"[timing] extra time: {1e3 * (extra_stop - extra_start):.2f} ms")
-        return mpc_state, tau, reference, theta_prev, touch_floor
+        return mpc_state, tau, qddot, reference, theta_prev, touch_floor
     
     def finalize_outputs():
         print("\n[finalize] Saving outputs...")
@@ -493,7 +518,7 @@ def main(headless=False, steps=500, scene="flat"):
         if headless:
             for _ in range(steps):
                 cmd = command_handle.get_command()
-                mpc_state, tau, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, reference, theta_prev=theta_prev)
+                mpc_state, tau, qddot, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, qddot, reference, theta_prev=theta_prev)
                 if touch_floor:
                     print(f"Base touched the floor at step {counter}. Ending simulation.")
                     break
@@ -513,7 +538,7 @@ def main(headless=False, steps=500, scene="flat"):
                     viewer.set_texts((None, None, *overlay_text))
 
                 start_step = timer()
-                mpc_state, tau, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, reference, theta_prev=theta_prev)
+                mpc_state, tau, qddot, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, qddot, reference, theta_prev=theta_prev)
                 end_step = timer()
                 step_time = end_step - start_step
                 print(f"Step time: {1e3 * step_time:.2f} ms")
