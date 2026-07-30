@@ -264,9 +264,10 @@ class SimLogger:
 # --------------------------------------------------------------------------- #
 def plot_velocity_tracking(log, save_path=None, csv_path="vel_tracking.csv", show=True):
     """
-    Two subplots:
-      - linear velocity:   vc_world rotated into the body frame (x, y)  vs  command (vx, vy)
-      - angular velocity:  yaw rate measured from MuJoCo (omega_z)      vs  command (wz)
+    Three subplots:
+      - vx:      vc_world rotated into the body frame (x)  vs  command (vx)
+      - vy:      vc_world rotated into the body frame (y)  vs  command (vy)
+      - angular: yaw rate measured from MuJoCo (omega_z)   vs  command (wz)
     Saves CSV with: t, vx_meas, vx_cmd, vy_meas, vy_cmd, w_meas, wz_cmd
     """
     d = log.arrays() if isinstance(log, SimLogger) else log
@@ -281,19 +282,25 @@ def plot_velocity_tracking(log, save_path=None, csv_path="vel_tracking.csv", sho
         [t, vc_body[:, 0], cmd[:, 0], vc_body[:, 1], cmd[:, 1], w_meas, cmd[:, 2]],
     )
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
 
     ax = axes[0]
     ax.plot(t, vc_body[:, 0], color="tab:blue", label="vx measured")
     ax.plot(t, cmd[:, 0], "--", color="tab:blue", label="vx commanded")
-    #ax.plot(t, vc_body[:, 1], color="tab:orange", label="vy measured (body)")
-    #ax.plot(t, cmd[:, 1], "--", color="tab:orange", label="vy commanded")
-    ax.set_ylabel("linear velocity [m/s]")
-    ax.set_title("Center linear velocity tracking")
+    ax.set_ylabel("vx [m/s]")
+    ax.set_title("Center linear velocity tracking - X")
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="best", ncol=2)
+    ax.legend(loc="best")
 
     ax = axes[1]
+    ax.plot(t, vc_body[:, 1], color="tab:orange", label="vy measured (body)")
+    ax.plot(t, cmd[:, 1], "--", color="tab:orange", label="vy commanded")
+    ax.set_ylabel("vy [m/s]")
+    ax.set_title("Center linear velocity tracking - Y")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    ax = axes[2]
     ax.plot(t, w_meas, color="tab:green", label="w measured")
     ax.plot(t, cmd[:, 2], "--", color="tab:green", label="wz commanded")
     ax.set_ylabel("angular velocity [rad/s]")
@@ -340,27 +347,53 @@ def plot_velocity_error(log, save_path=None, csv_path="vel_error.csv", show=True
         [t, err_vx, err_vy, err_w, cmd[:, 0], cmd[:, 1], cmd[:, 2]],
     )
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
 
     # ============================================================
-    # LINEAR VELOCITY ERROR + LINEAR COMMANDS
+    # VX ERROR + VX COMMAND
     # ============================================================
     ax = axes[0]
-
     ax.plot(t, err_vx, color="tab:blue", label="vx error (cmd - meas)")
-    # ax.plot(t, err_vy, color="tab:orange", label="vy error (cmd - meas)")
+    ax.plot(t, cmd[:, 0], linestyle="--", color="tab:blue", label="vx cmd")
+    ax.set_ylabel("vx error [m/s]")
+    ax.set_title("Linear velocity tracking error - X")
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color="black", linewidth=0.5, linestyle="--")
+    ax.legend(loc="best")
 
-    ax.plot(
-        t,
-        cmd[:, 0],
-        linestyle="--",
-        color="tab:blue",
-        label="vx cmd",
-    )
+    # ============================================================
+    # VY ERROR + VY COMMAND
+    # ============================================================
+    ax = axes[1]
+    ax.plot(t, err_vy, color="tab:orange", label="vy error (cmd - meas)")
+    ax.plot(t, cmd[:, 1], linestyle="--", color="tab:orange", label="vy cmd")
+    ax.set_ylabel("vy error [m/s]")
+    ax.set_title("Linear velocity tracking error - Y")
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color="black", linewidth=0.5, linestyle="--")
+    ax.legend(loc="best")
 
-    # Se vuoi anche vy, decommenta queste due righe
-    # ax.plot(
-    #     t,
+    # ============================================================
+    # ANGULAR VELOCITY ERROR + ANGULAR COMMAND
+    # ============================================================
+    ax = axes[2]
+    ax.plot(t, err_w, color="tab:green", label="w error (cmd - meas)")
+    ax.plot(t, cmd[:, 2], linestyle="--", color="tab:green", label="wz cmd")
+    ax.set_ylabel("angular velocity error [rad/s]")
+    ax.set_xlabel("time [s]")
+    ax.set_title("Angular velocity tracking error (yaw)")
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color="black", linewidth=0.5, linestyle="--")
+    ax.legend(loc="best")
+
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig
+
 
 # --------------------------------------------------------------------------- #
 #  Function 3: CoM position (X, Y, Z) + forces at the CoM

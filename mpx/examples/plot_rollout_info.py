@@ -984,18 +984,6 @@ def plot_reward_terms_separate(
         print(f"[plot] nessuna chiave con prefisso '{prefix}'")
         return None
 
-    # ── diagnostica ───────────────────────────────────────────────────────
-    if verbose:
-        print(f"[plot] {len(data)} serie:")
-        for k, v in sorted(data.items()):
-            finite = v[np.isfinite(v)]
-            if finite.size:
-                print(f"       {k:<28} len={v.size:<6} "
-                      f"min={finite.min():<12.4g} max={finite.max():<12.4g} "
-                      f"non-finiti={v.size - finite.size}")
-            else:
-                print(f"       {k:<28} len={v.size:<6} TUTTI non-finiti (NaN/inf)")
-
     # ── una figura per termine ────────────────────────────────────────────
     paths = {}
 
@@ -1038,7 +1026,7 @@ def plot_reward_terms_separate(
     print(f"[plot] {len(paths)} figure salvate → {plots_dir}")
 
     return paths
-    
+
 def _ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
