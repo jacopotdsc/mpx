@@ -41,8 +41,8 @@ import csv
 
 # Reduce GPU memory fragmentation (must be set before JAX/XLA initialise).
 os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
-os.environ.setdefault("[XLA_PYTHON_CLIENT_MEM_FRACTION]", "0.75")
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.75"
+os.environ.setdefault("[XLA_PYTHON_CLIENT_MEM_FRACTION]", "0.5")
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -58,13 +58,25 @@ from brax.training.agents.ppo.optimizer import LRSchedule
 from flax import linen
 import jax.numpy as jnp
 import dataclasses
+from dataclasses import fields, is_dataclass
+from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
+from typing import Any
 from flax.core import freeze, unfreeze
 from brax.envs.wrappers.training import EpisodeWrapper, VmapWrapper, AutoResetWrapper
 import mujoco
 import mujoco.viewer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_rollout_info import plot_llc,  _save_sim_video, plot_reward_terms, plot_reward_terms_separate
+from plot_eval import (
+    plot_command_tracking,
+    plot_rollout_rewards,
+    plot_llc,  
+    _save_sim_video, 
+    plot_reward_terms, 
+    plot_reward_terms_separate,
+    plot_mpc_output
+)
 
 def get_gpu_name():
     try:
@@ -88,7 +100,7 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 
 PPO_PARAMS = dict(
-    num_timesteps          = 100_000_000,
+    num_timesteps          = 10_000_000,
     num_evals              = 10,
     reward_scaling         = 1.0,
     episode_length         = 2000,
@@ -197,8 +209,9 @@ def progress(num_steps, metrics):
 # ─────────────────────────────────────────────────────────────────────────────
 
 POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
-DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match checkpoint
-
+DISTRIBUTION_TYPE = "normal"  # ['normal', 'tanh_normal'] — must match checkpoint
+ZERO_INIT_OUTPUT_LAYER = False  # if True, init policy output layer to zero (for safe exploration)
+INIT_STD = 0.1
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  train_fn
@@ -227,7 +240,6 @@ def save_params(params, ckpt_dir: str, suffix: str = "final"):
     #print(f"Params saved to {ckpt_dir}/params_{suffix}.npz")
     #print(f"Params saved to {ckpt_dir}/params_{suffix}.pkl")
 
-
 def _parse_load_suffix(load_arg: str) -> str:
     """Convert a --load argument (filename, basename, or suffix) to a params suffix."""
     base = os.path.basename(load_arg)
@@ -237,7 +249,6 @@ def _parse_load_suffix(load_arg: str) -> str:
     if base.startswith("params_"):
         base = base[len("params_"):]
     return base or "best"
-
 
 def load_params(ckpt_dir: str, suffix: str = "best"):
     # prefer best checkpoint, fall back to final
@@ -252,7 +263,6 @@ def load_params(ckpt_dir: str, suffix: str = "best"):
         return None
     with open(pkl_path, "rb") as f:
         return pickle.load(f)
-
 
 def run_viewer_rollout(
     eval_env,
@@ -281,91 +291,10 @@ def run_viewer_rollout(
     rng = jax.random.PRNGKey(42)
     rng, *reset_rngs = jax.random.split(rng, EVAL_BATCH + 1)
     state = batched_reset(jnp.stack(reset_rngs))
-    #nference_fn = None
 
-    # ------------------------------------------------------------------
-    # Se non è stata caricata una policy, crea una vera rete PPO casuale.
-    # ------------------------------------------------------------------
     if inference_fn is None:
-        print("  [TEST-NON-ZERO] Initializing a random PPO neural network")
-
-        rng, policy_key, value_key = jax.random.split(rng, 3)
-
-        random_ppo_networks = ppo_networks.make_ppo_networks(
-            observation_size=eval_env.observation_size,
-            action_size=eval_env.action_size,
-
-            preprocess_observations_fn=running_statistics.normalize,
-
-            policy_hidden_layer_sizes=(256, 256),
-            value_hidden_layer_sizes=(256, 256),
-
-            activation=linen.swish,
-            distribution_type="tanh_normal",
-
-            # Inizializzazione casuale, non zero.
-            policy_network_kernel_init_fn=jax.nn.initializers.lecun_uniform,
-            value_network_kernel_init_fn=jax.nn.initializers.lecun_uniform,
-        )
-
-        # Prende l'osservazione del primo ambiente, eliminando la dimensione batch.
-        observation_example = jax.tree_util.tree_map(
-            lambda x: x[0],
-            state.obs,
-        )
-
-        # Normalizzatore identità iniziale:
-        # mean = 0, std = 1.
-        normalizer_params = running_statistics.init_state(
-            observation_example
-        )
-
-        # Inizializzazione realmente casuale dei pesi.
-        policy_params = random_ppo_networks.policy_network.init(
-            policy_key
-        )
-
-        value_params = random_ppo_networks.value_network.init(
-            value_key
-        )
-
-        random_params = (
-            normalizer_params,
-            policy_params,
-            value_params,
-        )
-
-        make_random_inference_fn = ppo_networks.make_inference_fn(
-            random_ppo_networks
-        )
-
-        inference_fn = make_random_inference_fn(
-            random_params,
-            deterministic=False,
-        )
-
-
-        jit_infer = jax.jit(inference_fn)
-
-        value_params = random_ppo_networks.value_network.init(
-            value_key
-        )
-
-        random_params = (
-            normalizer_params,
-            policy_params,
-            value_params,
-        )
-
-        make_random_inference_fn = ppo_networks.make_inference_fn(
-            random_ppo_networks
-        )
-
-        inference_fn = make_random_inference_fn(
-            random_params,
-            deterministic=False,
-        )
-
+        print("  [ERROR] No inference_fn provided; creating a fresh random policy network for rollout.")
+        exit(1)
 
     jit_infer = jax.jit(inference_fn)
 
@@ -489,20 +418,48 @@ def run_viewer_rollout(
     def _flatten_info(info_dict, prefix=""):
         """Recursively flatten info dict; take env 0 for batched arrays."""
         out = {}
+        
         for k, v in info_dict.items():
             full_key = f"{prefix}{k}" if not prefix else f"{prefix}/{k}"
+
             if isinstance(v, dict):
                 out.update(_flatten_info(v, prefix=full_key))
+
+            # Special handling only for the ControlSol stored in mpc_output.
+            elif k == "mpc_output" and is_dataclass(v):
+                for field in fields(v):
+                    field_key = f"{full_key}/{field.name}"
+                    field_value = getattr(v, field.name)
+                    try:
+                        arr = np.asarray(field_value)
+
+                        # Take environment 0.
+                        if arr.ndim >= 1 and arr.shape[0] == EVAL_BATCH:
+                            arr = arr[0]
+
+                        row = arr.reshape(-1)
+
+                        if row.size == 1:
+                            out[field_key] = float(row[0])
+                        else:
+                            for i, val in enumerate(row):
+                                out[f"{field_key}_{i}"] = float(val)
+
+                    except Exception as exc:
+                        print(
+                            f"[flatten_info] Failed to flatten "
+                            f"{field_key}: {exc}"
+                        )
             else:
                 try:
                     arr = np.array(v)
                     if arr.ndim == 0:
                         out[full_key] = float(arr)
                     elif arr.ndim == 1 and arr.shape[0] == EVAL_BATCH:
-                        # scalar per env → take env 0
+                        # Scalar per environment: take environment 0.
                         out[full_key] = float(arr[0])
                     elif arr.ndim >= 1 and arr.shape[0] == EVAL_BATCH:
-                        # vector per env → take env 0, flatten
+                        # Vector per environment: take environment 0 and flatten.
                         row = arr[0].flatten()
                         for i, val in enumerate(row):
                             out[f"{full_key}_{i}"] = float(val)
@@ -512,6 +469,7 @@ def run_viewer_rollout(
                             out[f"{full_key}_{i}"] = float(val)
                 except Exception:
                     pass
+
         return out
 
     if headless:
@@ -662,32 +620,16 @@ def run_viewer_rollout(
 
     steps = np.arange(steps_done)
 
-    cumulative_rewards = np.cumsum(rewards)
-
-    fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
-
-    axes[0].plot(steps, rewards, color="seagreen")
-    axes[0].set_ylabel("reward")
-    axes[0].set_title("Reward per step — rollout")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(steps, cumulative_rewards, color="darkorange")
-    axes[1].set_ylabel("cumulative reward")
-    axes[1].set_title("Cumulative reward")
-    axes[1].grid(True, alpha=0.3)
-
-    axes[2].plot(steps, action_sums, color="steelblue")
-    axes[2].set_xlabel("step")
-    axes[2].set_ylabel("sum(|action|)")
-    axes[2].set_title("Action magnitude per step")
-    axes[2].grid(True, alpha=0.3)
-
-    fig.tight_layout()
     os.makedirs(ckpt_dir, exist_ok=True)
-    rollout_plot_path = os.path.join(ckpt_dir, "reward_rollout.png")
-    fig.savefig(rollout_plot_path, dpi=120)
-    plt.close(fig)
-    print(f"  Reward plot  : {rollout_plot_path}")
+    ckpt_dir = os.path.join(ckpt_dir, "evaluation_plots")
+
+    plot_rollout_rewards(
+        steps=steps,
+        rewards=rewards,
+        action_sums=action_sums,
+        ckpt_dir=ckpt_dir,
+    )
+
 
     if info_log:
         csv_path = os.path.join(ckpt_dir, "rollout_info.csv")
@@ -696,13 +638,41 @@ def run_viewer_rollout(
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(info_log)
+
         print(f"  Info CSV     : {csv_path}")
-        plot_llc(csv_path)
-        plot_reward_terms(info_log, out_dir=ckpt_dir, threshold=3.0)
-        plot_reward_terms_separate(info_log, out_dir=ckpt_dir)
+
+        plot_llc(
+            csv_path=csv_path,
+            out_dir=ckpt_dir,
+            filename="plot_llc.png",
+        )
+        plot_command_tracking(
+            info_log,
+            ckpt_dir,
+            filename="commands.png",
+            plot_target_command=False
+        )
+        plot_reward_terms(
+            terms=info_log,
+            prefix="reward_terms/",
+            out_dir=ckpt_dir,
+            threshold=3.0,
+            filename="reward_terms.png"
+        )
+        plot_reward_terms_separate(
+            terms=info_log, 
+            prefix="reward_terms/",
+            out_dir=ckpt_dir,
+        )
+        plot_mpc_output(
+            info_log=info_log, 
+            prefix="mpc_output",
+            out_dir=ckpt_dir,
+            filename="mpc_output.png"
+        )
 
 
-def _build_fresh_networks(env):
+def _build_fresh_networks(env, zero_init_output_layer: bool = False):
     """Return a ppo_networks with random hidden layers and zero-init output layer."""
     if DISTRIBUTION_TYPE == "tanh_normal":
         param_size = 2 * env.action_size
@@ -711,158 +681,181 @@ def _build_fresh_networks(env):
     else:
         raise ValueError(f"Unsupported distribution type: {DISTRIBUTION_TYPE}")
     
+
     def _policy_kernel_init_factory(**init_kwargs):
-        base_init = jax.nn.initializers.lecun_uniform(**init_kwargs)
+        
+        def _get_brax_default_kernel_init_fn():
+            """Pull brax's default policy kernel-init factory from the signature."""
+            sig = inspect.signature(ppo_networks.make_ppo_networks)
+            param = sig.parameters.get("policy_network_kernel_init_fn")
+            default = param.default if param is not None else inspect.Parameter.empty
+
+            # Fallback: some forks leave it None here and set the real default deeper,
+            # in make_policy_network / MLP.
+            if default in (inspect.Parameter.empty, None):
+                sig2 = inspect.signature(ppo_networks.networks.make_policy_network)
+                p2 = sig2.parameters.get("kernel_init")
+                default = p2.default if p2 is not None else jax.nn.initializers.lecun_uniform
+
+            print(f"  [INFO] brax default kernel init: {default}")
+            return default
+
+        base_init = _get_brax_default_kernel_init_fn()(**init_kwargs)
         
         def _init(key, shape, dtype=jnp.float32):
-            if len(shape) == 2 and shape[-1] == param_size:
+            if zero_init_output_layer and len(shape) == 2 and shape[-1] == param_size:
                 return jnp.zeros(shape, dtype)
-            #if len(shape) == 1 and shape[0] == param_size:
-            #    # std_param (se il fork usa questo init anche per lui)
-            #    return jnp.full(shape, jnp.log(0.1), dtype)  # o 0.1 se diretto
             return base_init(key, shape, dtype)
 
         return _init
+    
+    init_noise_std =  INIT_STD
 
-    print(inspect.signature(ppo_networks.make_ppo_networks))
-    network_create = ppo_networks.make_ppo_networks(
-        observation_size=env.observation_size,
-        action_size=env.action_size,
-        policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-        policy_network_kernel_init_fn=_policy_kernel_init_factory,
-        preprocess_observations_fn=running_statistics.normalize,
-        distribution_type=DISTRIBUTION_TYPE,
-        activation=linen.elu,
-        mean_kernel_init_fn=lambda **kw: jax.nn.initializers.zeros,
-        init_noise_std=1e-7,
-    )
-    if DISTRIBUTION_TYPE == "tanh_normal":
-        base_policy_network = network_create.policy_network
-
-        target_std = 0.01
-        min_std = 0.001
-        print(f"  [INFO] Target std: {target_std}, Min std: {min_std}")
-
-        # Inversa di softplus:
-        # softplus(scale_raw) + min_std = target_std
-        initial_scale_raw = float(
-            np.log(np.expm1(target_std - min_std))
+    if ALGO == "ppo":
+        networks = ppo_networks.make_ppo_networks(
+            observation_size=env.observation_size,
+            action_size=env.action_size,
+            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
+            preprocess_observations_fn=running_statistics.normalize,
+            distribution_type=DISTRIBUTION_TYPE,
+            activation=linen.elu,
+            policy_network_kernel_init_fn=_policy_kernel_init_factory,
+            init_noise_std=init_noise_std
+        )
+    else:
+        networks = sac_networks.make_sac_networks(
+            observation_size=env.observation_size,
+            action_size=env.action_size,
+            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
+            preprocess_observations_fn=running_statistics.normalize,
+            distribution_type=DISTRIBUTION_TYPE,
+            activation=linen.elu,
+            policy_network_kernel_init_fn=_policy_kernel_init_factory ,
+            init_noise_std=init_noise_std
         )
 
-        def _init_policy_with_small_std(key):
-            params = unfreeze(base_policy_network.init(key))
-
-            output_layers = [
-                name
-                for name, layer_params in params["params"].items()
-                if (
-                    "bias" in layer_params
-                    and layer_params["bias"].shape
-                    == (2 * env.action_size,)
-                )
-            ]
-
-            if len(output_layers) != 1:
-                raise RuntimeError(
-                    "Impossibile identificare univocamente il layer "
-                    f"finale della policy: {output_layers}"
-                )
-
-            output_name = output_layers[0]
-            bias = params["params"][output_name]["bias"]
-
-            # Prima metà: loc = 0
-            bias = bias.at[:env.action_size].set(0.0)
-
-            # Seconda metà: scale_raw ≈ -2.263
-            bias = bias.at[env.action_size:].set(initial_scale_raw)
-
-            params["params"][output_name]["bias"] = bias
-            return freeze(params)
-
-        patched_policy_network = dataclasses.replace(
-            base_policy_network,
-            init=_init_policy_with_small_std,
-        )
-
-        network_create = network_create.replace(
-            policy_network=patched_policy_network,
-        )
-
-    self_test = True
+    self_test = True 
     if self_test:
-        print(f"  [SELF-TEST] Checking fresh '{DISTRIBUTION_TYPE}' policy...")
+        print("\n" + "=" * 60)
+        print(f"  [SELF-TEST] fresh '{DISTRIBUTION_TYPE}' policy")
+        print("=" * 60)
 
-        policy_params = network_create.policy_network.init(jax.random.PRNGKey(0))
+        # ── 1. weights from the custom init ──
+        policy_params = networks.policy_network.init(jax.random.PRNGKey(0))
 
+        # ── 2. observation spec (flat or dict) + a RANDOM sample obs ──
         obs_size = env.observation_size
+        key_obs = jax.random.PRNGKey(42)
         if isinstance(obs_size, dict):
             obs_proto = {
                 k: specs.Array((int(np.prod(v)),) if not isinstance(v, int) else (v,), jnp.float32)
                 for k, v in obs_size.items()
             }
-            dummy_obs = {k: jnp.zeros(a.shape, dtype=jnp.float32) for k, a in obs_proto.items()}
+            keys = jax.random.split(key_obs, len(obs_proto))
+            sample_obs = {
+                k: jax.random.normal(kk, a.shape, jnp.float32)
+                for (k, a), kk in zip(obs_proto.items(), keys)
+            }
         else:
             obs_proto = specs.Array((obs_size,), jnp.float32)
-            dummy_obs = jnp.zeros((obs_size,), dtype=jnp.float32)
+            sample_obs = jax.random.normal(key_obs, (obs_size,), jnp.float32)
 
         normalizer_params = running_statistics.init_state(obs_proto)
         full_params = (normalizer_params, policy_params)
 
-        # ── output grezzo della rete (robusto a tuple/array) ──
-        raw_out = network_create.policy_network.apply(
-            normalizer_params, policy_params, dummy_obs
-        )
+        # ── 3. network / obs info ──
+        print("  -- network info --")
+        print(f"    ALGO                : {ALGO}")
+        print(f"    distribution_type   : {DISTRIBUTION_TYPE}")
+        print(f"    hidden layers       : {POLICY_HIDDEN_LAYER_SIZES}")
+        print(f"    action_size         : {env.action_size}")
+        print(f"    param_size (output) : {param_size}")
+        print(f"    zero_init_output    : {zero_init_output_layer}")
+        if isinstance(obs_size, dict):
+            print(f"    observation_size    : dict -> " + ", ".join(f"{k}:{v}" for k, v in obs_size.items()))
+        else:
+            print(f"    observation_size    : {obs_size}")
+
+        # ── 4. per-layer parameter shapes ──
+        print("  -- policy param shapes --")
+        flat = jax.tree_util.tree_flatten_with_path(policy_params)[0]
+        total = 0
+        for path, value in flat:
+            if hasattr(value, "shape"):
+                total += int(np.prod(value.shape))
+                path_str = "/".join(str(getattr(p, "key", p)) for p in path)
+                print(f"    {path_str:<45}: {tuple(value.shape)}")
+        print(f"    {'TOTAL scalars':<45}: {total}")
+
+        # ── 5. last-layer kernel norm (proof of zero-init) ──
+        last_out = [
+            x for x in jax.tree_util.tree_leaves(policy_params)
+            if hasattr(x, "ndim") and x.ndim == 2 and x.shape[-1] == param_size
+        ]
+        if last_out:
+            norms = [float(jnp.linalg.norm(k)) for k in last_out]
+            print(f"    output-kernel norms : {norms}"
+                  f"  ( ~0 if zero_init_output={zero_init_output_layer})")
+
+        # ── 6. raw output on the RANDOM obs ──
+        print("  -- raw apply() on a random observation --")
+        raw_out = networks.policy_network.apply(normalizer_params, policy_params, sample_obs)
         if isinstance(raw_out, tuple):
-            print(f"    apply() -> tuple di {len(raw_out)}: shapes "
+            print(f"    apply() -> tuple len {len(raw_out)}, shapes "
                   f"{[np.shape(np.array(o)) for o in raw_out]}")
-            for i, o in enumerate(raw_out):
-                print(f"      out[{i}] = {np.array(o)}")
             loc_raw = jnp.asarray(raw_out[0])
+            scale_raw = None
         else:
             arr = jnp.asarray(raw_out)
+            print(f"    apply() -> array shape {arr.shape}")
             if DISTRIBUTION_TYPE == "tanh_normal":
                 loc_raw, scale_raw = jnp.split(arr, 2, axis=-1)
-                print(f"    scale raw           : {np.array(scale_raw)}")
             else:
-                loc_raw = arr
+                loc_raw, scale_raw = arr, None
 
-        print(f"    loc raw             : {np.array(loc_raw)}  (atteso: tutti 0)")
+        print(f"    loc   (raw)         : {np.array(loc_raw)}")
+        if scale_raw is not None:
+            # brax maps scale via softplus (+ min) or exp depending on noise_std_type
+            print(f"    scale (raw)         : {np.array(scale_raw)}")
+            print(f"    softplus(scale)     : {np.array(jax.nn.softplus(scale_raw))}  (se mappatura softplus)")
+            print(f"    exp(scale)          : {np.array(jnp.exp(scale_raw))}  (se mappatura exp/log)")
 
-        # ── std_param, se esiste (tipico di 'normal') ──
+        # ── 7. std_param, if the distribution stores it separately (typical 'normal') ──
         params_dict = policy_params.get("params", policy_params)
         if "std_param" in params_dict:
-            std_raw = np.array(params_dict["std_param"]["value"])
-            print(f"    std_param raw       : {std_raw}")
-            print(f"    exp(std_param)      : {np.exp(std_raw)}  (se mappatura exp)")
-            print(f"    softplus(std_param) : {np.array(jax.nn.softplus(jnp.asarray(std_raw)))}  (se mappatura softplus)")
+            std_raw = np.array(list(params_dict["std_param"].values())[0])
+            print(f"    std_param (raw)     : {std_raw}")
         else:
-            print("    (no std_param in parameters)")
+            print("    std_param           : (not present in params)")
 
-        # ── azione deterministica: deve essere 0 ──
-        inference_fn = ppo_networks.make_inference_fn(network_create)
+        # ── 8. deterministic action + empirical exploration std ──
+        inference_fn = (ppo_networks.make_inference_fn(networks) if ALGO == "ppo"
+                        else sac_networks.make_inference_fn(networks))
+
         det_policy = inference_fn(full_params, deterministic=True)
-        det_action, _ = det_policy(dummy_obs, jax.random.PRNGKey(0))
+        det_action, _ = det_policy(sample_obs, jax.random.PRNGKey(0))
         det_norm = float(jnp.linalg.norm(det_action))
-        print(f"    |det action|        : {det_norm:.3e}  (atteso: 0)")
+        print("  -- actions --")
+        print(f"    det action          : {np.array(det_action)}")
+        print(f"    |det action|        : {det_norm:.3e}")
 
-        # ── std empirica: la verità, qualunque sia la mappatura interna ──
         stoch_policy = inference_fn(full_params, deterministic=False)
         keys = jax.random.split(jax.random.PRNGKey(1), 2000)
-        actions = jax.vmap(lambda k: stoch_policy(dummy_obs, k)[0])(keys)
+        actions = jax.vmap(lambda k: stoch_policy(sample_obs, k)[0])(keys)
         act_mean, act_std = np.array(actions.mean(0)), np.array(actions.std(0))
         print(f"    sampled mean        : {act_mean}")
-        print(f"    sampled std         : {act_std}")
+        print(f"    sampled std (empir.): {act_std}")
 
-        assert det_norm < 1e-8, f"[SELF-TEST FAILED] det action non-zero: {det_norm}"
+        # ── 9. sanity flags ──
+        if zero_init_output_layer and det_norm > 1e-6:
+            print(f"    [WARN] zero_init requested but |det action| = {det_norm:.2e} (expected ~0)")
         if np.any(act_std < 1e-3):
-            print("    [FAIL] std ~0: niente esplorazione, PPO non imparerà "
-                  "e i log-prob rischiano di esplodere. Sistemare l'init della std.")
+            print("    [WARN] std ~0: no exploration, the log-prob risk to explode.")
         elif np.any(act_std > 1.0):
-            print("    [WARN] std >1: esplorazione molto ampia per action_scale=0.1.")
-        print("  [SELF-TEST] done.\n")
-
-    return network_create
+            print("    [WARN] std >1: very wide exploration for small action_scale.")
+        print("  [SELF-TEST] done.")
+        print("=" * 60 + "\n")
+    return networks
 
 
 def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
@@ -894,21 +887,11 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
     with open(REWARD_LOG_FILE, "a") as _f:
         _f.write("\n".join(header_lines) + "\n")
 
-    if algo == "sac":
-        network_factory = functools.partial(
-            ppo_networks.make_sac_networks,
-            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-            distribution_type=DISTRIBUTION_TYPE,
-        )
-    else:
-        network_factory = functools.partial(
-            ppo_networks.make_ppo_networks,
-            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-            distribution_type=DISTRIBUTION_TYPE,
-        )
 
     restore_params = None
-    selected_network_factory = network_factory
+    built_networks = _build_fresh_networks(env, zero_init_output_layer=ZERO_INIT_OUTPUT_LAYER)
+    selected_network_factory = lambda *args, **kwargs: built_networks
+
     if load_init:
         suffix = _parse_load_suffix(load_init) if isinstance(load_init, str) else "best"
         restore_params = load_params(ckpt_dir, suffix=suffix)
@@ -920,17 +903,8 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
     else:
         print("  Fresh training: zero-initializing policy output layer.")
 
-        def _fresh_network_factory(observation_size, action_size, **kwargs):
-            kwargs.pop("policy_network_kernel_init_fn", None)
-            kwargs.pop("distribution_type", None)
-            return _build_fresh_networks(env)
-
-        selected_network_factory = _fresh_network_factory
-
-        # Debug check: output-layer kernels should be exactly zero at init.
-        debug_networks = _build_fresh_networks(env)
-        debug_policy_params = debug_networks.policy_network.init(jax.random.PRNGKey(ALGO_PARAMS["seed"]))
-        flat_debug = jax.tree_util.tree_flatten_with_path(debug_policy_params)[0]
+        network_policy_params = built_networks.policy_network.init(jax.random.PRNGKey(ALGO_PARAMS["seed"]))
+        flat_debug = jax.tree_util.tree_flatten_with_path(network_policy_params)[0]
         print("  policy param shapes:")
         for path, value in flat_debug:
             if hasattr(value, "shape"):
@@ -938,12 +912,12 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
                 print(f"    {path_str}: {tuple(value.shape)}")
 
         print(f"    Distribution_type: {DISTRIBUTION_TYPE}")
-        policy_module = inspect.getclosurevars(debug_networks.policy_network.apply).nonlocals["policy_module"]
+        policy_module = inspect.getclosurevars(built_networks.policy_network.apply).nonlocals["policy_module"]
         activation_fn = policy_module.activation
         print(f"    Activation (read from policy_network module): {getattr(activation_fn, '__name__', activation_fn)}")
-        out_dim = debug_networks.parametric_action_distribution.param_size
+        out_dim = built_networks.parametric_action_distribution.param_size
         candidate_kernels = [
-            x for x in jax.tree_util.tree_leaves(debug_policy_params)
+            x for x in jax.tree_util.tree_leaves(network_policy_params)
             if hasattr(x, "ndim") and x.ndim == 2 and x.shape[-1] == out_dim
         ]
         if candidate_kernels:
@@ -1031,9 +1005,9 @@ def main():
                         help="RL algorithm: 'ppo' (default) o 'sac'")
     parser.add_argument("--load", nargs="?", const="best", default=None, metavar="FILE",
                         help="Load checkpoint weights. Optionally specify filename or suffix (e.g. 'params_crash.npz', 'crash'). Defaults to 'params_best.pkl'.")
-    parser.add_argument("--no-load", action="store_true", help="Ignore any checkpoint and start fresh (overrides --load)")
     parser.add_argument("--zero", action="store_true", help="Force zero actions (ignore policy network)")
     parser.add_argument("--headless", action="store_true", help="Eval rollout without opening the MuJoCo viewer")
+    parser.add_argument("--random", action="store_true", help="Use a random network for evaluation")
     parser.add_argument("--cmd", nargs=3, type=float, default=None, metavar=("VX", "VY", "WZ"),
                         help="Fix joystick command for eval rollout, e.g. --cmd 0.5 0.0 0.0")
     parser.add_argument(
@@ -1070,52 +1044,80 @@ def main():
     print(f"  {ALGO.upper()} Eval  —  {env_name}")
     print("=" * 60)
 
-    load_suffix = _parse_load_suffix(args.load) if args.load else "best"
-    params = load_params(ckpt_dir, suffix=load_suffix)
 
     fixed_cmd = np.array(args.cmd) if args.cmd is not None else None
 
-    if args.zero or args.no_load:
-        print("  [INFO] --zero flag: using fresh network with zero output layer.")
-        networks = _build_fresh_networks(eval_env)
-        policy_params = networks.policy_network.init(jax.random.PRNGKey(0))
-        obs_size = eval_env.observation_size
+    def _make_fresh_params(env, networks, seed=0, tag=""):
+
+        # --- weights ---
+        policy_params = networks.policy_network.init(jax.random.PRNGKey(seed))
+
+        obs_size = env.observation_size
         if isinstance(obs_size, dict):
-            obs_proto = {k: specs.Array((int(np.prod(v)),) if not isinstance(v, int) else (v,), jnp.float32)
-                         for k, v in obs_size.items()}
+            obs_proto = {
+                k: specs.Array((int(np.prod(v)),) if not isinstance(v, int) else (v,), jnp.float32)
+                for k, v in obs_size.items()
+            }
         else:
             obs_proto = specs.Array((obs_size,), jnp.float32)
-        normalizer_params = running_statistics.init_state(obs_proto)
-        params_zero = (normalizer_params, policy_params)
-        inference_fn = ppo_networks.make_inference_fn(networks)
-        policy_fn = inference_fn(params_zero, deterministic=True)
-        run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd, zero_command=True)
-    elif params is None:
-        print(f"  [WARN] No checkpoint found in '{ckpt_dir}', using zero action.")
-        run_viewer_rollout(eval_env, inference_fn=None, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd, zero_command=True)
-    else:
-        print(f"  Checkpoint loaded from '{ckpt_dir}'")
-        if args.algo == "ppo":
-            networks = ppo_networks.make_ppo_networks(
-                observation_size=eval_env.observation_size,
-                action_size=eval_env.action_size,
-                policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-                preprocess_observations_fn=running_statistics.normalize,
-                distribution_type=DISTRIBUTION_TYPE,
-            )
-            inference_fn = ppo_networks.make_inference_fn(networks)
-        else:
-            networks = sac_networks.make_sac_networks(
-                observation_size=eval_env.observation_size,
-                action_size=eval_env.action_size,
-                policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-                preprocess_observations_fn=running_statistics.normalize,
-                distribution_type=DISTRIBUTION_TYPE,
-            )
-            inference_fn = sac_networks.make_inference_fn(networks)
-        policy_fn = inference_fn(params, deterministic=True)
-        run_viewer_rollout(eval_env, inference_fn=policy_fn, env_name=env_name, headless=args.headless, ckpt_dir=ckpt_dir, fixed_command=fixed_cmd, zero_command=False)
 
+        # --- normalizer state ---
+        normalizer_params = running_statistics.init_state(obs_proto)
+
+        # --- diagnostics ---
+        print(f"  [fresh_params{(' ' + tag) if tag else ''}] seed={seed}")
+        print(f"    obs_size type      : {type(obs_size).__name__} -> {obs_size}")
+        n_leaves = len(jax.tree_util.tree_leaves(policy_params))
+        total = int(sum(np.prod(x.shape) for x in jax.tree_util.tree_leaves(policy_params)))
+        print(f"    policy params      : {n_leaves} leaves, {total} scalars")
+        print(f"    normalizer         : {'dict' if isinstance(obs_proto, dict) else obs_proto.shape} (empty: mean 0 / var 1 -> obs NOT normalized)")
+
+        return (normalizer_params, policy_params)
+
+
+    load_suffix = _parse_load_suffix(args.load) if args.load else "best"
+    params_inference_fn = load_params(ckpt_dir, suffix=load_suffix)
+    zero_command = False
+
+    if args.random or params_inference_fn is None:
+
+        if params_inference_fn is None:
+            print(f"  [NET-INIT] No checkpoint found in '{ckpt_dir}' — using random network.")
+        elif args.random:
+            print("  [NET-INIT] --random flag: using random network.")
+        else:
+            print("  [NET-INIT] Using random network: no flag detected.")
+
+        networks = _build_fresh_networks(eval_env)
+        normalizer_params, policy_params = _make_fresh_params(eval_env, networks, seed=0, tag="random")
+        params_inference_fn = (normalizer_params, policy_params)  
+
+    elif args.zero:
+        print("  [NET-INIT] --zero flag: using fresh network with zero output layer.")
+        networks = _build_fresh_networks(eval_env, zero_init_output_layer=True)
+        normalizer_params, policy_params = _make_fresh_params(eval_env, networks, seed=0, tag="zero")
+        params_inference_fn = (normalizer_params, policy_params)
+
+        zero_command = True
+    else:
+        print(f"  [NET-INIT] Checkpoint will be loaded from '{ckpt_dir}'")
+
+        networks = _build_fresh_networks(eval_env)
+
+    inference_fn = ppo_networks.make_inference_fn(networks) if args.algo == "ppo" else sac_networks.make_inference_fn(networks)
+
+    policy_fn = inference_fn(params_inference_fn, deterministic=True)
+
+    run_viewer_rollout(
+        eval_env=eval_env, 
+        inference_fn=policy_fn, 
+        env_name=env_name, 
+        headless=args.headless, 
+        ckpt_dir=ckpt_dir, 
+        fixed_command=fixed_cmd, 
+        zero_command=zero_command
+    )
+    
 
 if __name__ == "__main__":
     def _input_timeout(prompt: str, timeout: int = 5, default: str = "") -> str:
