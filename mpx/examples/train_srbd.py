@@ -23,6 +23,11 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 
 
+if not os.environ.get("DISPLAY"):
+    os.environ.setdefault("MUJOCO_GL", "egl")
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+
+
 #from __future__ import annotations
 
 import argparse
@@ -30,6 +35,7 @@ import functools
 import inspect
 import os
 import pickle
+import re
 import sys
 import time
 from datetime import datetime
@@ -41,6 +47,7 @@ import csv
 
 # Reduce GPU memory fragmentation (must be set before JAX/XLA initialise).
 os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ.setdefault("[XLA_PYTHON_CLIENT_MEM_FRACTION]", "0.5")
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
 
@@ -48,6 +55,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
+from brax.envs.base import Wrapper
 from brax.training.agents.ppo import networks as ppo_networks
 from brax.training.agents.ppo import train as ppo
 from brax.training.agents.sac import networks as sac_networks
@@ -75,7 +83,8 @@ from plot_eval import (
     _save_sim_video, 
     plot_reward_terms, 
     plot_reward_terms_separate,
-    plot_mpc_output
+    plot_mpc_output,
+    plot_network_actions
 )
 
 def get_gpu_name():
@@ -98,46 +107,88 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 #  PPO parameters  (edit here)
 # ─────────────────────────────────────────────────────────────────────────────
+POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
+DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match checkpoint
+ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for safe exploration)
+INIT_STD = 0.03
+
+NUM_TIMESTEPS = 200_000_000
+NUM_EVALS = 10
+EPISODE_LENGTH = 1000
+NUM_ENVS = 8192
+DETERMINISTIC_EVAL = True  # eval usa la media della policy, non un sample rumoroso
 
 PPO_PARAMS = dict(
-    num_timesteps          = 10_000_000,
-    num_evals              = 10,
+    num_timesteps          = NUM_TIMESTEPS,
+    num_evals              = NUM_EVALS,
     reward_scaling         = 1.0,
-    episode_length         = 2000,
+    episode_length         = EPISODE_LENGTH,
     normalize_observations = True,
     action_repeat          = 1,
     unroll_length          = 20,
     num_minibatches        = 32,
     num_updates_per_batch  = 4,
     discounting            = 0.99,
-    gae_lambda             = 0.95, #default 0.95
-    clipping_epsilon       = 0.3, # default 0.3
-    learning_rate          = jnp.asarray(1e-5, dtype=jnp.float32),
-    #learning_rate_schedule = LRSchedule.ADAPTIVE_KL,
-    entropy_cost           = 0.005, #0.005, #1e-2,
-    desired_kl             = 0.01, # default 0.01
-    num_envs               = 1024,
+    #gae_lambda             = 0.95, #default 0.95
+    #clipping_epsilon       = 0.3, # default 0.3
+    #learning_rate          = jnp.asarray(1e-5, dtype=jnp.float32),
+    ##learning_rate_schedule = LRSchedule.ADAPTIVE_KL,
+    #entropy_cost           = 0.005, #0.005, #1e-2,
+    #desired_kl             = 0.01, # default 0.01
+    num_envs               = NUM_ENVS,
     batch_size             = 256,
     seed                   = 0,
+    #deterministic_eval     = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
 )
+PPO_PARAMS = dict(
+      num_timesteps=NUM_TIMESTEPS,
+      num_evals=NUM_EVALS,
+      reward_scaling=1.0,
+      episode_length=EPISODE_LENGTH,
+      normalize_observations=True,
+      action_repeat=1,
+      unroll_length=20,
+      num_minibatches=32,
+      num_updates_per_batch=4,
+      discounting=0.97,
+      learning_rate=3e-4,
+      entropy_cost=1e-2,
+      num_envs=8192,
+      batch_size=256,
+      max_grad_norm=1.0,
+      network_factory=dict(
+            policy_hidden_layer_sizes=(512, 256, 128),
+            value_hidden_layer_sizes=(512, 256, 128),
+            policy_obs_key="state",
+            value_obs_key="privileged_state",
+        ),
+      num_resets_per_eval=10,
+      seed = 0,
+    #deterministic_eval = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
+  )
+
+
 print(f"PPO_PARAMS: \n{PPO_PARAMS}")
 
 SAC_PARAMS = dict(
-    num_timesteps          = 50_000_000,
-    num_evals              = 5,
+    num_timesteps          = NUM_TIMESTEPS,
+    num_evals              = NUM_EVALS,
     reward_scaling         = 1.0,
-    episode_length         = 2000,
+    episode_length         = EPISODE_LENGTH,
     normalize_observations = True,
     action_repeat          = 1,
     discounting            = 0.99,
     learning_rate          = 3e-4,
-    num_envs               = 128,          # SAC off-policy: molti meno env di PPO
+    num_envs               = NUM_ENVS,          # SAC off-policy: molti meno env di PPO
     batch_size             = 256,
     grad_updates_per_step  = 32,
-    min_replay_size        = 8192,
-    max_replay_size        = 8192*128,
+    min_replay_size        = EPISODE_LENGTH,
+    max_replay_size        = EPISODE_LENGTH*NUM_ENVS,
     seed                   = 0,
+    deterministic_eval     = True, # eval usa la media della policy, non un sample rumoroso
 )
+
+print(f"SAC_PARAMS: \n{SAC_PARAMS}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Environment factories
@@ -163,15 +214,40 @@ def make_envs(
 
     env      = registry.load(env_name)
     eval_env = registry.load(env_name)
+
+    if ALGO == "sac":
+        class SACStateWrapper(Wrapper):
+            """Expose only the regular state observation to SAC."""
+
+            @property
+            def observation_size(self):
+                return int(np.prod(self.env.observation_size["state"]))
+
+            def reset(self, rng):
+                state = self.env.reset(rng)
+                return state.replace(obs=state.obs["state"])
+
+            def step(self, state, action):
+                state = self.env.step(state, action)
+                return state.replace(obs=state.obs["state"])
+
+        env = SACStateWrapper(env)
+        eval_env = SACStateWrapper(eval_env)
+
     return env, eval_env, pg_wrap
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Progress callback
 # ─────────────────────────────────────────────────────────────────────────────
 
+SCRIPT_START_TIME = datetime.now().strftime("%Y%m%d_%H%M%S")
+
 x_data, y_data, y_dataerr = [], [], []
+std_mean_data, std_min_data, std_max_data = [], [], []
+entropy_data, kl_data = [], []
 times = [datetime.now()]
 REWARD_LOG_FILE = "reward_log.txt"  # overridden at training start
+METRICS_LOG_FILE = "metrics_log.csv"  # overridden at training start
 CKPT_DIR = "."                       # overridden at training start
 
 
@@ -182,8 +258,27 @@ def progress(num_steps, metrics):
     y_dataerr.append(metrics["eval/episode_reward_std"])
     eval_idx = len(x_data) - 1
 
+    # -- diagnostica policy: std della gaussiana, entropy, KL (chiavi 'training/*') --
+    std_mean = metrics.get("training/policy_dist_mean_std")
+    std_min = metrics.get("training/policy_dist_min_std")
+    std_max = metrics.get("training/policy_dist_max_std")
+    entropy_loss = metrics.get("training/entropy_loss")
+    kl_mean = metrics.get("training/kl_mean")
+    total_loss = metrics.get("training/total_loss")
+    policy_loss = metrics.get("training/policy_loss")
+    v_loss = metrics.get("training/v_loss")
+
+    std_mean_data.append(std_mean)
+    std_min_data.append(std_min)
+    std_max_data.append(std_max)
+    entropy_data.append(entropy_loss)
+    kl_data.append(kl_mean)
+
     plt.clf()
-    plt.xlim([0, ALGO_PARAMS["num_timesteps"] * 1.25])
+    # x range si adatta ai dati raccolti finora, non al target finale: con
+    # un training breve/interrotto l'xlim fisso a num_timesteps schiacciava
+    # tutti i punti in un angolo, rendendo il grafico illeggibile.
+    plt.xlim([0, max(x_data[-1], 1) * 1.1])
     plt.xlabel("# environment steps")
     plt.ylabel("reward per episode")
     plt.title(f"y={y_data[-1]:.3f}")
@@ -191,27 +286,72 @@ def progress(num_steps, metrics):
     plt.savefig(os.path.join(CKPT_DIR, "training_curve.png"), dpi=120)
     plt.close()
 
+    if any(v is not None for v in std_mean_data):
+        fig, axes = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
+        axes[0].plot(x_data, std_mean_data, color="tab:orange", label="mean")
+        axes[0].plot(x_data, std_min_data, color="tab:orange", alpha=0.3, linestyle="--", label="min")
+        axes[0].plot(x_data, std_max_data, color="tab:orange", alpha=0.3, linestyle="--", label="max")
+        axes[0].set_ylabel("policy std")
+        axes[0].legend(fontsize=8)
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(x_data, entropy_data, color="tab:green", label="entropy_loss")
+        axes[1].plot(x_data, kl_data, color="tab:red", label="kl_mean")
+        axes[1].set_ylabel("entropy / KL")
+        axes[1].set_xlabel("# environment steps")
+        axes[1].legend(fontsize=8)
+        axes[1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(CKPT_DIR, "training_diagnostics.png"), dpi=120)
+        plt.close(fig)
+
+    # reward per-step: normalizza per la lunghezza media dell'episodio, così
+    # resta confrontabile con run precedenti anche se episode_length cambia.
+    avg_ep_len = metrics.get("eval/avg_episode_length")
+    mean_reward_per_step = y_data[-1] / avg_ep_len if avg_ep_len else None
+    std_reward_per_step = y_dataerr[-1] / avg_ep_len if avg_ep_len else None
+
     elapsed = int((times[-1] - times[0]).total_seconds())
     elapsed_m, elapsed_s = divmod(elapsed, 60)
     clock_time = times[-1].strftime("%H:%M:%S")
+    std_str = f"{std_mean:.4f}" if std_mean is not None else "n/a"
+    kl_str = f"{kl_mean:.4f}" if kl_mean is not None else "n/a"
+    per_step_str = (
+        f"{mean_reward_per_step:+.4f} ± {std_reward_per_step:.4f}"
+        if mean_reward_per_step is not None else "n/a"
+    )
     line = (
-        f"  eval#{eval_idx:<2d} {num_steps:>12,} | "
-        f"reward = {y_data[-1]:+.3f} ± {y_dataerr[-1]:.3f} | "
-        f"elapsed {elapsed_m:02d}:{elapsed_s:02d} | "
-        f"time {clock_time}"
+        f"  eval#{eval_idx:<2d}"
+        f"\n\tnum_steps = {num_steps:>12,}"
+        f"\n\treward = {y_data[-1]:+.3f} ± {y_dataerr[-1]:.3f}"
+        f"\n\treward/step = {per_step_str}"
+        f"\n\tstd = {std_str}"
+        f"\n\tkl = {kl_str}"
+        f"\n\telapsed {elapsed_m:02d}:{elapsed_s:02d}"
+        f"\n\ttime {clock_time}"
+        "\n-" + "-" * 30
     )
     print(line)
     with open(REWARD_LOG_FILE, "a") as _f:
         _f.write(line + "\n")
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Network factory
-# ─────────────────────────────────────────────────────────────────────────────
-
-POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
-DISTRIBUTION_TYPE = "normal"  # ['normal', 'tanh_normal'] — must match checkpoint
-ZERO_INIT_OUTPUT_LAYER = False  # if True, init policy output layer to zero (for safe exploration)
-INIT_STD = 0.1
+    write_header = not os.path.exists(METRICS_LOG_FILE)
+    with open(METRICS_LOG_FILE, "a", newline="") as _f:
+        writer = csv.writer(_f)
+        if write_header:
+            writer.writerow([
+                "num_steps", "episode_reward", "episode_reward_std",
+                "mean_reward_per_step", "std_reward_per_step", "avg_episode_length",
+                "policy_std_mean", "policy_std_min", "policy_std_max",
+                "entropy_loss", "kl_mean", "total_loss", "policy_loss", "v_loss",
+            ])
+        writer.writerow([
+            num_steps, y_data[-1], y_dataerr[-1],
+            mean_reward_per_step, std_reward_per_step, avg_ep_len,
+            std_mean, std_min, std_max,
+            entropy_loss, kl_mean, total_loss, policy_loss, v_loss,
+        ])
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  train_fn
@@ -220,7 +360,34 @@ INIT_STD = 0.1
 ALGO = "ppo"              # sovrascritto in main() dal flag --algo
 ALGO_PARAMS = SAC_PARAMS if ALGO == "sac" else PPO_PARAMS  # sovrascritto in main()
 
+#def make_train_fn(algo: str):
+#    if algo == "sac":
+#        return functools.partial(sac.train, **SAC_PARAMS, progress_fn=progress)
+#    return functools.partial(ppo.train, **PPO_PARAMS, progress_fn=progress)
+
 def make_train_fn(algo: str):
+    train_callable = sac.train if algo == "sac" else ppo.train
+    params = SAC_PARAMS if algo == "sac" else PPO_PARAMS
+
+    sig = inspect.signature(train_callable)
+    print("\n" + "=" * 70)
+    print(f"  Opzioni disponibili di {algo}.train")
+    print("=" * 70)
+    for name, p in sig.parameters.items():
+        if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue  # salta *args / **kwargs
+        default = "(nessun default)" if p.default is inspect.Parameter.empty else p.default
+        if name in params:
+            print(f"  [PASSATO] {name:28s} = {params[name]!r}   (default: {default!r})")
+        else:
+            print(f"            {name:28s}   default: {default!r}")
+
+    # chiavi che passi ma che train.train NON accetta (verrebbero rifiutate)
+    unknown = [k for k in params if k not in sig.parameters]
+    if unknown:
+        print(f"\n  [ATTENZIONE] chiavi in {algo.upper()}_PARAMS non accettate da {algo}.train: {unknown}")
+    print("=" * 70 + "\n")
+
     if algo == "sac":
         return functools.partial(sac.train, **SAC_PARAMS, progress_fn=progress)
     return functools.partial(ppo.train, **PPO_PARAMS, progress_fn=progress)
@@ -263,6 +430,69 @@ def load_params(ckpt_dir: str, suffix: str = "best"):
         return None
     with open(pkl_path, "rb") as f:
         return pickle.load(f)
+
+_RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}$")  # matches SCRIPT_START_TIME's "%Y%m%d_%H%M%S"
+
+def _list_run_dirs(env_base_dir: str) -> list[str]:
+    """List timestamped run subfolders under env_base_dir, oldest first."""
+    if not os.path.isdir(env_base_dir):
+        return []
+    return sorted(
+        d for d in os.listdir(env_base_dir)
+        if _RUN_DIR_RE.match(d) and os.path.isdir(os.path.join(env_base_dir, d))
+    )
+
+def _resolve_load(env_base_dir: str, load_arg: str):
+    """Resolve a --load argument to (run_dir, suffix).
+
+    load_arg is either a checkpoint suffix ('best'/'final'/'crash'), in which
+    case the latest timestamped run under env_base_dir is used, or a run
+    timestamp (exact or prefix match, e.g. '20260803' or '20260803_110338'),
+    in which case suffix defaults to 'best'. Falls back to env_base_dir itself
+    (legacy flat layout, no per-run subfolder) if no run subfolders exist.
+    """
+    run_dirs = _list_run_dirs(env_base_dir)
+    is_suffix = load_arg in ("best", "final", "crash")
+    suffix = load_arg if is_suffix else "best"
+
+    if not is_suffix:
+        matches = [d for d in run_dirs if d == load_arg] or [
+            d for d in run_dirs if d.startswith(load_arg)
+        ]
+        if not matches:
+            raise FileNotFoundError(
+                f"No run matching '{load_arg}' found under '{env_base_dir}'. "
+                f"Available runs: {run_dirs}"
+            )
+        run_dir = os.path.join(env_base_dir, matches[-1])
+    elif run_dirs:
+        run_dir = os.path.join(env_base_dir, run_dirs[-1])
+    else:
+        run_dir = env_base_dir  # legacy flat layout
+
+    print(f"  [INFO] Resolving --load argument: {load_arg}")
+    print(f"  [INFO] Checkpoint directory: {run_dir}")
+
+    if not os.path.isdir(env_base_dir):
+        raise FileNotFoundError(
+            f"No checkpoints for this environment: '{env_base_dir}' does not exist."
+        )
+    if not run_dirs and run_dir == env_base_dir and not any(
+        f.startswith("params_") for f in os.listdir(env_base_dir)
+    ):
+        raise FileNotFoundError(
+            f"No checkpoint found under '{env_base_dir}': no run subfolders "
+            "and no flat params_*.pkl either."
+        )
+    if not any(
+        os.path.isfile(os.path.join(run_dir, f"params_{s}.pkl"))
+        for s in (suffix, "final")
+    ):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {os.path.join(run_dir, f'params_{suffix}.pkl')}"
+        )
+
+    return run_dir, suffix
 
 def run_viewer_rollout(
     eval_env,
@@ -341,7 +571,7 @@ def run_viewer_rollout(
     renderer = None
     render_data = None
 
-    if not headless:
+    if record_video:
         renderer = mujoco.Renderer(eval_env.mj_model, height=render_h, width=render_w)
         render_data = mujoco.MjData(eval_env.mj_model)
         render_cam = mujoco.MjvCamera()
@@ -411,6 +641,7 @@ def run_viewer_rollout(
     rewards = []
     action_sums = []
     info_log = []   # list of flat dicts, one per step
+    network_actions = []
     zero_action_single = jnp.zeros((eval_env.action_size,), dtype=jnp.float32)
     zero_action = jnp.zeros((EVAL_BATCH, eval_env.action_size), dtype=jnp.float32)
     steps_done = 0
@@ -518,7 +749,10 @@ def run_viewer_rollout(
             rewards.append(_get_reward(state))
             action_sums.append(float(jnp.sum(jnp.abs(action[0]))))
             info_log.append({"step": steps_done, **_flatten_info(state.info)})
+            network_actions.append(np.asarray(jax.device_get(action[0]), dtype=np.float32).copy())
             print(f"  Rollout step: {steps_done}/{episode_length}", end="\r", flush=True)
+
+            _record_frame(state)
 
             if _get_done(state):
                 print(f"  Episode ended at step {steps_done}")
@@ -584,6 +818,7 @@ def run_viewer_rollout(
                 rewards.append(_get_reward(state))
                 action_sums.append(float(jnp.sum(jnp.abs(action[0]))))
                 info_log.append({"step": steps_done, **_flatten_info(state.info)})
+                network_actions.append(np.asarray(jax.device_get(action[0]), dtype=np.float32).copy())
                 print(f"  Rollout step: {steps_done}/{episode_length}", end="\r", flush=True)
 
                 _sync_viewer(state)
@@ -595,11 +830,12 @@ def run_viewer_rollout(
                 viewer.cam.lookat[:] = (1.0 - alpha) * viewer.cam.lookat + alpha * com
                 viewer.sync()
 
+                _record_frame(state)
+
                 if _get_done(state):
                     print(f"  Episode ended at step {steps_done}")
                     break
                 
-                _record_frame(state)
                 time.sleep(eval_env.dt)
 
     if steps_done > 0:
@@ -629,7 +865,6 @@ def run_viewer_rollout(
         action_sums=action_sums,
         ckpt_dir=ckpt_dir,
     )
-
 
     if info_log:
         csv_path = os.path.join(ckpt_dir, "rollout_info.csv")
@@ -671,6 +906,30 @@ def run_viewer_rollout(
             filename="mpc_output.png"
         )
 
+        joint_names = []
+
+        for actuator_id in range(eval_env.action_size):
+            joint_id = int(eval_env.mj_model.actuator_trnid[actuator_id, 0])
+
+            joint_name = mujoco.mj_id2name(
+                eval_env.mj_model,
+                mujoco.mjtObj.mjOBJ_JOINT,
+                joint_id,
+            )
+
+            if joint_name is None:
+                joint_name = f"action_{actuator_id}"
+
+            joint_names.append(joint_name)
+
+        plot_network_actions(
+            steps=steps,
+            actions=network_actions,
+            out_dir=ckpt_dir,
+            joint_names=joint_names,
+            filename="network_actions.png",
+        )
+
 
 def _build_fresh_networks(env, zero_init_output_layer: bool = False):
     """Return a ppo_networks with random hidden layers and zero-init output layer."""
@@ -708,8 +967,6 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
             return base_init(key, shape, dtype)
 
         return _init
-    
-    init_noise_std =  INIT_STD
 
     if ALGO == "ppo":
         networks = ppo_networks.make_ppo_networks(
@@ -718,23 +975,23 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
             policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
             preprocess_observations_fn=running_statistics.normalize,
             distribution_type=DISTRIBUTION_TYPE,
-            activation=linen.elu,
-            policy_network_kernel_init_fn=_policy_kernel_init_factory,
-            init_noise_std=init_noise_std
+            #activation=linen.elu,
+            #policy_network_kernel_init_fn=_policy_kernel_init_factory,
+            #init_noise_std=INIT_STD
         )
     else:
         networks = sac_networks.make_sac_networks(
             observation_size=env.observation_size,
             action_size=env.action_size,
-            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
+            hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
             preprocess_observations_fn=running_statistics.normalize,
             distribution_type=DISTRIBUTION_TYPE,
             activation=linen.elu,
-            policy_network_kernel_init_fn=_policy_kernel_init_factory ,
-            init_noise_std=init_noise_std
+            policy_network_kernel_init_fn=(lambda init_kwargs: _policy_kernel_init_factory(**init_kwargs)),
+            init_noise_std=INIT_STD
         )
 
-    self_test = True 
+    self_test = False
     if self_test:
         print("\n" + "=" * 60)
         print(f"  [SELF-TEST] fresh '{DISTRIBUTION_TYPE}' policy")
@@ -817,8 +1074,8 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
         if scale_raw is not None:
             # brax maps scale via softplus (+ min) or exp depending on noise_std_type
             print(f"    scale (raw)         : {np.array(scale_raw)}")
-            print(f"    softplus(scale)     : {np.array(jax.nn.softplus(scale_raw))}  (se mappatura softplus)")
-            print(f"    exp(scale)          : {np.array(jnp.exp(scale_raw))}  (se mappatura exp/log)")
+            print(f"    softplus(scale)     : {np.array(jax.nn.softplus(scale_raw))}  (if softplus mapping)")
+            print(f"    exp(scale)          : {np.array(jnp.exp(scale_raw))}  (if exp/log mapping)")
 
         # ── 7. std_param, if the distribution stores it separately (typical 'normal') ──
         params_dict = policy_params.get("params", policy_params)
@@ -859,11 +1116,21 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
 
 
 def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
-              load_init=None, env_name: str = "QuadrupedMPCEnv", algo: str = "ppo"):
-    global REWARD_LOG_FILE, CKPT_DIR
+              resume_dir: str | None = None, resume_suffix: str = "best",
+              env_name: str = "QuadrupedMPCEnv", algo: str = "ppo"):
+    global REWARD_LOG_FILE, METRICS_LOG_FILE, CKPT_DIR
     os.makedirs(ckpt_dir, exist_ok=True)
     CKPT_DIR = ckpt_dir
     REWARD_LOG_FILE = os.path.join(ckpt_dir, "reward_log.txt")
+    METRICS_LOG_FILE = os.path.join(ckpt_dir, "metrics_log.csv")
+
+    if algo == "ppo":
+        _ppo_sig = inspect.signature(ppo_networks.make_ppo_networks)
+        policy_obs_key = _ppo_sig.parameters["policy_obs_key"].default
+        value_obs_key = _ppo_sig.parameters["value_obs_key"].default
+    else:
+        # SAC: single shared obs key, no policy/value split.
+        policy_obs_key = value_obs_key = "state"
 
     header_lines = [
         "=" * 60,
@@ -875,6 +1142,9 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         "  \n--- network ---",
         f"  distribution : {DISTRIBUTION_TYPE}",
         f"  hidden layers: {POLICY_HIDDEN_LAYER_SIZES}",
+        f"  entropy cost : {ALGO_PARAMS.get('entropy_cost', 'N/A')}",
+        f"  policy obs   : {policy_obs_key}",
+        f"  value obs    : {value_obs_key if algo == 'ppo' else '(shared)'}",
         f"  obs size     : {env.observation_size}",
         f"  action size  : {env.action_size}",
         f"  --- {algo.upper()} params ---",
@@ -887,21 +1157,29 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
     with open(REWARD_LOG_FILE, "a") as _f:
         _f.write("\n".join(header_lines) + "\n")
 
+    env_config_block = (
+        "--- environment config ---\n"
+        f"{env._config}"
+        "\n" + "=" * 60 + "\n"
+    )
+    print(env_config_block)
+    with open(REWARD_LOG_FILE, "a") as _f:
+        _f.write(env_config_block + "\n")
+
 
     restore_params = None
     built_networks = _build_fresh_networks(env, zero_init_output_layer=ZERO_INIT_OUTPUT_LAYER)
     selected_network_factory = lambda *args, **kwargs: built_networks
 
-    if load_init:
-        suffix = _parse_load_suffix(load_init) if isinstance(load_init, str) else "best"
-        restore_params = load_params(ckpt_dir, suffix=suffix)
+    if resume_dir:
+        restore_params = load_params(resume_dir, suffix=resume_suffix)
         if restore_params is None:
-            print(f"  [WARN] --load requested but no checkpoint found in '{ckpt_dir}'.")
+            print(f"  [WARN] --load requested but no checkpoint found in '{resume_dir}'.")
             print("  Starting training from random initialization.")
         else:
-            print(f"  Initializing training from checkpoint in '{ckpt_dir}'.")
+            print(f"  Initializing training from checkpoint in '{resume_dir}'.")
     else:
-        print("  Fresh training: zero-initializing policy output layer.")
+        print("  Fresh training.")
 
         network_policy_params = built_networks.policy_network.init(jax.random.PRNGKey(ALGO_PARAMS["seed"]))
         flat_debug = jax.tree_util.tree_flatten_with_path(network_policy_params)[0]
@@ -946,14 +1224,14 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         eval_env=eval_env,
         wrap_env_fn=wrap_env_fn,
         network_factory=selected_network_factory,
-        restore_params=restore_params,
+        #restore_params=restore_params,
         policy_params_fn=_policy_params_cb,
     )
     
     accepted = inspect.signature(train_fn.func).parameters
     dropped = [k for k in train_kwargs if k not in accepted]
     if dropped:
-        print(f"  [WARN] {algo}.train non supporta: {dropped} — ignorati.")
+        print(f"  [WARN] {algo}.train does not support: {dropped} — ignored.")
     train_kwargs = {k: v for k, v in train_kwargs.items() if k in accepted}
 
     try:
@@ -962,7 +1240,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
             eval_env=eval_env,
             wrap_env_fn=wrap_env_fn,
             network_factory=selected_network_factory,
-            restore_params=restore_params,
+            #restore_params=restore_params,
             policy_params_fn=_policy_params_cb,
         )
     except KeyboardInterrupt:
@@ -972,6 +1250,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
             print(f"[INTERRUPT] Checkpoint saved at step ~{latest_step:,}.")
         else:
             print("[INTERRUPT] No parameters available to save.")
+        print(f"[INFO] Saved training info in {os.path.abspath(ckpt_dir)}")
         return None, latest_params
     except Exception as e:
         print(f"\n[ERROR] Training crashed: {e}")
@@ -980,6 +1259,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
             print(f"[ERROR] Checkpoint saved at step ~{latest_step:,} → params_crash.pkl")
         else:
             print("[ERROR] No parameters available to save.")
+        print(f"[INFO] Saved training info in {os.path.abspath(ckpt_dir)}")
         raise
 
     if len(times) > 1:
@@ -987,6 +1267,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         print(f"Time to train: {times[-1] - times[1]}")
 
     save_params(params, ckpt_dir, suffix="final")
+    print(f"[INFO] Saved training info in {os.path.abspath(ckpt_dir)}")
     return make_inference_fn, params
 
 def main():
@@ -1003,8 +1284,12 @@ def main():
     )
     parser.add_argument("--algo", type=str, choices=["ppo", "sac"], default="ppo",
                         help="RL algorithm: 'ppo' (default) o 'sac'")
-    parser.add_argument("--load", nargs="?", const="best", default=None, metavar="FILE",
-                        help="Load checkpoint weights. Optionally specify filename or suffix (e.g. 'params_crash.npz', 'crash'). Defaults to 'params_best.pkl'.")
+    parser.add_argument("--load", nargs="?", const="best", default=None, metavar="RUN_OR_SUFFIX",
+                        help="Load checkpoint weights. Checkpoints are stored per-run under "
+                             "<ckpt-dir>/<name>/<run_timestamp>/. Bare '--load' loads the latest "
+                             "run's best checkpoint; '--load <run_timestamp>' loads that specific "
+                             "run (exact or prefix match); '--load crash'/'final' loads that "
+                             "suffix from the latest run.")
     parser.add_argument("--zero", action="store_true", help="Force zero actions (ignore policy network)")
     parser.add_argument("--headless", action="store_true", help="Eval rollout without opening the MuJoCo viewer")
     parser.add_argument("--random", action="store_true", help="Use a random network for evaluation")
@@ -1029,15 +1314,25 @@ def main():
         args.headless = True
 
     # ── pick environment ────────────────────────────────────────
-    env_name = args.name
+    _NAME_SHORTCUTS = {
+        "go1": "Go1JoystickFlatTerrain",
+        "tita": "TitaJoystickFlatTerrain",
+        "titae2e": "TitaJoystickE2EFlatTerrain",
+    }
+    env_name = _NAME_SHORTCUTS.get(args.name.lower(), args.name)
     env, eval_env, wrap_fn = make_envs(env_name=env_name)
-    ckpt_root = args.ckpt_dir
-    ckpt_dir = os.path.join(ckpt_root, env_name)
+    env_base_dir = os.path.join(args.ckpt_dir, env_name)
+
 
     # ── train or eval ───────────────────────────────────────────
     if not args.eval:
+        resume_dir, resume_suffix = (
+            _resolve_load(env_base_dir, args.load) if args.load else (None, "best")
+        )
+        ckpt_dir = os.path.join(env_base_dir, SCRIPT_START_TIME)
         run_train(env, eval_env, wrap_fn, ckpt_dir,
-                  load_init=args.load, env_name=env_name)
+                  resume_dir=resume_dir, resume_suffix=resume_suffix,
+                  env_name=env_name, algo=ALGO)
         return
 
     print("=" * 60)
@@ -1075,7 +1370,11 @@ def main():
         return (normalizer_params, policy_params)
 
 
-    load_suffix = _parse_load_suffix(args.load) if args.load else "best"
+    run_dir, load_suffix = _resolve_load(
+        env_base_dir,
+        args.load if args.load else "best",
+    )
+    ckpt_dir = run_dir if run_dir else env_base_dir
     params_inference_fn = load_params(ckpt_dir, suffix=load_suffix)
     zero_command = False
 

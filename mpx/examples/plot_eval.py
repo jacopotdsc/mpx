@@ -40,6 +40,89 @@ def plot_signal(ax, steps, df, cols, title, ylabel="torque [Nm]", cmap="tab20"):
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=6, ncol=4, loc="upper right")
 
+def plot_network_actions(
+    steps,
+    actions,
+    out_dir,
+    joint_names,
+    filename="network_actions.png",
+):
+    """Plot each network action in a two-column figure."""
+    os.makedirs(out_dir, exist_ok=True)
+
+    steps = np.asarray(steps)
+    actions = np.asarray(actions, dtype=np.float32)
+
+    if actions.ndim != 2:
+        raise ValueError(
+            f"Expected actions with shape (num_steps, num_actions), "
+            f"got {actions.shape}."
+        )
+
+    num_actions = actions.shape[1]
+    num_columns = 2
+    num_rows = int(np.ceil(num_actions / num_columns))
+
+    fig, axes = plt.subplots(
+        nrows=num_rows,
+        ncols=num_columns,
+        figsize=(14, 2.8 * num_rows),
+        sharex=True,
+    )
+
+    axes = np.asarray(axes).reshape(-1)
+
+    for action_index in range(num_actions):
+        ax = axes[action_index]
+
+        joint_name = (
+            joint_names[action_index]
+            if action_index < len(joint_names)
+            else f"action_{action_index}"
+        )
+
+        ax.plot(
+            steps,
+            actions[:, action_index],
+            linewidth=1.0,
+        )
+
+        ax.axhline(
+            0.0,
+            linewidth=0.8,
+            linestyle="--",
+            alpha=0.5,
+        )
+
+        ax.set_title(joint_name)
+        ax.set_ylabel("Network action")
+        ax.grid(True, alpha=0.3)
+
+    # Disable unused plots when the number of actions is odd.
+    for axis_index in range(num_actions, len(axes)):
+        axes[axis_index].axis("off")
+
+    # Add the x label only to the last active row.
+    first_last_row_index = max(0, (num_rows - 1) * num_columns)
+
+    for axis_index in range(first_last_row_index, num_actions):
+        axes[axis_index].set_xlabel("Step")
+
+    fig.suptitle("Network actions", fontsize=15)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
+
+    output_path = os.path.join(out_dir, filename)
+
+    fig.savefig(
+        output_path,
+        dpi=150,
+        bbox_inches="tight",
+    )
+
+    plt.close(fig)
+
+    print(f"  Network actions plot: {output_path}")
+
 def plot_command_tracking(
     info_log,
     out_dir,
@@ -49,6 +132,12 @@ def plot_command_tracking(
     """Plot commands and measured DFCIP signals (all in BODY frame)."""
     if not info_log:
         print("[plot] info_log is empty.")
+        return None
+
+    required = ("dfcip_state_3", "dfcip_state_4", "dfcip_state_10", "dfcip_state_12")
+    if not all(k in info_log[0] for k in required):
+        print(f"[plot] plot_command_tracking skipped: no {required} in info "
+              "(env has no DFCIP/MPC state, e.g. an E2E env).")
         return None
 
     os.makedirs(out_dir, exist_ok=True)
@@ -401,9 +490,10 @@ def plot_reward_terms(
         }
 
     if prefix:
-        selected = {k[len(prefix):]: v for k, v in terms.items() if k.startswith(prefix)}
-        if selected:
-            terms = selected
+        terms = {k[len(prefix):]: v for k, v in terms.items() if k.startswith(prefix)}
+        if not terms:
+            print(f"[plot] nessuna chiave con prefisso '{prefix}', salto (l'env non ha reward terms loggati).")
+            return None
 
     data = {k: np.asarray(v, dtype=float).reshape(-1) for k, v in terms.items()}
 
@@ -508,9 +598,10 @@ def plot_reward_terms_separate(
         }
 
     if prefix:
-        selected = {k[len(prefix):]: v for k, v in terms.items() if k.startswith(prefix)}
-        if selected:
-            terms = selected
+        terms = {k[len(prefix):]: v for k, v in terms.items() if k.startswith(prefix)}
+        if not terms:
+            print(f"[plot] nessuna chiave con prefisso '{prefix}', salto (l'env non ha reward terms loggati).")
+            return None
 
     data = {k: np.asarray(v, dtype=float).reshape(-1) for k, v in terms.items()}
 
