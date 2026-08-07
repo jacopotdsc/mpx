@@ -116,7 +116,7 @@ NUM_TIMESTEPS = 200_000_000
 NUM_EVALS = 10
 EPISODE_LENGTH = 1000
 NUM_ENVS = 8192
-DETERMINISTIC_EVAL = True  # eval usa la media della policy, non un sample rumoroso
+DETERMINISTIC_EVAL = False  # eval usa la media della policy, non un sample rumoroso
 
 PPO_PARAMS = dict(
     num_timesteps          = NUM_TIMESTEPS,
@@ -138,7 +138,7 @@ PPO_PARAMS = dict(
     num_envs               = NUM_ENVS,
     batch_size             = 256,
     seed                   = 0,
-    #deterministic_eval     = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
+    deterministic_eval     = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
 )
 PPO_PARAMS = dict(
       num_timesteps=NUM_TIMESTEPS,
@@ -164,7 +164,7 @@ PPO_PARAMS = dict(
         ),
       num_resets_per_eval=10,
       seed = 0,
-    #deterministic_eval = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
+    deterministic_eval = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
   )
 
 
@@ -185,7 +185,7 @@ SAC_PARAMS = dict(
     min_replay_size        = EPISODE_LENGTH,
     max_replay_size        = EPISODE_LENGTH*NUM_ENVS,
     seed                   = 0,
-    deterministic_eval     = True, # eval usa la media della policy, non un sample rumoroso
+    deterministic_eval     = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
 )
 
 print(f"SAC_PARAMS: \n{SAC_PARAMS}")
@@ -243,6 +243,7 @@ def make_envs(
 SCRIPT_START_TIME = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 x_data, y_data, y_dataerr = [], [], []
+reward_per_step_data = []  # storia di mean_reward_per_step, per stampare min/max tra tutti gli eval
 std_mean_data, std_min_data, std_max_data = [], [], []
 entropy_data, kl_data = [], []
 times = [datetime.now()]
@@ -325,7 +326,7 @@ def progress(num_steps, metrics):
         f"  eval#{eval_idx:<2d}"
         f"\n\tnum_steps = {num_steps:>12,}"
         f"\n\treward = {y_data[-1]:+.3f} ± {y_dataerr[-1]:.3f}"
-        f"\n\treward/step = {per_step_str}"
+        #f"\n\treward/step = {per_step_str}"
         f"\n\tstd = {std_str}"
         f"\n\tkl = {kl_str}"
         f"\n\telapsed {elapsed_m:02d}:{elapsed_s:02d}"
@@ -538,27 +539,30 @@ def run_viewer_rollout(
     rng, *reset_rngs = jax.random.split(rng, EVAL_BATCH + 1)
     state = batched_reset(jnp.stack(reset_rngs))
 
+    # Command dimensionality comes from the env's own command_config, not a
+    # fixed assumption (e.g. 2 for Tita's [vx, wz], 3 for a quadruped's
+    # [vx, vy, wz]).
+    cmd_dim = state.info["command"].shape[-1]
+
     # Inject fixed command after reset if provided.
     if fixed_command is not None:
-        _cmd = jnp.broadcast_to(  # (EVAL_BATCH, 3)
-            jnp.array(fixed_command, dtype=jnp.float32), (EVAL_BATCH, 3)
-        )
+        fixed_command = np.asarray(fixed_command, dtype=np.float32)
+        if fixed_command.shape[-1] != cmd_dim:
+            raise ValueError(
+                f"--cmd got {fixed_command.shape[-1]} value(s) but env "
+                f"'{env_name}' expects {cmd_dim} (see its command_config)."
+            )
+        _cmd = jnp.broadcast_to(jnp.asarray(fixed_command), (EVAL_BATCH, cmd_dim))
         state = state.replace(info={
             **state.info,
             "command": jnp.zeros_like(_cmd),
             "target_command": _cmd,
         })
-        # Also patch the already-baked obs so the very first policy step
-        # sees the correct command (command lives at indices 45:48).
-        if isinstance(state.obs, dict):
-            patched_obs = {
-                k: (v.at[..., 45:48].set(_cmd) if v.ndim >= 2 and v.shape[-1] >= 48 else v)
-                for k, v in state.obs.items()
-            }
-            state = state.replace(obs=patched_obs)
-        elif state.obs.ndim >= 2 and state.obs.shape[-1] >= 48:
-            state = state.replace(obs=state.obs.at[..., 45:48].set(_cmd))
-        #print(f"  [CMD] Fixed command: vx={fixed_command[0]:+.2f}  vy={fixed_command[1]:+.2f}  wz={fixed_command[2]:+.2f}")
+        # Recompute obs from the patched info instead of poking a hardcoded
+        # offset into the flat obs vector: the command's position and width
+        # inside the observation are the env's own business.
+        batched_get_obs = jax.jit(jax.vmap(eval_env._get_obs))
+        state = state.replace(obs=batched_get_obs(state.data, state.info))
 
     viewer_model = None
     viewer_data = None
@@ -632,10 +636,11 @@ def run_viewer_rollout(
         if cmd is None:
             return []
         c = cmd[0]
+        values = "  ".join(f"{float(v):+.2f}" for v in c)
         return [(
             mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_TOPLEFT,
             "Command",
-            f"vx={float(c[0]):+.2f}  vy={float(c[1]):+.2f}  wz={float(c[2]):+.2f}",
+            values,
         )]
 
     rewards = []
@@ -724,9 +729,7 @@ def run_viewer_rollout(
                     })
 
             if fixed_command is not None:
-                _cmd = jnp.broadcast_to(  # (EVAL_BATCH, 3)
-                    jnp.array(fixed_command, dtype=jnp.float32), (EVAL_BATCH, 3)
-                )
+                _cmd = jnp.broadcast_to(jnp.asarray(fixed_command), (EVAL_BATCH, cmd_dim))
                 state = state.replace(info={
                     **state.info,
                     #"command": _cmd,
@@ -794,9 +797,7 @@ def run_viewer_rollout(
 
 
                 if fixed_command is not None:
-                    _cmd = jnp.broadcast_to(  # (EVAL_BATCH, 3)
-                        jnp.array(fixed_command, dtype=jnp.float32), (EVAL_BATCH, 3)
-                    )
+                    _cmd = jnp.broadcast_to(jnp.asarray(fixed_command), (EVAL_BATCH, cmd_dim))
                     state = state.replace(info={
                         **state.info,
                         #"command": _cmd,
@@ -1293,8 +1294,10 @@ def main():
     parser.add_argument("--zero", action="store_true", help="Force zero actions (ignore policy network)")
     parser.add_argument("--headless", action="store_true", help="Eval rollout without opening the MuJoCo viewer")
     parser.add_argument("--random", action="store_true", help="Use a random network for evaluation")
-    parser.add_argument("--cmd", nargs=3, type=float, default=None, metavar=("VX", "VY", "WZ"),
-                        help="Fix joystick command for eval rollout, e.g. --cmd 0.5 0.0 0.0")
+    parser.add_argument("--cmd", nargs="+", type=float, default=None, metavar="CMD_I",
+                        help="Fix joystick command for eval rollout. Number of values must match "
+                             "the env's command_config (e.g. 2 values for Tita's [vx, wz], "
+                             "3 for a quadruped's [vx, vy, wz]), e.g. --cmd 0.5 0.0")
     parser.add_argument(
         "--ckpt-dir",
         type=str,
@@ -1316,6 +1319,7 @@ def main():
     # ── pick environment ────────────────────────────────────────
     _NAME_SHORTCUTS = {
         "go1": "Go1JoystickFlatTerrain",
+        "aliengo" : "AliengoJoystickE2EFlatTerrain",
         "tita": "TitaJoystickFlatTerrain",
         "titae2e": "TitaJoystickE2EFlatTerrain",
     }

@@ -597,13 +597,17 @@ def plot_reward_terms_separate(
             for k in terms[0]
         }
 
+    # terms resta con TUTTE le chiavi (command_*, robot/..., reward_terms/...):
+    # serve intatto piu' sotto per i grafici extra di tracking/altezza.
     if prefix:
-        terms = {k[len(prefix):]: v for k, v in terms.items() if k.startswith(prefix)}
-        if not terms:
+        filtered = {k[len(prefix):]: v for k, v in terms.items() if k.startswith(prefix)}
+        if not filtered:
             print(f"[plot] nessuna chiave con prefisso '{prefix}', salto (l'env non ha reward terms loggati).")
             return None
+    else:
+        filtered = terms
 
-    data = {k: np.asarray(v, dtype=float).reshape(-1) for k, v in terms.items()}
+    data = {k: np.asarray(v, dtype=float).reshape(-1) for k, v in filtered.items()}
 
     if not data:
         print(f"[plot] nessuna chiave con prefisso '{prefix}'")
@@ -630,6 +634,172 @@ def plot_reward_terms_separate(
         if not np.isfinite(v).any():
             print(f"[plot] '{k}' senza valori finiti, saltato")
             continue
+
+        # ── grafici extra: comando vs misurato, per tracking e altezza ─────
+        if k == "tracking_lin_vel":
+            # Comandi: numero di componenti variabile a seconda del robot
+            # (2 per Tita [vx, wz], 3 per un quadrupede [vx, vy, wz], ...).
+            # L'ultima componente è sempre quella angolare (coerente con
+            # "commands[-1]" usato dagli env in joystickE2E.py).
+            command_keys = sorted(
+                (ck for ck in terms if re.fullmatch(r"command_\d+", ck)),
+                key=lambda ck: int(ck.split("_")[1]),
+            )
+            ang_key = command_keys[-1] if command_keys else None
+            required = ("robot/local_linvel_0", "robot/gyro_2")
+            if command_keys and all(rk in terms for rk in required):
+                steps_t = np.arange(len(terms[command_keys[0]]))
+                cmd_lin = np.asarray(terms[command_keys[0]], dtype=float)
+                cmd_ang = np.asarray(terms[ang_key], dtype=float)
+                meas_lin = np.asarray(terms["robot/local_linvel_0"], dtype=float)
+                meas_ang = np.asarray(terms["robot/gyro_2"], dtype=float)
+
+                fig_v, (ax_reward, ax_lin, ax_ang) = plt.subplots(
+                    3, 1, figsize=(10, 10), sharex=True
+                )
+
+                # Reward term "tracking_lin_vel" nella stessa figura, invece
+                # che nel solito PNG separato (vedi blocco generico sotto).
+                reward_v = np.where(np.isfinite(v), v, np.nan)
+                ax_reward.plot(steps_t, reward_v, linewidth=1.2, color="steelblue")
+                ax_reward.set_title(f"{k} (reward term)")
+                ax_reward.set_ylabel("value")
+                ax_reward.grid(True, alpha=0.3)
+                ax_reward.axhline(0.0, color="k", linewidth=0.6, alpha=0.4)
+                finite_reward = reward_v[np.isfinite(reward_v)]
+                if finite_reward.size:
+                    ax_reward.text(
+                        0.01, 0.02,
+                        f"mean={finite_reward.mean():.4g}   min={finite_reward.min():.4g}   "
+                        f"max={finite_reward.max():.4g}   sum={finite_reward.sum():.4g}",
+                        transform=ax_reward.transAxes, fontsize=8, color="gray",
+                    )
+
+                ax_lin.plot(steps_t, cmd_lin, label="Command vx")
+                ax_lin.plot(steps_t, meas_lin, label="Measured vx (local_linvel)")
+                ax_lin.set_title("Linear velocity tracking")
+                ax_lin.set_ylabel("m/s")
+                ax_lin.grid(True, alpha=0.3)
+                ax_lin.legend()
+
+                ax_ang.plot(steps_t, cmd_ang, label=f"Command omega ({ang_key})")
+                ax_ang.plot(steps_t, meas_ang, label="Measured omega (gyro_z)")
+                ax_ang.set_title("Angular velocity tracking")
+                ax_ang.set_ylabel("rad/s")
+                ax_ang.set_xlabel("Step")
+                ax_ang.grid(True, alpha=0.3)
+                ax_ang.legend()
+
+                fig_v.tight_layout()
+                path_v = os.path.join(plots_dir, "tracking_lin_vel.png")
+                fig_v.savefig(path_v, dpi=120)
+                plt.close(fig_v)
+                paths["velocity_tracking"] = path_v
+                print(f"[plot] velocity tracking saved -> {path_v}")
+                # Il reward term è già incluso sopra (ax_reward): non generare
+                # anche il solito tracking_lin_vel.png separato.
+                continue
+            else:
+                print(f"[plot] velocity tracking skipped: missing command_* or {required}")
+
+        elif k == "base_height":
+            if "robot/com_height" in terms and "robot/base_height_target" in terms:
+                steps_h = np.arange(len(terms["robot/com_height"]))
+                com_height = np.asarray(terms["robot/com_height"], dtype=float)
+                target = float(np.asarray(terms["robot/base_height_target"]).reshape(-1)[0])
+
+                fig_h, (ax_reward, ax_h) = plt.subplots(
+                    2, 1, figsize=(10, 7), sharex=True
+                )
+
+                # Reward term "base_height" nella stessa figura, invece che
+                # nel solito PNG separato (vedi blocco generico sotto).
+                reward_h = np.where(np.isfinite(v), v, np.nan)
+                ax_reward.plot(steps_h, reward_h, linewidth=1.2, color="steelblue")
+                ax_reward.set_title(f"{k} (reward term)")
+                ax_reward.set_ylabel("value")
+                ax_reward.grid(True, alpha=0.3)
+                ax_reward.axhline(0.0, color="k", linewidth=0.6, alpha=0.4)
+                finite_reward = reward_h[np.isfinite(reward_h)]
+                if finite_reward.size:
+                    ax_reward.text(
+                        0.01, 0.02,
+                        f"mean={finite_reward.mean():.4g}   min={finite_reward.min():.4g}   "
+                        f"max={finite_reward.max():.4g}   sum={finite_reward.sum():.4g}",
+                        transform=ax_reward.transAxes, fontsize=8, color="gray",
+                    )
+
+                ax_h.axhline(target, color="k", linestyle="--", label="Target height")
+                ax_h.plot(steps_h, com_height, label="Measured CoM height")
+                ax_h.set_title("Base height tracking")
+                ax_h.set_xlabel("Step")
+                ax_h.set_ylabel("Height [m]")
+                ax_h.grid(True, alpha=0.3)
+                ax_h.legend()
+
+                fig_h.tight_layout()
+                path_h = os.path.join(plots_dir, "base_height.png")
+                fig_h.savefig(path_h, dpi=120)
+                plt.close(fig_h)
+                paths["height_tracking"] = path_h
+                print(f"[plot] height tracking saved -> {path_h}")
+                continue
+            else:
+                print("[plot] height tracking skipped: missing 'robot/com_height' or 'robot/base_height_target'")
+
+        elif k == "wheel_track":
+            # feet_pos è (2, 3) -> appiattito in robot/feet_pos_0..5
+            # (0:3 = ruota sinistra, 3:6 = ruota destra).
+            feet_pos_keys = [f"robot/feet_pos_{i}" for i in range(6)]
+            if all(fk in terms for fk in feet_pos_keys):
+                steps_w = np.arange(len(terms[feet_pos_keys[0]]))
+                feet_pos = np.stack(
+                    [np.asarray(terms[fk], dtype=float) for fk in feet_pos_keys],
+                    axis=-1,
+                )  # (T, 6)
+                left = feet_pos[:, 0:3]
+                right = feet_pos[:, 3:6]
+                wheel_dist = np.linalg.norm(left - right, axis=-1)
+                target = float(config.d)
+
+                fig_w, (ax_reward, ax_w) = plt.subplots(
+                    2, 1, figsize=(10, 7), sharex=True
+                )
+
+                # Reward term "wheel_track" nella stessa figura, invece che
+                # nel solito PNG separato (vedi blocco generico sotto).
+                reward_w = np.where(np.isfinite(v), v, np.nan)
+                ax_reward.plot(steps_w, reward_w, linewidth=1.2, color="steelblue")
+                ax_reward.set_title(f"{k} (reward term)")
+                ax_reward.set_ylabel("value")
+                ax_reward.grid(True, alpha=0.3)
+                ax_reward.axhline(0.0, color="k", linewidth=0.6, alpha=0.4)
+                finite_reward = reward_w[np.isfinite(reward_w)]
+                if finite_reward.size:
+                    ax_reward.text(
+                        0.01, 0.02,
+                        f"mean={finite_reward.mean():.4g}   min={finite_reward.min():.4g}   "
+                        f"max={finite_reward.max():.4g}   sum={finite_reward.sum():.4g}",
+                        transform=ax_reward.transAxes, fontsize=8, color="gray",
+                    )
+
+                ax_w.axhline(target, color="k", linestyle="--", label="Target track width")
+                ax_w.plot(steps_w, wheel_dist, label="Measured wheel-to-wheel distance")
+                ax_w.set_title("Wheel track tracking")
+                ax_w.set_xlabel("Step")
+                ax_w.set_ylabel("Distance [m]")
+                ax_w.grid(True, alpha=0.3)
+                ax_w.legend()
+
+                fig_w.tight_layout()
+                path_w = os.path.join(plots_dir, "wheel_track.png")
+                fig_w.savefig(path_w, dpi=120)
+                plt.close(fig_w)
+                paths["wheel_track"] = path_w
+                print(f"[plot] wheel track saved -> {path_w}")
+                continue
+            else:
+                print(f"[plot] wheel track skipped: missing one of {feet_pos_keys}")
 
         v = np.where(np.isfinite(v), v, np.nan)  # inf -> gap
         marker = "o" if v.size < 2 else None
