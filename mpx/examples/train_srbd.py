@@ -112,34 +112,12 @@ DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match ch
 ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
-NUM_TIMESTEPS = 200_000_000
+NUM_TIMESTEPS = 100_000_000
 NUM_EVALS = 10
 EPISODE_LENGTH = 1000
-NUM_ENVS = 8192
+NUM_ENVS = 4096
 DETERMINISTIC_EVAL = False  # eval usa la media della policy, non un sample rumoroso
 
-PPO_PARAMS = dict(
-    num_timesteps          = NUM_TIMESTEPS,
-    num_evals              = NUM_EVALS,
-    reward_scaling         = 1.0,
-    episode_length         = EPISODE_LENGTH,
-    normalize_observations = True,
-    action_repeat          = 1,
-    unroll_length          = 20,
-    num_minibatches        = 32,
-    num_updates_per_batch  = 4,
-    discounting            = 0.99,
-    #gae_lambda             = 0.95, #default 0.95
-    #clipping_epsilon       = 0.3, # default 0.3
-    #learning_rate          = jnp.asarray(1e-5, dtype=jnp.float32),
-    ##learning_rate_schedule = LRSchedule.ADAPTIVE_KL,
-    #entropy_cost           = 0.005, #0.005, #1e-2,
-    #desired_kl             = 0.01, # default 0.01
-    num_envs               = NUM_ENVS,
-    batch_size             = 256,
-    seed                   = 0,
-    deterministic_eval     = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
-)
 PPO_PARAMS = dict(
       num_timesteps=NUM_TIMESTEPS,
       num_evals=NUM_EVALS,
@@ -150,11 +128,11 @@ PPO_PARAMS = dict(
       unroll_length=20,
       num_minibatches=32,
       num_updates_per_batch=4,
-      discounting=0.97,
+      discounting=0.99,
       learning_rate=3e-4,
       entropy_cost=1e-2,
-      num_envs=8192,
-      batch_size=256,
+      num_envs=NUM_ENVS,
+      batch_size=512,
       max_grad_norm=1.0,
       network_factory=dict(
             policy_hidden_layer_sizes=(512, 256, 128),
@@ -852,6 +830,13 @@ def run_viewer_rollout(
             video_fps=1.0 / float(eval_env.dt),   # 500 fps reali
             slowdown_factor=4.0,                   # x4 slow-motion
             name_video="rollout.mp4",
+        )
+        _save_sim_video(
+            ckpt_dir,
+            frames,
+            video_fps=1.0 / float(eval_env.dt),   # 500 fps reali
+            slowdown_factor=4.0,                   # x4 slow-motion
+            name_video="rollout_slowed_x4.mp4",
         )
         renderer.close()
 
