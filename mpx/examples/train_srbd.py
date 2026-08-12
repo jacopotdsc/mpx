@@ -112,7 +112,7 @@ DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match ch
 ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
-NUM_TIMESTEPS = 100_000_000
+NUM_TIMESTEPS = 50_000_000
 NUM_EVALS = 10
 EPISODE_LENGTH = 1000
 NUM_ENVS = 4096
@@ -260,7 +260,7 @@ def progress(num_steps, metrics):
     plt.xlim([0, max(x_data[-1], 1) * 1.1])
     plt.xlabel("# environment steps")
     plt.ylabel("reward per episode")
-    plt.title(f"y={y_data[-1]:.3f}")
+    plt.title(f"y={y_data[-1]:.3f} ± {y_dataerr[-1]:.3f}")
     plt.errorbar(x_data, y_data, yerr=y_dataerr, color="blue")
     plt.savefig(os.path.join(CKPT_DIR, "training_curve.png"), dpi=120)
     plt.close()
@@ -421,13 +421,21 @@ def _list_run_dirs(env_base_dir: str) -> list[str]:
         if _RUN_DIR_RE.match(d) and os.path.isdir(os.path.join(env_base_dir, d))
     )
 
+def _list_dir_names(path: str) -> list[str]:
+    if not os.path.isdir(path):
+        return []
+    return sorted(
+        d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))
+    )
+
 def _resolve_load(env_base_dir: str, load_arg: str):
     """Resolve a --load argument to (run_dir, suffix).
 
-    load_arg is either a checkpoint suffix ('best'/'final'/'crash'), in which
-    case the latest timestamped run under env_base_dir is used, or a run
-    timestamp (exact or prefix match, e.g. '20260803' or '20260803_110338'),
-    in which case suffix defaults to 'best'. Falls back to env_base_dir itself
+    load_arg may be a checkpoint suffix ('best'/'final'/'crash'), in which
+    case the latest timestamped run under env_base_dir is used; a run
+    timestamp/prefix matched under env_base_dir; a name of a run saved
+    under env_base_dir/saved/; or an explicit relative path such as
+    'saved/joystick_first_train'. Falls back to env_base_dir itself
     (legacy flat layout, no per-run subfolder) if no run subfolders exist.
     """
     run_dirs = _list_run_dirs(env_base_dir)
@@ -435,33 +443,41 @@ def _resolve_load(env_base_dir: str, load_arg: str):
     suffix = load_arg if is_suffix else "best"
 
     if not is_suffix:
-        matches = [d for d in run_dirs if d == load_arg] or [
-            d for d in run_dirs if d.startswith(load_arg)
-        ]
-        if not matches:
-            raise FileNotFoundError(
-                f"No run matching '{load_arg}' found under '{env_base_dir}'. "
-                f"Available runs: {run_dirs}"
-            )
-        run_dir = os.path.join(env_base_dir, matches[-1])
+        direct_dir = os.path.join(env_base_dir, load_arg)
+        saved_dir = os.path.join(env_base_dir, "saved", load_arg)
+
+        if os.path.isdir(direct_dir):
+            run_dir = direct_dir
+        elif os.path.isdir(saved_dir):
+            run_dir = saved_dir
+        else:
+            matches = [d for d in run_dirs if d == load_arg] or [
+                d for d in run_dirs if d.startswith(load_arg)
+            ]
+            if not matches:
+                print(
+                    f"  [INFO] Available runs under '{env_base_dir}': "
+                    f"{_list_dir_names(env_base_dir)}"
+                )
+                print(
+                    f"  [INFO] Available saved runs under "
+                    f"'{os.path.join(env_base_dir, 'saved')}': "
+                    f"{_list_dir_names(os.path.join(env_base_dir, 'saved'))}"
+                )
+                raise FileNotFoundError(
+                    f"No run matching '{load_arg}' found under '{env_base_dir}'."
+                )
+            run_dir = os.path.join(env_base_dir, matches[-1])
     elif run_dirs:
         run_dir = os.path.join(env_base_dir, run_dirs[-1])
     else:
         run_dir = env_base_dir  # legacy flat layout
 
     print(f"  [INFO] Resolving --load argument: {load_arg}")
-    print(f"  [INFO] Checkpoint directory: {run_dir}")
 
     if not os.path.isdir(env_base_dir):
         raise FileNotFoundError(
             f"No checkpoints for this environment: '{env_base_dir}' does not exist."
-        )
-    if not run_dirs and run_dir == env_base_dir and not any(
-        f.startswith("params_") for f in os.listdir(env_base_dir)
-    ):
-        raise FileNotFoundError(
-            f"No checkpoint found under '{env_base_dir}': no run subfolders "
-            "and no flat params_*.pkl either."
         )
     if not any(
         os.path.isfile(os.path.join(run_dir, f"params_{s}.pkl"))
@@ -471,6 +487,7 @@ def _resolve_load(env_base_dir: str, load_arg: str):
             f"Checkpoint not found: {os.path.join(run_dir, f'params_{suffix}.pkl')}"
         )
 
+    print(f"  [INFO] Checkpoint directory: {run_dir}")
     return run_dir, suffix
 
 def run_viewer_rollout(
@@ -828,7 +845,7 @@ def run_viewer_rollout(
             ckpt_dir,
             frames,
             video_fps=1.0 / float(eval_env.dt),   # 500 fps reali
-            slowdown_factor=4.0,                   # x4 slow-motion
+            slowdown_factor=1.0,
             name_video="rollout.mp4",
         )
         _save_sim_video(
@@ -1210,10 +1227,10 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         eval_env=eval_env,
         wrap_env_fn=wrap_env_fn,
         network_factory=selected_network_factory,
-        #restore_params=restore_params,
+        restore_params=restore_params,
         policy_params_fn=_policy_params_cb,
     )
-    
+
     accepted = inspect.signature(train_fn.func).parameters
     dropped = [k for k in train_kwargs if k not in accepted]
     if dropped:
@@ -1221,14 +1238,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
     train_kwargs = {k: v for k, v in train_kwargs.items() if k in accepted}
 
     try:
-        make_inference_fn, params, _ = train_fn(
-            environment=env,
-            eval_env=eval_env,
-            wrap_env_fn=wrap_env_fn,
-            network_factory=selected_network_factory,
-            #restore_params=restore_params,
-            policy_params_fn=_policy_params_cb,
-        )
+        make_inference_fn, params, _ = train_fn(**train_kwargs)
     except KeyboardInterrupt:
         print("\n[INTERRUPT] Ctrl+C received: stopping training and saving available weights...")
         if latest_params is not None:
