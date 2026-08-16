@@ -24,6 +24,7 @@ class ControlSol:
 @struct.dataclass
 class MPCState:
     sol          : ControlSol
+    reference_trajectory : jax.Array
     X0_shifted           : jax.Array
     U0_shifted           : jax.Array
     D0_shifted           : jax.Array
@@ -172,8 +173,13 @@ class BatchedMPCControllerWrapper:
         alpha = jnp.tile(cfg.u_ref[2], (n, 1))
         grf = jnp.tile(cfg.u_ref[3:], (n, 1))
 
+        initial_x0 = jnp.tile(self.initial_state, (n, 1))
+        zero_cmd = jnp.zeros((n, 3), dtype=self.initial_state.dtype)
+        reset_reference, _ = self._ref_gen(initial_x0, zero_cmd)
+
         return MPCState(
             sol= ControlSol(a=a, ac_z=ac_z, alpha=alpha, grf=grf),
+            reference_trajectory=reset_reference,
             X0_shifted=self._X0_init, 
             U0_shifted=self._U0_init,
             D0_shifted=self._D0_init,
@@ -222,6 +228,7 @@ class BatchedMPCControllerWrapper:
         
         new_state = MPCState(
             sol=ControlSol(a=new_a, ac_z=new_ac_z, alpha=new_alpha, grf=new_grf),
+            reference_trajectory=x_ref,
             X0_shifted=new_X0, 
             U0_shifted=new_U0, 
             D0_shifted=new_D0,

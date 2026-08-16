@@ -625,6 +625,7 @@ def raw_csv_path(save_path, prefix="tita"):
 def plot_all(log, save_path, prefix="tita", show=False):
     """Convenience: generate the three plots and the three per-plot CSVs,
     plus a full raw CSV that can be reloaded with SimLogger.load_csv_data."""
+    print(f"Generating plots and CSVs in {save_path} with prefix '{prefix}'")
     os.makedirs(save_path, exist_ok=True)
     # full raw dump (reloadable round-trip)
     if isinstance(log, SimLogger):

@@ -485,8 +485,9 @@ def reference_generator_dfcip_online(
 
     Command layout:
         cmd[0] = desired forward velocity v_des
-        cmd[1] = desired yaw rate omega_des
-        cmd[2] = desired vertical CoM velocity vz_des, ignored here for flat walking
+        cmd[1] = desired vertical velocity v_z_des (currently unused)
+        cmd[2] = desired yaw rate omega_des
+        cmd[3] = desired CoM height z_com_ref
 
     Returns:
         x_ref: (N+1, nx)
@@ -499,19 +500,20 @@ def reference_generator_dfcip_online(
     # ============================================================
     # Fixed future-reference quantities
     # ============================================================
-    z_com_ref = 0.4
     z_contact_ref = 0.0
-    vcom_z_ref = 0.0
     vcz_ref = 0.0
 
     # Acceleration limits for online ramp
     a_default = 5.0
     alpha_default = 5.0
+    az_default = 2.0
+    z_position_gain = 2.0
 
     # ============================================================
     # Current state / node 0
     # ============================================================
     pcom0 = x0[0:3]
+    vcom_z0 = x0[5]
     theta0 = x0[10]
     v0 = x0[11]
     omega0 = x0[12]
@@ -521,22 +523,23 @@ def reference_generator_dfcip_online(
     # ============================================================
     v_des = cmd[0]
     omega_des = cmd[2]
+    z_com_ref = cmd[3]
 
     def move_towards(current, target, max_delta):
         delta = target - current
         return current + jnp.clip(delta, -max_delta, max_delta)
 
-    def build_state(p_xy, theta, v, vx, vy, omega):
+    def build_state(p_xy, z, theta, v, vx, vy, vz, omega):
         return jnp.array([
             # CoM position
             p_xy[0],
             p_xy[1],
-            z_com_ref,
+            z,
 
             # CoM velocity
             vx,
             vy,
-            vcom_z_ref,
+            vz,
 
             # Contact midpoint / ground projection
             p_xy[0],
@@ -568,7 +571,7 @@ def reference_generator_dfcip_online(
         ])
 
     def scan_step(carry, _):
-        p_xy, theta, v, omega = carry
+        p_xy, z, theta, v, vz, omega = carry
 
         # --------------------------------------------------------
         # Acceleration-limited velocity update
@@ -577,6 +580,13 @@ def reference_generator_dfcip_online(
             v,
             v_des,
             a_default * dt,
+        )
+
+        vz_target = z_position_gain * (z_com_ref - z)
+        vz_next = move_towards(
+            vz,
+            vz_target,
+            az_default * dt,
         )
 
         omega_next = move_towards(
@@ -597,14 +607,17 @@ def reference_generator_dfcip_online(
             vy_next * dt,
         ])
 
+        z_next = z + vz_next * dt
         theta_next = theta + omega_next * dt
 
         x_ref_t = build_state(
             p_xy=p_xy_next,
+            z=z_next,
             theta=theta_next,
             v=v_next,
             vx=vx_next,
             vy=vy_next,
+            vz=vz_next,
             omega=omega_next,
         )
 
@@ -612,8 +625,10 @@ def reference_generator_dfcip_online(
 
         carry_next = (
             p_xy_next,
+            z_next,
             theta_next,
             v_next,
+            vz_next,
             omega_next,
         )
 
@@ -624,10 +639,12 @@ def reference_generator_dfcip_online(
     # ============================================================
     x_init = build_state(
         p_xy=pcom0[0:2],
+        z=pcom0[2],
         theta=theta0,
         v=v0,
         vx=v0 * jnp.cos(theta0),
         vy=v0 * jnp.sin(theta0),
+        vz=vcom_z0,
         omega=omega0,
     )
     u_init = build_u_ref()
@@ -636,11 +653,14 @@ def reference_generator_dfcip_online(
     # Future nodes: x_ref[1], ..., x_ref[N]
     # ============================================================
     p_xy0 = pcom0[0:2]
+    p_z = pcom0[2]
 
     carry0 = (
         p_xy0,
+        p_z,
         theta0,
         v0,
+        vcom_z0,
         omega0,
     )
 

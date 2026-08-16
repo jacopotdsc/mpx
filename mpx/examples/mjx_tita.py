@@ -292,6 +292,21 @@ def main(headless=False, steps=500, scene="flat"):
         forward_limits=(-10.0, 10.0),
         yaw_limits=(-1.5, 1.5),
     )
+
+    def key_callback(key: int):
+        height_shift = 0.0
+        if key == sim_utils.glfw.KEY_PAGE_UP:
+            config.com_z_to_track = min(
+                config.com_z_to_track + height_shift, config.com_z_max
+            )
+            print(f"z_com_ref = {config.com_z_to_track:.2f} m")
+        elif key == sim_utils.glfw.KEY_PAGE_DOWN:
+            config.com_z_to_track = max(
+                config.com_z_to_track - height_shift, config.com_z_min
+            )
+            print(f"z_com_ref = {config.com_z_to_track:.2f} m")
+        else:
+            command_handle.key_callback(key)
     
     solve_mpc = _build_solve_fn(mpc)
     reset_mpc = jax.jit(mpc.reset)
@@ -472,6 +487,11 @@ def main(headless=False, steps=500, scene="flat"):
         print("\n[finalize] Saving outputs...")
 
         try:
+            _renderer.close()
+        except Exception:
+            pass
+        
+        try:
             # Se catturi ogni 2 step, hai 250 frame/s simulati se sim_frequency=500.
             # Quindi fps corretto per video real-time:
             video_fps = int(sim_frequency / 2)
@@ -499,6 +519,7 @@ def main(headless=False, steps=500, scene="flat"):
             )
         except Exception as e:
             print(f"[finalize] failed to save video: {e}")
+            pass
 
         try:
             plot_all(
@@ -508,10 +529,6 @@ def main(headless=False, steps=500, scene="flat"):
             )
         except Exception as e:
             print(f"[finalize] failed to save plots: {e}")
-
-        try:
-            _renderer.close()
-        except Exception:
             pass
 
     try:
@@ -527,15 +544,19 @@ def main(headless=False, steps=500, scene="flat"):
         with mujoco.viewer.launch_passive(
             model,
             data,
-            key_callback=command_handle.key_callback,
+            key_callback=key_callback,
         ) as viewer:
             viewer.cam.distance *= 5.5
             viewer.sync()
             while viewer.is_running():
-                overlay_text = command_handle.consume_overlay_text()
                 tic = timer()
-                if overlay_text is not None:
-                    viewer.set_texts((None, None, *overlay_text))
+                command_text, command_values = command_handle.overlay_text()
+                viewer.set_texts((
+                    None,
+                    None,
+                    f"{command_text} | PgUp/PgDown: z_com_ref",
+                    f"{command_values}  z_com_ref {config.com_z_to_track:.2f} m",
+                ))
 
                 start_step = timer()
                 mpc_state, tau, qddot, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, qddot, reference, theta_prev=theta_prev)
