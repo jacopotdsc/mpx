@@ -1,17 +1,29 @@
 """
 Interactive TITA policy test.
 
-The simulation loop is intentionally kept in the same style as mjx_tita:
-    MuJoCo MjModel/MjData
-    -> keyboard command
-    -> controller update
-    -> data.ctrl
-    -> mujoco.mj_step()
-    -> viewer / camera / video
+This is NOT a second implementation of the environment. It is an interactive
+real-time frontend of *exactly* the same MJX environment used by
+`train_srbd.py --eval`:
 
-There is no eval_env.step(), no vmap rollout and no MPC/WBC.
+    state = env.reset(rng)                      # single source of truth
+    while viewer.is_running():
+        keyboard_cmd = <keyboard>               # keyboard sets ONLY the command
+        state = set_command(state, keyboard_cmd)
+        action, _ = policy(take_env0(state.obs))# deterministic inference
+        state = env.step(state, action)         # all physics/obs/termination here
+        state = set_command(state, keyboard_cmd)# defeat the env's random resampler
+        sync_viewer(state)                      # native MjData = visualization mirror
 
-From train_srbd.py this file only reuses:
+The reset/step semantics, observation construction, actuator mapping, substeps,
+termination and info buffers all live inside env.reset()/env.step(). Nothing of
+that is re-implemented here.
+
+Reset uses the same vmap(batch=1) + PRNGKey(42) path as `train_srbd.py --eval`
+(single-instance MJX can trip cuSolver on GPU), so at equal seed/command the
+initial state and the rollout match the eval path bit-for-bit up to the command
+the keyboard injects.
+
+From train_srbd.py this file reuses:
   1. --name / MuJoCo Playground environment selection
   2. --load checkpoint resolution and PPO policy reconstruction
 """
@@ -37,13 +49,11 @@ os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 import jax.numpy as jnp
 import mujoco
 import mujoco.viewer
-from mujoco import mjx
 import numpy as np
 
 from brax.training.acme import running_statistics
 from brax.training.agents.ppo import networks as ppo_networks
 from mujoco_playground import registry
-from mujoco_playground._src.locomotion.tita import tita_constants as consts
 
 import mpx.utils.sim as sim_utils
 from plot_rollout_info import _save_sim_video
@@ -58,34 +68,32 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 1)
 POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
 DISTRIBUTION_TYPE = "tanh_normal"
 
+# Single-instance MJX can crash cuSolver on GPU, so train_srbd.py --eval runs a
+# batch and views env 0. We mirror that exactly for numerical parity.
+EVAL_BATCH = 1
+
+# Interactive test only: run effectively forever. The env has no time-limit
+# termination inside step() (only physical fall/base-contact via state.done),
+# so this just uncaps the tester loop. Applied via a config override on
+# registry.load so joystickE2E.default_config().episode_length is untouched.
+EPISODE_LENGTH = 10_000_000
+
+# Interactive test only: keep steps_until_next_cmd this high (and re-assert it
+# every step) so the env's automatic command resampler (sample_command) NEVER
+# fires. The keyboard becomes the sole authority over target_command; the env's
+# own smoothing (command += 0.02*(target_command - command)) still runs.
+NO_RESAMPLE_STEPS = 10_000_000
+
 _RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}$")
 
 
 # -----------------------------------------------------------------------------
-# Checkpoint / policy loading.
-# Copied conservatively from train_srbd.py.
+# Checkpoint / policy loading. Copied conservatively from train_srbd.py.
 # -----------------------------------------------------------------------------
-
-def load_params(ckpt_dir: str, suffix: str = "best"):
-    pkl_path = None
-    for s in (suffix, "final"):
-        p = os.path.join(ckpt_dir, f"params_{s}.pkl")
-        if os.path.exists(p):
-            pkl_path = p
-            print(f"  Loading checkpoint: {pkl_path}")
-            break
-
-    if pkl_path is None:
-        return None
-
-    with open(pkl_path, "rb") as f:
-        return pickle.load(f)
-
 
 def _list_run_dirs(env_base_dir: str) -> list[str]:
     if not os.path.isdir(env_base_dir):
         return []
-
     return sorted(
         d
         for d in os.listdir(env_base_dir)
@@ -93,21 +101,17 @@ def _list_run_dirs(env_base_dir: str) -> list[str]:
         and os.path.isdir(os.path.join(env_base_dir, d))
     )
 
+
 def _list_dir_names(path: str) -> list[str]:
     if not os.path.isdir(path):
         return []
-
     return sorted(
         d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))
     )
 
-def _resolve_load(env_base_dir: str, load_arg: str):
-    """Same --load semantics used by train_srbd.py.
 
-    load_arg may be a timestamp/prefix run name (matched under env_base_dir),
-    a name of a run saved under env_base_dir/saved/, or an explicit relative
-    path such as 'saved/joystick_first_train'.
-    """
+def _resolve_load(env_base_dir: str, load_arg: str):
+    """Same --load semantics used by train_srbd.py."""
     run_dirs = _list_run_dirs(env_base_dir)
 
     is_suffix = load_arg in ("best", "final", "crash")
@@ -127,13 +131,13 @@ def _resolve_load(env_base_dir: str, load_arg: str):
             ]
             if not matches:
                 print(
-                    f"  [INFO] Available runs under '{env_base_dir}': "
-                    f"{_list_dir_names(env_base_dir)}"
+                    f"\n  [INFO] Available runs under '{env_base_dir}': "
+                    f"\n{_list_dir_names(env_base_dir)}"
                 )
                 print(
-                    f"  [INFO] Available saved runs under "
+                    f"\n  [INFO] Available saved runs under "
                     f"'{os.path.join(env_base_dir, 'saved')}': "
-                    f"{_list_dir_names(os.path.join(env_base_dir, 'saved'))}"
+                    f"\n{_list_dir_names(os.path.join(env_base_dir, 'saved'))}\n"
                 )
                 raise FileNotFoundError(
                     f"No run matching '{load_arg}' found under '{env_base_dir}'."
@@ -160,6 +164,7 @@ def _resolve_load(env_base_dir: str, load_arg: str):
     print(f"  [INFO] Checkpoint directory: {run_dir}")
     return run_dir, suffix
 
+
 def load_params(ckpt_dir: str, suffix: str = "best"):
     """Prefer the requested checkpoint; fall back to final, as in training."""
     for s in (suffix, "final"):
@@ -175,7 +180,7 @@ def load_params(ckpt_dir: str, suffix: str = "best"):
 
 
 def build_policy(env, params):
-    # Same active PPO network construction used in train_srbd.py.
+    """Identical PPO network construction to train_srbd.py's eval path."""
     networks = ppo_networks.make_ppo_networks(
         observation_size=env.observation_size,
         action_size=env.action_size,
@@ -183,196 +188,191 @@ def build_policy(env, params):
         preprocess_observations_fn=running_statistics.normalize,
         distribution_type=DISTRIBUTION_TYPE,
     )
-
     inference_fn = ppo_networks.make_inference_fn(networks)
     return inference_fn(params, deterministic=True)
 
 
 # -----------------------------------------------------------------------------
-# mjx_tita-style MuJoCo helpers.
+# Tester-specific helpers (NOT copies of the environment).
 # -----------------------------------------------------------------------------
 
-def update_com_tracking_camera(cam, model, data, base_body_id, alpha=0.10):
-    mujoco.mj_subtreeVel(model, data)
-    com = np.asarray(data.subtree_com[base_body_id]).copy()
-    cam.lookat[:] = (1.0 - alpha) * cam.lookat + alpha * com
+def keyboard_target_command(command_handle, cmd_dim: int) -> np.ndarray:
+    """Read the keyboard and map it onto the env's command layout.
 
-
-def _reset_to_initial_state(model, data):
-    try:
-        mujoco.mj_resetDataKeyframe(model, data, 0)
-        data.qvel[:] = 0.0
-    except Exception as exc:
-        print(f"Failed to reset to initial state: {exc}")
-
-    mujoco.mj_forward(model, data)
-
-
-def _base_touches_floor(
-    model,
-    data,
-    base_body_name: str = "base_link",
-    floor_geom_name: str = "floor",
-) -> bool:
-    base_body_id = mujoco.mj_name2id(
-        model, mujoco.mjtObj.mjOBJ_BODY, base_body_name
-    )
-    floor_geom_id = mujoco.mj_name2id(
-        model, mujoco.mjtObj.mjOBJ_GEOM, floor_geom_name
-    )
-
-    if base_body_id < 0 or floor_geom_id < 0:
-        return False
-
-    for contact_idx in range(data.ncon):
-        contact = data.contact[contact_idx]
-        geom1 = contact.geom1
-        geom2 = contact.geom2
-        body1 = model.geom_bodyid[geom1]
-        body2 = model.geom_bodyid[geom2]
-
-        if geom1 == floor_geom_id and body2 == base_body_id:
-            return True
-        if geom2 == floor_geom_id and body1 == base_body_id:
-            return True
-
-    return False
-
-
-def _build_env_get_obs_fn(env):
-    """Use the selected environment's own observation function.
-
-    The MuJoCo simulation remains CPU/native (mujoco.mj_step).  At policy
-    update time the current MjData is converted to mjx.Data and passed to
-    env._get_obs(), so observation content/order/size stays defined only by
-    the environment.
+    KeyboardVelocityCommand.mpc_wheeled_input() starts with [vx, vy, wz].
+    TITA's command is [forward_vel, yaw_rate] = [vx, wz] (cmd_dim == 2);
+    a quadruped uses [vx, vy, wz] (cmd_dim == 3).
     """
-    @jax.jit
-    def get_obs(mjx_data, info, previous_action):
-        # _get_obs updates info["rng"] while adding observation noise.
-        # Copy the dict so this mutation is local to this function and return
-        # the updated info explicitly.
-        info = dict(info)
-        obs = env._get_obs(mjx_data, info, previous_action)
-        return obs, info
-
-    return get_obs
-
-
-def _keyboard_to_policy_command(command_handle, cmd_dim: int) -> np.ndarray:
-    """
-    Reuse the exact public KeyboardVelocityCommand interface used by mjx_tita.
-
-    mpc_wheeled_input() starts with [vx, vy, wz].  The additional MPC-specific
-    value, if any, is ignored here.
-    """
-    keyboard_cmd = np.asarray(
-        command_handle.mpc_wheeled_input(0.0),
-        dtype=np.float32,
+    kbd = np.asarray(
+        command_handle.mpc_wheeled_input(0.0), dtype=np.float32
     ).reshape(-1)
-
-    if keyboard_cmd.size < 3:
+    if kbd.size < 3:
         raise ValueError(
-            "KeyboardVelocityCommand.mpc_wheeled_input() returned fewer "
-            "than 3 values."
+            "KeyboardVelocityCommand.mpc_wheeled_input() returned < 3 values."
         )
-
     if cmd_dim == 2:
-        # TITA two-command variant: [vx, wz].
-        return np.array(
-            [keyboard_cmd[0], keyboard_cmd[2]],
-            dtype=np.float32,
-        )
-
+        return np.array([kbd[0], kbd[2]], dtype=np.float32)  # [vx, wz]
     if cmd_dim == 3:
-        return keyboard_cmd[:3].astype(np.float32)
-
+        return kbd[:3].astype(np.float32)                    # [vx, vy, wz]
     raise ValueError(
-        f"Unsupported command dimension: {cmd_dim}. "
-        "Expected 2 ([vx, wz]) or 3 ([vx, vy, wz])."
+        f"Unsupported command dimension: {cmd_dim} (expected 2 or 3)."
     )
 
 
-def apply_policy_action(env, data, action):
+def set_target_command(state, keyboard_cmd: np.ndarray, cmd_dim: int):
+    """Make the keyboard the SOLE authority over target_command, and disable
+    the env's automatic resampler — without ever touching info['command'].
+
+    The deployed env, inside step(), does:
+        target_command = where(steps_until_next_cmd <= 0,
+                                sample_command(...), target_command)
+        command = command + 0.02 * (target_command - command)
+
+    So we only need to (1) write target_command = keyboard and (2) keep
+    steps_until_next_cmd huge so the `<= 0` branch never triggers. The env's
+    own smoothing then drives command toward the keyboard target on its own.
+
+    Crucially we do NOT write info['command'] here: letting the env's 0.02
+    filter compute it is the whole point (the previous version overwrote
+    command every step, which killed the smoothing and bypassed the env law).
     """
-    Same action -> actuator target mapping used by TitaJoystickE2EFlatTerrain.
+    tc = jnp.broadcast_to(
+        jnp.asarray(keyboard_cmd, dtype=state.info["target_command"].dtype),
+        (EVAL_BATCH, cmd_dim),
+    )
+    big = jnp.full_like(
+        state.info["steps_until_next_cmd"], NO_RESAMPLE_STEPS
+    )
+    return state.replace(info={
+        **state.info,
+        "target_command": tc,
+        "steps_until_next_cmd": big,
+    })
 
-    Legs   : position target = default_pose + action * action_scale_pos
-    Wheels : velocity target = action * action_scale_vel
+
+def sync_viewer_data(state, viewer_model, viewer_data):
+    """Native MjData = pure visualization mirror of the MJX state (env 0)."""
+    viewer_data.qpos[:] = np.asarray(state.data.qpos[0])
+    viewer_data.qvel[:] = np.asarray(state.data.qvel[0])
+    mujoco.mj_forward(viewer_model, viewer_data)
+
+
+def take_env0(obs):
+    """Select env 0 from a batched observation.
+
+    The env returns obs as a dict ({'state': ..., 'privileged_state': ...}),
+    so we must index per key, exactly like train_srbd.py's eval helper. Falls
+    back to plain array indexing if obs is a flat array.
     """
-    action = np.asarray(action, dtype=np.float64)
+    if isinstance(obs, dict):
+        return {k: v[0] for k, v in obs.items()}
+    return obs[0]
 
-    leg_ids = np.asarray(env._leg_ids, dtype=np.int32)
-    wheel_ids = np.asarray(env._wheel_ids, dtype=np.int32)
-    default_pose = np.asarray(env._default_pose)
 
-    ctrl = np.zeros(env.action_size, dtype=np.float64)
+def build_hud(command_vec, target_vec, help_text):
+    """One set_texts() sequence, rebuilt every frame: keyboard help (TOPLEFT)
+    plus a single Command + Target-command block (TOPRIGHT).
 
-    ctrl[leg_ids] = (
-        default_pose[leg_ids]
-        + action[leg_ids] * float(env._config.action_scale_pos)
+    command_vec  <- state.info['command']         (env-smoothed, moving)
+    target_vec   <- state.info['target_command']  (held at the keyboard value)
+
+    Both live in ONE overlay entry so a later set_texts for the keyboard help
+    cannot wipe them: everything goes out together in a single call.
+    """
+    n = command_vec.shape[-1]
+    labels = {2: ("vx", "wz"), 3: ("vx", "vy", "wz")}.get(
+        n, tuple(f"c{i}" for i in range(n))
     )
-    ctrl[wheel_ids] = (
-        action[wheel_ids] * float(env._config.action_scale_vel)
-    )
 
-    data.ctrl[:] = ctrl
+    # Left column = labels/headers, right column = values, line-aligned.
+    title_lines = ["Command"]
+    value_lines = [""]
+    for lab, v in zip(labels, command_vec):
+        title_lines.append(f"  {lab}")
+        value_lines.append(f"{float(v):+.2f}")
+    title_lines += ["", "Target command"]
+    value_lines += ["", ""]
+    for lab, v in zip(labels, target_vec):
+        title_lines.append(f"  {lab}")
+        value_lines.append(f"{float(v):+.2f}")
 
+    entries = []
+    if help_text is not None:
+        entries.append((
+            mujoco.mjtFont.mjFONT_NORMAL,
+            mujoco.mjtGridPos.mjGRID_TOPLEFT,
+            help_text[0],
+            help_text[1],
+        ))
+    entries.append((
+        mujoco.mjtFont.mjFONT_NORMAL,
+        mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+        "\n".join(title_lines),
+        "\n".join(value_lines),
+    ))
+    return entries
+
+
+# -----------------------------------------------------------------------------
+# Main.
+# -----------------------------------------------------------------------------
 
 def main(
     env_name: str,
     ckpt_root: str,
     load_arg: str,
     headless: bool = False,
-    steps: int = 500,
+    steps: int = EPISODE_LENGTH,
+    debug_cmd: bool = False,
 ):
     print("=" * 60)
     print(f"  Interactive policy test — {env_name}")
     print("=" * 60)
 
-    # --name selection: same MuJoCo Playground environment choice as training.
-    env = registry.load(env_name)
-
-    # Use the exact MuJoCo model belonging to the selected training env, but
-    # simulate it with ordinary MuJoCo exactly like mjx_tita.
-    model = env.mj_model
-    data = mujoco.MjData(model)
-
-    sim_frequency = 1.0 / float(model.opt.timestep)
-    policy_period = max(
-        1,
-        int(round(float(env._config.ctrl_dt) / float(model.opt.timestep))),
+    # --name: same MuJoCo Playground environment as training/eval, but with a
+    # very large episode_length so the interactive test never ends on a time
+    # limit. Physical termination (state.done) still works. This override is
+    # local to this tester; training/eval defaults are untouched.
+    env = registry.load(
+        env_name,
+        config_overrides={"episode_length": EPISODE_LENGTH},
     )
-
-    print(f"  sim dt       : {model.opt.timestep}")
-    print(f"  policy dt    : {env._config.ctrl_dt}")
-    print(f"  policy period: {policy_period} sim steps")
 
     # --load: same checkpoint layout/resolution as train_srbd.py.
     env_base_dir = os.path.join(ckpt_root, env_name)
     run_dir, load_suffix = _resolve_load(env_base_dir, load_arg)
     params = load_params(run_dir, suffix=load_suffix)
-    if params is None:
-        raise FileNotFoundError(
-            f"No checkpoint parameters found in '{run_dir}'."
-        )
 
     policy_fn = build_policy(env, params)
-    jit_policy = jax.jit(policy_fn)
-    env_get_obs = _build_env_get_obs_fn(env)
+    jit_infer = jax.jit(policy_fn)
 
-    # Use reset only to obtain the environment's own info structure.
-    # Its MJX simulation state is discarded: the actual simulation below
-    # remains the native MuJoCo MjData/mujoco.mj_step loop.
+    # Same vmapped reset/step used by train_srbd.py --eval.
+    batched_reset = jax.jit(jax.vmap(env.reset))
+    batched_step = jax.jit(jax.vmap(env.step))
+
+    action_size = env.action_size
+    env_dt = float(env.dt)
+
+    print(f"  sim dt    : {env.sim_dt}")
+    print(f"  ctrl dt   : {env_dt}")
+    print(f"  n_substeps: {env.n_substeps} (handled inside env.step)")
+
+    # One-off obs recompute so the FIRST action reflects the keyboard command
+    # instead of the env's random reset command. Uses the env's own _get_obs
+    # with a zero previous action (exactly what reset() feeds it).
+    _zeros_act = jnp.zeros((action_size,), dtype=jnp.float32)
+
+    @jax.jit
+    @jax.vmap
+    def batched_reset_obs(data, info):
+        return env._get_obs(data, info, _zeros_act)
+
+    # Reset — identical RNG to train_srbd.py --eval.
     rng = jax.random.PRNGKey(42)
-    rng, info_rng = jax.random.split(rng)
-    info_state = env.reset(info_rng)
-    policy_info = dict(info_state.info)
+    rng, *reset_rngs = jax.random.split(rng, EVAL_BATCH + 1)
+    state = batched_reset(jnp.stack(reset_rngs))
 
-    # Manual joystick starts from zero.  Command dimensionality comes directly
-    # from the selected environment instead of being hard-coded.
-    policy_info["command"] = jnp.zeros_like(policy_info["command"])
-    cmd_dim = int(policy_info["command"].shape[-1])
+    cmd_dim = int(state.info["command"].shape[-1])
 
     command_handle = sim_utils.KeyboardVelocityCommand(
         vx=0.0,
@@ -384,22 +384,29 @@ def main(
         yaw_limits=(-1.5, 1.5),
     )
 
-    _reset_to_initial_state(model, data)
+    # Reset init: start command at 0, set target_command from the keyboard,
+    # and disable the resampler. From here on the env's 0.02 smoothing moves
+    # command toward target on its own. Then rebuild obs so step 0 is clean.
+    keyboard_cmd = keyboard_target_command(command_handle, cmd_dim)
+    state = state.replace(info={
+        **state.info,
+        "command": jnp.zeros_like(state.info["command"]),
+    })
+    state = set_target_command(state, keyboard_cmd, cmd_dim)
+    state = state.replace(obs=batched_reset_obs(state.data, state.info))
 
-    # Same neutral actuator initialization used by the E2E environment reset.
-    leg_ids = np.asarray(env._leg_ids, dtype=np.int32)
-    data.ctrl[:] = 0.0
-    data.ctrl[leg_ids] = np.asarray(data.qpos[7:])[leg_ids]
-    mujoco.mj_forward(model, data)
+    # Native MjModel/MjData used ONLY as a visualization mirror.
+    viewer_model = env.mj_model
+    viewer_data = mujoco.MjData(viewer_model)
+    sync_viewer_data(state, viewer_model, viewer_data)
 
     np.set_printoptions(precision=4, suppress=True)
 
     # ------------------------------------------------------------------
-    # MuJoCo video recording: same structure as mjx_tita.
+    # Video recording (renders the mirror MjData).
     # ------------------------------------------------------------------
     _sim_frames: list = []
-    _renderer = mujoco.Renderer(model, height=480, width=640)
-
+    _renderer = mujoco.Renderer(viewer_model, height=480, width=640)
     _sim_cam = mujoco.MjvCamera()
     mujoco.mjv_defaultCamera(_sim_cam)
     _sim_cam.type = mujoco.mjtCamera.mjCAMERA_FREE
@@ -407,185 +414,72 @@ def main(
     _sim_cam.elevation = -15.0
     _sim_cam.azimuth = 60.0
 
-    base_body_name = consts.ROOT_BODY
-    floor_geom_name = consts.FLOOR_GEOM
+    _base_body_id = env._torso_body_id
+    mujoco.mj_subtreeVel(viewer_model, viewer_data)
+    _sim_cam.lookat[:] = np.asarray(viewer_data.subtree_com[_base_body_id])
 
-    _sim_base_body_id = mujoco.mj_name2id(
-        model,
-        mujoco.mjtObj.mjOBJ_BODY,
-        base_body_name,
-    )
+    def _record_frame():
+        mujoco.mj_subtreeVel(viewer_model, viewer_data)
+        com = np.asarray(viewer_data.subtree_com[_base_body_id]).copy()
+        _sim_cam.lookat[:] = 0.9 * _sim_cam.lookat + 0.1 * com
+        _renderer.update_scene(viewer_data, camera=_sim_cam)
+        _sim_frames.append(_renderer.render().copy())
 
-    mujoco.mj_subtreeVel(model, data)
-    _sim_cam.lookat[:] = np.asarray(
-        data.subtree_com[_sim_base_body_id]
-    )
+    def _step_once(debug: bool = False):
+        """policy(state.obs) -> env.step. Keyboard drives ONLY target_command;
+        the env's 0.02 smoothing drives command. Resampler kept disabled."""
+        nonlocal state, rng, keyboard_cmd
 
-    previous_action = np.zeros(env.action_size, dtype=np.float32)
-    current_action = previous_action.copy()
-    current_command = np.zeros(cmd_dim, dtype=np.float32)
+        keyboard_cmd = keyboard_target_command(command_handle, cmd_dim)
 
-    counter = 0
+        # Before step: pin target_command to the keyboard and keep the
+        # resampler off. command is left untouched (env smooths it in step()).
+        state = set_target_command(state, keyboard_cmd, cmd_dim)
 
-    def step_controller():
-        nonlocal counter
-        nonlocal rng
-        nonlocal policy_info
-        nonlocal previous_action
-        nonlocal current_action
-        nonlocal current_command
+        cmd_before = np.asarray(state.info["command"][0])
+        tc_before = np.asarray(state.info["target_command"][0])
+        steps_before = int(np.asarray(state.info["steps_until_next_cmd"]).reshape(-1)[0])
 
-        print(f"\n=== step {counter} ===")
+        obs0 = take_env0(state.obs)
+        rng, act_rng = jax.random.split(rng)
+        action0, _ = jit_infer(obs0, act_rng)
+        action = jnp.broadcast_to(action0, (EVAL_BATCH, action_size))
 
-        init_start = timer()
+        state = env_step(state, action)
 
-        base_body_id = mujoco.mj_name2id(
-            model,
-            mujoco.mjtObj.mjOBJ_BODY,
-            base_body_name,
-        )
-
-        # Same external-force block kept from mjx_tita.
-        data.xfrc_applied[base_body_id] = 0.0
-
-        force_start = 50
-        if force_start <= counter < force_start + 100:
-            force_world = np.array([0.0, 0.0, 0.0])
-            data.xfrc_applied[base_body_id, 0:3] = force_world
-
-        init_stop = timer()
-        print(
-            f"[timing] init time: "
-            f"{1e3 * (init_stop - init_start):.2f} ms"
-        )
-
-        # Policy runs at ctrl_dt.  Between policy updates data.ctrl is held,
-        # while ordinary MuJoCo continues stepping at sim_dt.
-        if counter % policy_period == 0:
-            current_command = _keyboard_to_policy_command(
-                command_handle,
-                cmd_dim,
-            )
-
-            obs_start = timer()
-
-            # Keep the command inside the same info dictionary used by the
-            # environment's own _get_obs().
-            policy_info = {
-                **policy_info,
-                "command": jnp.asarray(current_command, dtype=jnp.float32),
-            }
-
-            # Convert only the current MuJoCo data for observation extraction.
-            # Physics still runs through mujoco.mj_step(), not env.step().
-            mjx_data = mjx.put_data(model, data)
-            obs, policy_info = env_get_obs(
-                mjx_data,
-                policy_info,
-                jnp.asarray(previous_action, dtype=jnp.float32),
-            )
-            jax.block_until_ready(obs)
-            obs_stop = timer()
-
-            rng, act_rng = jax.random.split(rng)
-
-            policy_start = timer()
-            action, _ = jit_policy(obs, act_rng)
-            action.block_until_ready()
-            policy_stop = timer()
-
-            current_action = np.asarray(
-                jax.device_get(action),
-                dtype=np.float32,
-            )
-
-            apply_policy_action(
-                env=env,
-                data=data,
-                action=current_action,
-            )
-
-            previous_action = current_action.copy()
-
+        if debug:
+            cmd_after = np.asarray(state.info["command"][0])
+            tc_after = np.asarray(state.info["target_command"][0])
+            steps_after = int(np.asarray(state.info["steps_until_next_cmd"]).reshape(-1)[0])
             print(
-                f"[command] {current_command}"
-            )
-            print(
-                f"[action]  {current_action}"
-            )
-            print(
-                f"[timing] observation: "
-                f"{1e3 * (obs_stop - obs_start):.2f} ms"
-            )
-            print(
-                f"[timing] policy: "
-                f"{1e3 * (policy_stop - policy_start):.2f} ms"
+                f"[cmd] kbd={keyboard_cmd} | "
+                f"target {tc_before}->{tc_after} | "
+                f"command {cmd_before}->{cmd_after} | "
+                f"steps_until_next_cmd {steps_before}->{steps_after}"
             )
 
-        extra_start = timer()
+        return bool(state.done[0])
 
-        touch_floor = _base_touches_floor(
-            model,
-            data,
-            base_body_name=base_body_name,
-            floor_geom_name=floor_geom_name,
-        )
-
-        # This is the same simulation primitive used by mjx_tita.
-        mujoco.mj_step(model, data)
-
-        update_com_tracking_camera(
-            _sim_cam,
-            model,
-            data,
-            _sim_base_body_id,
-            alpha=0.10,
-        )
-
-        _renderer.update_scene(data, camera=_sim_cam)
-        if counter % 2 == 0:
-            _sim_frames.append(_renderer.render().copy())
-
-        counter += 1
-
-        extra_stop = timer()
-        print(
-            f"[timing] extra time: "
-            f"{1e3 * (extra_stop - extra_start):.2f} ms"
-        )
-
-        return touch_floor
+    # bind batched_step to a local name for readability
+    env_step = batched_step
 
     def finalize_outputs():
         print("\n[finalize] Saving outputs...")
-
         try:
-            video_fps = int(sim_frequency / 2)
-
-            _save_sim_video(
-                video_dir=TITA_PATH,
-                video_fps=video_fps,
-                frames=_sim_frames,
-                slowdown_factor=1.0,
-                name_video="policy_simulation_video.mp4",
-            )
-            _save_sim_video(
-                video_dir=TITA_PATH,
-                video_fps=video_fps,
-                frames=_sim_frames,
-                slowdown_factor=4.0,
-                name_video="policy_simulation_video_slow4.mp4",
-            )
-            _save_sim_video(
-                video_dir=TITA_PATH,
-                video_fps=video_fps,
-                frames=_sim_frames,
-                slowdown_factor=15.0,
-                name_video="policy_simulation_video_slow15.mp4",
-            )
+            for slow, name in (
+                (1.0, "policy_simulation_video.mp4"),
+                (4.0, "policy_simulation_video_slow4.mp4"),
+                (15.0, "policy_simulation_video_slow15.mp4"),
+            ):
+                _save_sim_video(
+                    video_dir=TITA_PATH,
+                    video_fps=int(round(1.0 / env_dt)),
+                    frames=_sim_frames,
+                    slowdown_factor=slow,
+                    name_video=name,
+                )
         except Exception as exc:
             print(f"[finalize] failed to save video: {exc}")
-
         try:
             _renderer.close()
         except Exception:
@@ -593,53 +487,63 @@ def main(
 
     try:
         if headless:
-            for _ in range(steps):
-                touch_floor = step_controller()
-
-                if touch_floor:
-                    print(
-                        f"Base touched the floor at step {counter}. "
-                        "Ending simulation."
-                    )
+            for i in range(steps):
+                done = _step_once(debug=debug_cmd)
+                sync_viewer_data(state, viewer_model, viewer_data)
+                if i % 2 == 0:
+                    _record_frame()
+                print(
+                    f"step {i:4d} | cmd {np.asarray(state.info['command'][0])} "
+                    f"| done {done}"
+                )
+                if done:
+                    print(f"Episode ended (state.done) at step {i}.")
                     break
             return
 
+        help_cache = None
         with mujoco.viewer.launch_passive(
-            model,
-            data,
+            viewer_model,
+            viewer_data,
             key_callback=command_handle.key_callback,
         ) as viewer:
-            viewer.cam.distance *= 5.5
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+            viewer.cam.distance = 8.0
+            viewer.cam.elevation = -15.0
+            viewer.cam.azimuth = 60.0
             viewer.sync()
 
+            i = 0
             while viewer.is_running():
-                overlay_text = command_handle.consume_overlay_text()
                 tic = timer()
 
-                if overlay_text is not None:
-                    viewer.set_texts((None, None, *overlay_text))
+                ov = command_handle.consume_overlay_text()
+                if ov is not None:
+                    help_cache = ov
 
-                start_step = timer()
-                touch_floor = step_controller()
-                end_step = timer()
+                done = _step_once(debug=debug_cmd)
+                sync_viewer_data(state, viewer_model, viewer_data)
+                if i % 2 == 0:
+                    _record_frame()
 
-                print(
-                    f"Step time: "
-                    f"{1e3 * (end_step - start_step):.2f} ms"
-                )
+                viewer.set_texts(build_hud(
+                    command_vec=np.asarray(state.info["command"][0]),
+                    target_vec=np.asarray(state.info["target_command"][0]),
+                    help_text=help_cache,
+                ))
 
-                toc = timer()
-                if toc - tic < model.opt.timestep:
-                    time.sleep(model.opt.timestep - (toc - tic))
+                com = np.asarray(viewer_data.subtree_com[_base_body_id]).copy()
+                viewer.cam.lookat[:] = 0.9 * viewer.cam.lookat + 0.1 * com
+                viewer.sync()
 
-                if touch_floor:
-                    print(
-                        f"Base touched the floor at step {counter}. "
-                        "Ending simulation."
-                    )
+                if done:
+                    print(f"Episode ended (state.done) at step {i}.")
                     break
 
-                viewer.sync()
+                i += 1
+                elapsed = timer() - tic
+                if elapsed < env_dt:
+                    time.sleep(env_dt - elapsed)
 
     except KeyboardInterrupt:
         print("\n[interrupt] Ctrl+C received. Finalizing outputs...")
@@ -649,61 +553,31 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
+    parser.add_argument("--name", type=str, default="TitaJoystickE2EFlatTerrain")
     parser.add_argument(
-        "--name",
-        type=str,
-        default="TitaJoystickE2EFlatTerrain",
-        help="Environment name, same convention used by train_srbd.py.",
+        "--load", nargs="?", const="best", default="best", metavar="RUN_OR_SUFFIX"
     )
+    parser.add_argument("--ckpt-dir", type=str, default="checkpoints")
+    parser.add_argument("--steps", type=int, default=EPISODE_LENGTH)
+    parser.add_argument("--headless", action="store_true")
     parser.add_argument(
-        "--load",
-        nargs="?",
-        const="best",
-        default="best",
-        metavar="RUN_OR_SUFFIX",
-        help=(
-            "Bare --load loads latest best; a timestamp/prefix selects a run; "
-            "'best', 'final' or 'crash' selects the suffix."
-        ),
-    )
-    parser.add_argument(
-        "--ckpt-dir",
-        type=str,
-        default="checkpoints",
-    )
-    parser.add_argument(
-        "--steps",
-        type=int,
-        default=500,
-    )
-    parser.add_argument(
-        "--headless",
+        "--debug-cmd",
         action="store_true",
+        help="Print keyboard target / target_command / command / "
+             "steps_until_next_cmd before and after each env.step().",
     )
-
     args = parser.parse_args()
 
-    # Same shortcuts used by train_srbd.py.
     _NAME_SHORTCUTS = {
         "go1": "Go1JoystickFlatTerrain",
         "aliengo": "AliengoJoystickE2EFlatTerrain",
         "tita": "TitaJoystickFlatTerrain",
         "titae2e": "TitaJoystickE2EFlatTerrain",
     }
-    env_name = _NAME_SHORTCUTS.get(
-        args.name.lower(),
-        args.name,
-    )
+    env_name = _NAME_SHORTCUTS.get(args.name.lower(), args.name)
 
-    if (
-        os.environ.get("DISPLAY") is None
-        or os.environ.get("DISPLAY") == ""
-    ):
-        print(
-            "[WARN] No DISPLAY detected: "
-            "forcing --headless mode (no viewer)"
-        )
+    if not os.environ.get("DISPLAY"):
+        print("[WARN] No DISPLAY detected: forcing --headless mode (no viewer)")
         args.headless = True
 
     main(
@@ -712,4 +586,5 @@ if __name__ == "__main__":
         load_arg=args.load,
         headless=args.headless,
         steps=args.steps,
+        debug_cmd=args.debug_cmd,
     )

@@ -643,9 +643,16 @@ def plot_reward_terms_separate(
             # "commands[-1]" usato dagli env in joystickE2E.py).
             command_keys = sorted(
                 (ck for ck in terms if re.fullmatch(r"command_\d+", ck)),
-                key=lambda ck: int(ck.split("_")[1]),
+                key=lambda ck: int(ck.split("_")[-1]),
+            )
+            # target_command_* is disjoint from command_* under fullmatch
+            # ("target_command_0" does not match r"command_\d+").
+            target_keys = sorted(
+                (ck for ck in terms if re.fullmatch(r"target_command_\d+", ck)),
+                key=lambda ck: int(ck.split("_")[-1]),
             )
             ang_key = command_keys[-1] if command_keys else None
+            has_target = bool(target_keys)
             required = ("robot/local_linvel_0", "robot/gyro_2")
             if command_keys and all(rk in terms for rk in required):
                 steps_t = np.arange(len(terms[command_keys[0]]))
@@ -653,6 +660,8 @@ def plot_reward_terms_separate(
                 cmd_ang = np.asarray(terms[ang_key], dtype=float)
                 meas_lin = np.asarray(terms["robot/local_linvel_0"], dtype=float)
                 meas_ang = np.asarray(terms["robot/gyro_2"], dtype=float)
+                tgt_lin = np.asarray(terms[target_keys[0]], dtype=float) if has_target else None
+                tgt_ang = np.asarray(terms[target_keys[-1]], dtype=float) if has_target else None
 
                 fig_v, (ax_reward, ax_lin, ax_ang) = plt.subplots(
                     3, 1, figsize=(10, 10), sharex=True
@@ -675,6 +684,9 @@ def plot_reward_terms_separate(
                         transform=ax_reward.transAxes, fontsize=8, color="gray",
                     )
 
+                if tgt_lin is not None:
+                    ax_lin.plot(steps_t, tgt_lin, linestyle="--", alpha=0.7,
+                                label="Target vx")
                 ax_lin.plot(steps_t, cmd_lin, label="Command vx")
                 ax_lin.plot(steps_t, meas_lin, label="Measured vx (local_linvel)")
                 ax_lin.set_title("Linear velocity tracking")
@@ -682,6 +694,9 @@ def plot_reward_terms_separate(
                 ax_lin.grid(True, alpha=0.3)
                 ax_lin.legend()
 
+                if tgt_ang is not None:
+                    ax_ang.plot(steps_t, tgt_ang, linestyle="--", alpha=0.7,
+                                label=f"Target omega ({target_keys[-1]})")
                 ax_ang.plot(steps_t, cmd_ang, label=f"Command omega ({ang_key})")
                 ax_ang.plot(steps_t, meas_ang, label="Measured omega (gyro_z)")
                 ax_ang.set_title("Angular velocity tracking")
