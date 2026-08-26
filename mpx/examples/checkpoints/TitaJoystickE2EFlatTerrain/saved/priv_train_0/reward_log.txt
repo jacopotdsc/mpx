@@ -1,0 +1,182 @@
+============================================================
+  PPO Training  —  TitaJoystickE2EFlatTerrain
+  date         : 2026-08-25 14:36:37
+  JAX backend  : gpu
+  devices      : [CudaDevice(id=0)]
+  GPU name:    :   
+--- network ---
+  distribution : tanh_normal
+  hidden layers: (512, 256, 128)
+  entropy cost : 0.01
+  policy obs   : state
+  value obs    : privileged_state
+  policy net shape: (34,)
+  value net shape : (85,)
+  obs size     : {'privileged_state': (85,), 'state': (34,)}
+  action size  : 8
+  --- PPO params ---
+  num_timesteps            : 50000000
+  num_evals                : 10
+  reward_scaling           : 1.0
+  episode_length           : 1000
+  normalize_observations   : True
+  action_repeat            : 1
+  unroll_length            : 20
+  num_minibatches          : 32
+  num_updates_per_batch    : 4
+  discounting              : 0.99
+  learning_rate            : 0.0003
+  entropy_cost             : 0.01
+  num_envs                 : 1024
+  batch_size               : 256
+  max_grad_norm            : 1.0
+  network_factory          : {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}
+  num_resets_per_eval      : 10
+  seed                     : 0
+  deterministic_eval       : True
+============================================================
+
+--- environment config ---
+Kd: 1.0
+Kd_wheel: 0.5
+Kp: 50.0
+action_repeat: 1
+action_scale_pos: 0.5
+action_scale_vel: 25.0
+command_config:
+  a:
+  - 0.0
+  - 0.0
+  b:
+  - 0.75
+  - 0.75
+  h:
+  - 0.4
+  - 0.4
+  p_stand: 0.2
+ctrl_dt: 0.01
+episode_length: 1000
+impl: jax
+naconmax: 32768
+njmax: 40
+noise_config:
+  level: 0.0
+  scales:
+    gravity: 0.05
+    gyro: 0.2
+    joint_pos: 0.01
+    joint_vel: 1.5
+    linvel: 0.1
+pert_config:
+  enable: false
+  kick_durations:
+  - 0.05
+  - 0.2
+  kick_wait_times:
+  - 1.0
+  - 3.0
+  velocity_kick:
+  - 0.0
+  - 3.0
+reward_config:
+  base_height_target: 0.4
+  only_positive_rewards: false
+  posture_cmd_sigma: 0.25
+  scales:
+    action_rate: -0.01
+    ang_vel_xy: -0.3
+    base_height: -1.0
+    dof_pos_limits: -1.0
+    dof_vel: -0.0
+    orientation: -1.0
+    posture: -1.0
+    termination: -100.0
+    torques: -0.0001
+    tracking_ang_vel: 0.5
+    tracking_lin_vel: 1.0
+  tracking_sigma: 0.0625
+sim_dt: 0.002
+soft_joint_pos_limit_factor: 0.95
+
+============================================================
+
+  eval#0 
+	num_steps =            0
+	reward = -3.664 ± 0.000
+	std = n/a
+	kl = n/a
+	elapsed 00:23
+	time 14:37:01
+-------------------------------
+  eval#1 
+	num_steps =    6,553,600
+	reward = +13.681 ± 0.000
+	std = 0.1711
+	kl = 0.0443
+	elapsed 04:08
+	time 14:40:45
+-------------------------------
+  eval#2 
+	num_steps =   13,107,200
+	reward = +13.785 ± 0.013
+	std = 0.0654
+	kl = 0.0724
+	elapsed 07:01
+	time 14:43:39
+-------------------------------
+  eval#3 
+	num_steps =   19,660,800
+	reward = +14.527 ± 0.000
+	std = 0.0423
+	kl = 0.0573
+	elapsed 09:55
+	time 14:46:32
+-------------------------------
+  eval#4 
+	num_steps =   26,214,400
+	reward = +14.426 ± 0.000
+	std = 0.0967
+	kl = 0.0345
+	elapsed 12:52
+	time 14:49:30
+-------------------------------
+  eval#5 
+	num_steps =   32,768,000
+	reward = +14.576 ± 0.001
+	std = 0.0474
+	kl = 0.0490
+	elapsed 15:45
+	time 14:52:23
+-------------------------------
+  eval#6 
+	num_steps =   39,321,600
+	reward = +14.592 ± 0.001
+	std = 0.0307
+	kl = 0.0648
+	elapsed 18:37
+	time 14:55:15
+-------------------------------
+  eval#7 
+	num_steps =   45,875,200
+	reward = +14.601 ± 0.000
+	std = 0.0236
+	kl = 0.0777
+	elapsed 21:29
+	time 14:58:07
+-------------------------------
+  eval#8 
+	num_steps =   52,428,800
+	reward = +14.616 ± 0.001
+	std = 0.0183
+	kl = 0.3816
+	elapsed 24:23
+	time 15:01:01
+-------------------------------
+  eval#9 
+	num_steps =   58,982,400
+	reward = +14.631 ± 0.001
+	std = 0.0185
+	kl = 1.2722
+	elapsed 27:16
+	time 15:03:54
+-------------------------------
