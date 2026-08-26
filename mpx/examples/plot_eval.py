@@ -567,6 +567,7 @@ def plot_reward_terms(
 
 def plot_reward_terms_separate(
     terms,
+    reward_scaling=None,
     prefix: str = "reward_terms/",
     dir_name: str = None,
     out_dir: str = _DEFAULT_DIR,
@@ -574,11 +575,15 @@ def plot_reward_terms_separate(
 ):
     """Come plot_reward_terms, ma salva un PNG separato per ogni termine.
 
-    terms    : dict {nome: array (T,)} oppure lista di dict (uno per step).
-    prefix   : prefisso delle chiavi da selezionare ("" o None = tutte).
-               Da qui viene ricavato anche il nome della cartella.
-    dir_name : per forzare un nome cartella diverso da quello del prefix.
-    verbose  : stampa lunghezza / min / max / NaN di ogni serie.
+    terms          : dict {nome: array (T,)} oppure lista di dict (uno per step).
+    reward_scaling : dict {nome_termine: valore di scaling}, es.
+                      `env._config.reward_config.scales`. Se fornito, il
+                      titolo di ogni plot riporta tra parentesi
+                      `reward_scaling[nome_termine]`.
+    prefix         : prefisso delle chiavi da selezionare ("" o None = tutte).
+                      Da qui viene ricavato anche il nome della cartella.
+    dir_name       : per forzare un nome cartella diverso da quello del prefix.
+    verbose        : stampa lunghezza / min / max / NaN di ogni serie.
     """
     # ── nome cartella dal prefix ──────────────────────────────────────────
     if dir_name is None:
@@ -637,91 +642,233 @@ def plot_reward_terms_separate(
 
         # ── grafici extra: comando vs misurato, per tracking e altezza ─────
         if k == "tracking_lin_vel":
-            # Comandi: numero di componenti variabile a seconda del robot
-            # (2 per Tita [vx, wz], 3 per un quadrupede [vx, vy, wz], ...).
-            # L'ultima componente è sempre quella angolare (coerente con
-            # "commands[-1]" usato dagli env in joystickE2E.py).
             command_keys = sorted(
                 (ck for ck in terms if re.fullmatch(r"command_\d+", ck)),
                 key=lambda ck: int(ck.split("_")[-1]),
             )
-            # target_command_* is disjoint from command_* under fullmatch
-            # ("target_command_0" does not match r"command_\d+").
             target_keys = sorted(
                 (ck for ck in terms if re.fullmatch(r"target_command_\d+", ck)),
                 key=lambda ck: int(ck.split("_")[-1]),
             )
-            ang_key = command_keys[-1] if command_keys else None
-            has_target = bool(target_keys)
-            required = ("robot/local_linvel_0", "robot/gyro_2")
-            if command_keys and all(rk in terms for rk in required):
-                steps_t = np.arange(len(terms[command_keys[0]]))
-                cmd_lin = np.asarray(terms[command_keys[0]], dtype=float)
-                cmd_ang = np.asarray(terms[ang_key], dtype=float)
-                meas_lin = np.asarray(terms["robot/local_linvel_0"], dtype=float)
-                meas_ang = np.asarray(terms["robot/gyro_2"], dtype=float)
-                tgt_lin = np.asarray(terms[target_keys[0]], dtype=float) if has_target else None
-                tgt_ang = np.asarray(terms[target_keys[-1]], dtype=float) if has_target else None
 
-                fig_v, (ax_reward, ax_lin, ax_ang) = plt.subplots(
-                    3, 1, figsize=(10, 10), sharex=True
+            has_target = bool(target_keys)
+
+            if command_keys and "robot/local_linvel_0" in terms:
+                steps_t = np.arange(len(terms[command_keys[0]]))
+
+                cmd_lin = np.asarray(terms[command_keys[0]], dtype=float)
+                meas_lin = np.asarray(
+                    terms["robot/local_linvel_0"], dtype=float
+                )
+                tgt_lin = (
+                    np.asarray(terms[target_keys[0]], dtype=float)
+                    if has_target
+                    else None
                 )
 
-                # Reward term "tracking_lin_vel" nella stessa figura, invece
-                # che nel solito PNG separato (vedi blocco generico sotto).
+                fig_v, (ax_reward, ax_lin) = plt.subplots(
+                    2, 1, figsize=(10, 7), sharex=True
+                )
+
+                # Reward tracking lineare
                 reward_v = np.where(np.isfinite(v), v, np.nan)
-                ax_reward.plot(steps_t, reward_v, linewidth=1.2, color="steelblue")
-                ax_reward.set_title(f"{k} (reward term)")
+                ax_reward.plot(
+                    steps_t,
+                    reward_v,
+                    linewidth=1.2,
+                    color="steelblue",
+                )
+                ax_reward.set_title(
+                    f"{k} (reward term, scaling={reward_scaling[k]:g})"
+                    if reward_scaling is not None
+                    else f"{k} (reward term)"
+                )
                 ax_reward.set_ylabel("value")
                 ax_reward.grid(True, alpha=0.3)
-                ax_reward.axhline(0.0, color="k", linewidth=0.6, alpha=0.4)
+                ax_reward.axhline(
+                    0.0, color="k", linewidth=0.6, alpha=0.4
+                )
+
                 finite_reward = reward_v[np.isfinite(reward_v)]
                 if finite_reward.size:
                     ax_reward.text(
-                        0.01, 0.02,
-                        f"mean={finite_reward.mean():.4g}   min={finite_reward.min():.4g}   "
-                        f"max={finite_reward.max():.4g}   sum={finite_reward.sum():.4g}",
-                        transform=ax_reward.transAxes, fontsize=8, color="gray",
+                        0.01,
+                        0.02,
+                        f"mean={finite_reward.mean():.4g}   "
+                        f"min={finite_reward.min():.4g}   "
+                        f"max={finite_reward.max():.4g}   "
+                        f"sum={finite_reward.sum():.4g}",
+                        transform=ax_reward.transAxes,
+                        fontsize=8,
+                        color="gray",
                     )
 
+                # Tracking velocità lineare
                 if tgt_lin is not None:
-                    ax_lin.plot(steps_t, tgt_lin, linestyle="--", alpha=0.7,
-                                label="Target vx")
-                ax_lin.plot(steps_t, cmd_lin, label="Command vx")
-                ax_lin.plot(steps_t, meas_lin, label="Measured vx (local_linvel)")
+                    ax_lin.plot(
+                        steps_t,
+                        tgt_lin,
+                        linestyle="--",
+                        alpha=0.7,
+                        label="Target vx",
+                    )
+
+                ax_lin.plot(
+                    steps_t,
+                    cmd_lin,
+                    label="Command vx",
+                )
+                ax_lin.plot(
+                    steps_t,
+                    meas_lin,
+                    label="Measured vx (local_linvel)",
+                )
+
                 ax_lin.set_title("Linear velocity tracking")
+                ax_lin.set_xlabel("Step")
                 ax_lin.set_ylabel("m/s")
                 ax_lin.grid(True, alpha=0.3)
                 ax_lin.legend()
 
+                fig_v.tight_layout()
+
+                path_v = os.path.join(
+                    plots_dir, "tracking_lin_vel.png"
+                )
+                fig_v.savefig(path_v, dpi=120)
+                plt.close(fig_v)
+
+                paths["tracking_lin_vel"] = path_v
+                print(
+                    f"[plot] linear velocity tracking saved -> {path_v}"
+                )
+
+                continue
+
+            else:
+                print(
+                    "[plot] linear velocity tracking skipped: "
+                    "missing command_* or robot/local_linvel_0"
+                )
+
+        elif k == "tracking_ang_vel":
+            command_keys = sorted(
+                (ck for ck in terms if re.fullmatch(r"command_\d+", ck)),
+                key=lambda ck: int(ck.split("_")[-1]),
+            )
+            target_keys = sorted(
+                (ck for ck in terms if re.fullmatch(r"target_command_\d+", ck)),
+                key=lambda ck: int(ck.split("_")[-1]),
+            )
+
+            ang_key = command_keys[-1] if command_keys else None
+            has_target = bool(target_keys)
+
+            if ang_key is not None and "robot/gyro_2" in terms:
+                steps_t = np.arange(len(terms[ang_key]))
+
+                cmd_ang = np.asarray(
+                    terms[ang_key], dtype=float
+                )
+                meas_ang = np.asarray(
+                    terms["robot/gyro_2"], dtype=float
+                )
+                tgt_ang = (
+                    np.asarray(terms[target_keys[-1]], dtype=float)
+                    if has_target
+                    else None
+                )
+
+                fig_w, (ax_reward, ax_ang) = plt.subplots(
+                    2, 1, figsize=(10, 7), sharex=True
+                )
+
+                # Reward tracking angolare
+                reward_w = np.where(np.isfinite(v), v, np.nan)
+                ax_reward.plot(
+                    steps_t,
+                    reward_w,
+                    linewidth=1.2,
+                    color="steelblue",
+                )
+                ax_reward.set_title(
+                    f"{k} (reward term, scaling={reward_scaling[k]:g})"
+                    if reward_scaling is not None
+                    else f"{k} (reward term)"
+                )
+                ax_reward.set_ylabel("value")
+                ax_reward.grid(True, alpha=0.3)
+                ax_reward.axhline(
+                    0.0, color="k", linewidth=0.6, alpha=0.4
+                )
+
+                finite_reward = reward_w[np.isfinite(reward_w)]
+                if finite_reward.size:
+                    ax_reward.text(
+                        0.01,
+                        0.02,
+                        f"mean={finite_reward.mean():.4g}   "
+                        f"min={finite_reward.min():.4g}   "
+                        f"max={finite_reward.max():.4g}   "
+                        f"sum={finite_reward.sum():.4g}",
+                        transform=ax_reward.transAxes,
+                        fontsize=8,
+                        color="gray",
+                    )
+
+                # Tracking velocità angolare
                 if tgt_ang is not None:
-                    ax_ang.plot(steps_t, tgt_ang, linestyle="--", alpha=0.7,
-                                label=f"Target omega ({target_keys[-1]})")
-                ax_ang.plot(steps_t, cmd_ang, label=f"Command omega ({ang_key})")
-                ax_ang.plot(steps_t, meas_ang, label="Measured omega (gyro_z)")
+                    ax_ang.plot(
+                        steps_t,
+                        tgt_ang,
+                        linestyle="--",
+                        alpha=0.7,
+                        label=f"Target omega ({target_keys[-1]})",
+                    )
+
+                ax_ang.plot(
+                    steps_t,
+                    cmd_ang,
+                    label=f"Command omega ({ang_key})",
+                )
+                ax_ang.plot(
+                    steps_t,
+                    meas_ang,
+                    label="Measured omega (gyro_z)",
+                )
+
                 ax_ang.set_title("Angular velocity tracking")
-                ax_ang.set_ylabel("rad/s")
                 ax_ang.set_xlabel("Step")
+                ax_ang.set_ylabel("rad/s")
                 ax_ang.grid(True, alpha=0.3)
                 ax_ang.legend()
 
-                fig_v.tight_layout()
-                path_v = os.path.join(plots_dir, "tracking_lin_vel.png")
-                fig_v.savefig(path_v, dpi=120)
-                plt.close(fig_v)
-                paths["velocity_tracking"] = path_v
-                print(f"[plot] velocity tracking saved -> {path_v}")
-                # Il reward term è già incluso sopra (ax_reward): non generare
-                # anche il solito tracking_lin_vel.png separato.
-                continue
-            else:
-                print(f"[plot] velocity tracking skipped: missing command_* or {required}")
+                fig_w.tight_layout()
 
+                path_w = os.path.join(
+                    plots_dir, "tracking_ang_vel.png"
+                )
+                fig_w.savefig(path_w, dpi=120)
+                plt.close(fig_w)
+
+                paths["tracking_ang_vel"] = path_w
+                print(
+                    f"[plot] angular velocity tracking saved -> {path_w}"
+                )
+
+                continue
+
+            else:
+                print(
+                    "[plot] angular velocity tracking skipped: "
+                    "missing angular command or robot/gyro_2"
+                )
+        
         elif k == "base_height":
-            if "robot/com_height" in terms and "robot/base_height_target" in terms:
+            if "robot/com_height" in terms and "base_height_target" in terms:
                 steps_h = np.arange(len(terms["robot/com_height"]))
                 com_height = np.asarray(terms["robot/com_height"], dtype=float)
-                target = float(np.asarray(terms["robot/base_height_target"]).reshape(-1)[0])
+                target = float(np.asarray(terms["base_height_target"]).reshape(-1)[0])
 
                 fig_h, (ax_reward, ax_h) = plt.subplots(
                     2, 1, figsize=(10, 7), sharex=True
@@ -731,7 +878,11 @@ def plot_reward_terms_separate(
                 # nel solito PNG separato (vedi blocco generico sotto).
                 reward_h = np.where(np.isfinite(v), v, np.nan)
                 ax_reward.plot(steps_h, reward_h, linewidth=1.2, color="steelblue")
-                ax_reward.set_title(f"{k} (reward term)")
+                ax_reward.set_title(
+                    f"{k} (reward term, scaling={reward_scaling[k]:g})"
+                    if reward_scaling is not None
+                    else f"{k} (reward term)"
+                )
                 ax_reward.set_ylabel("value")
                 ax_reward.grid(True, alpha=0.3)
                 ax_reward.axhline(0.0, color="k", linewidth=0.6, alpha=0.4)
@@ -744,7 +895,7 @@ def plot_reward_terms_separate(
                         transform=ax_reward.transAxes, fontsize=8, color="gray",
                     )
 
-                ax_h.axhline(target, color="k", linestyle="--", label="Target height")
+                ax_h.plot(steps_h, np.full_like(steps_h, target, dtype=float),linestyle="--", label="Target height")
                 ax_h.plot(steps_h, com_height, label="Measured CoM height")
                 ax_h.set_title("Base height tracking")
                 ax_h.set_xlabel("Step")
@@ -760,7 +911,7 @@ def plot_reward_terms_separate(
                 print(f"[plot] height tracking saved -> {path_h}")
                 continue
             else:
-                print("[plot] height tracking skipped: missing 'robot/com_height' or 'robot/base_height_target'")
+                print("[plot] height tracking skipped: missing 'robot/com_height' or 'base_height_target'")
 
         elif k == "wheel_track":
             # feet_pos è (2, 3) -> appiattito in robot/feet_pos_0..5
@@ -785,7 +936,11 @@ def plot_reward_terms_separate(
                 # nel solito PNG separato (vedi blocco generico sotto).
                 reward_w = np.where(np.isfinite(v), v, np.nan)
                 ax_reward.plot(steps_w, reward_w, linewidth=1.2, color="steelblue")
-                ax_reward.set_title(f"{k} (reward term)")
+                ax_reward.set_title(
+                    f"{k} (reward term, scaling={reward_scaling[k]:g})"
+                    if reward_scaling is not None
+                    else f"{k} (reward term)"
+                )
                 ax_reward.set_ylabel("value")
                 ax_reward.grid(True, alpha=0.3)
                 ax_reward.axhline(0.0, color="k", linewidth=0.6, alpha=0.4)
@@ -822,7 +977,11 @@ def plot_reward_terms_separate(
         fig, ax = plt.subplots(figsize=(10, 4))
 
         ax.plot(v, linewidth=1.2, marker=marker, color="steelblue")
-        ax.set_title(k)
+        ax.set_title(
+            f"{k} (scaling={reward_scaling[k]:g})"
+            if reward_scaling is not None
+            else k
+        )
         ax.set_xlabel("Step")
         ax.set_ylabel("value")
         ax.grid(True, alpha=0.3)

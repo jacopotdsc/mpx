@@ -44,6 +44,7 @@ import subprocess
 import os
 import signal
 import csv
+import shutil
 
 # Reduce GPU memory fragmentation (must be set before JAX/XLA initialise).
 os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
@@ -112,10 +113,10 @@ DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match ch
 ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
-NUM_TIMESTEPS = 30_000_000
+NUM_TIMESTEPS = 100_000_000
 NUM_EVALS = 10
 EPISODE_LENGTH = 1000
-NUM_ENVS = 4096
+NUM_ENVS = 1024
 DETERMINISTIC_EVAL = True  # eval usa la media della policy, non un sample rumoroso
 
 PPO_PARAMS = dict(
@@ -132,7 +133,7 @@ PPO_PARAMS = dict(
       learning_rate=3e-4,
       entropy_cost=1e-2,
       num_envs=NUM_ENVS,
-      batch_size=512,
+      batch_size=256,
       max_grad_norm=1.0,
       network_factory=dict(
             policy_hidden_layer_sizes=(512, 256, 128),
@@ -155,7 +156,7 @@ SAC_PARAMS = dict(
     episode_length         = EPISODE_LENGTH,
     normalize_observations = True,
     action_repeat          = 1,
-    discounting            = 0.99,
+    discounting            = 0.997,
     learning_rate          = 3e-4,
     num_envs               = NUM_ENVS,          # SAC off-policy: molti meno env di PPO
     batch_size             = 256,
@@ -175,20 +176,10 @@ print(f"SAC_PARAMS: \n{SAC_PARAMS}")
 def make_envs(
     env_name: str = "Go1JoystickFlatTerrain",
 ):
-    """Return (env, eval_env, wrap_fn) with custom registration only for QuadrupedMPCEnv."""
+    """Return (env, eval_env, wrap_fn) for a MuJoCo Playground env."""
 
-    from go1_srbd import QuadrupedMPCEnv, default_config
-    from mujoco_playground._src import locomotion
     from mujoco_playground import registry
     from mujoco_playground._src.wrapper import wrap_for_brax_training as pg_wrap
-
-    if env_name == "QuadrupedMPCEnv":
-        print(f"  [INFO] Registering custom env '{env_name}' in MuJoCo Playground registry...")
-        locomotion._envs[env_name] = functools.partial(QuadrupedMPCEnv, task="flat_terrain")
-        locomotion._cfgs[env_name] = default_config
-        locomotion._randomizer[env_name] = locomotion._randomizer["Go1JoystickFlatTerrain"]
-        locomotion.ALL_ENVS = locomotion.ALL_ENVS + (env_name,)
-        registry.ALL_ENVS = registry.ALL_ENVS + (env_name,)
 
     env      = registry.load(env_name)
     eval_env = registry.load(env_name)
@@ -228,6 +219,52 @@ times = [datetime.now()]
 REWARD_LOG_FILE = "reward_log.txt"  # overridden at training start
 METRICS_LOG_FILE = "metrics_log.csv"  # overridden at training start
 CKPT_DIR = "."                       # overridden at training start
+
+def save_source_files(target_path: str, ckpt_dir: str | None = None):
+    """Copy target_path (a file or a whole directory) into <ckpt_dir>/files_save/<basename>.
+
+    Each copied file is renamed to 'copy_<original_name>.txt' (extension
+    replaced with .txt) so the snapshot can't be imported/run by mistake.
+
+    Used to snapshot the exact source/env code a run used, so old checkpoints
+    stay reproducible even if the source changes later.
+    """
+    dest_root = os.path.join(ckpt_dir or CKPT_DIR, "files_save")
+    os.makedirs(dest_root, exist_ok=True)
+
+    def _copy_one(src_file: str, dest_dir: str):
+        os.makedirs(dest_dir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(src_file))[0]
+        shutil.copy2(src_file, os.path.join(dest_dir, f"copy_{stem}.txt"))
+
+    if os.path.isdir(target_path):
+        dest = os.path.join(dest_root, os.path.basename(os.path.normpath(target_path)))
+        for root, _, files in os.walk(target_path):
+            rel = os.path.relpath(root, target_path)
+            dest_dir = dest if rel == "." else os.path.join(dest, rel)
+            for fname in files:
+                _copy_one(os.path.join(root, fname), dest_dir)
+    else:
+        dest = dest_root
+        _copy_one(target_path, dest)
+    print(f"  [INFO] Copied files to '{target_path}' -> '{dest}'")
+
+
+def save_tita_env_files(env_name: str, ckpt_dir: str | None = None):
+    """Snapshot the source of the env actually being trained into files_save.
+
+    Saves the module's folder (e.g. locomotion/tita, locomotion/go1)
+    resolved from the MuJoCo Playground registry, so the snapshot always
+    matches env_name instead of always saving the tita folder.
+    """
+
+    from mujoco_playground._src import locomotion
+    env_cls = locomotion._envs[env_name]
+    env_cls = env_cls.func if isinstance(env_cls, functools.partial) else env_cls
+    env_dir = os.path.dirname(inspect.getfile(env_cls))
+    save_source_files(env_dir, ckpt_dir)
+    save_source_files(__file__, ckpt_dir)
+
 
 
 def progress(num_steps, metrics):
@@ -536,28 +573,38 @@ def run_viewer_rollout(
 
     # Command dimensionality comes from the env's own command_config, not a
     # fixed assumption (e.g. 2 for Tita's [vx, wz], 3 for a quadruped's
-    # [vx, vy, wz]).
+    # [vx, vy, wz]). A trailing extra value is the target base height; base
+    # height is sampled once at reset and never rewritten in step(), so if
+    # omitted the env's own init/sampled height is left untouched.
     cmd_dim = state.info["command"].shape[-1]
 
     # Inject fixed command after reset if provided.
     if fixed_command is not None:
         fixed_command = np.asarray(fixed_command, dtype=np.float32)
-        if fixed_command.shape[-1] != cmd_dim:
+        n_given = fixed_command.shape[-1]
+        height_target = None
+        if n_given == cmd_dim + 1:
+            fixed_command, height_target = fixed_command[:cmd_dim], float(fixed_command[cmd_dim])
+        elif n_given != cmd_dim:
             raise ValueError(
-                f"--cmd got {fixed_command.shape[-1]} value(s) but env "
-                f"'{env_name}' expects {cmd_dim} (see its command_config)."
+                f"--cmd got {n_given} value(s) but env '{env_name}' expects "
+                f"{cmd_dim} (or {cmd_dim + 1} with target height as the last value)."
             )
         _cmd = jnp.broadcast_to(jnp.asarray(fixed_command), (EVAL_BATCH, cmd_dim))
-        state = state.replace(info={
+        new_info = {
             **state.info,
             "command": jnp.zeros_like(_cmd),
             "target_command": _cmd,
-        })
+        }
+        if height_target is not None:
+            new_info["base_height_target"] = jnp.full((EVAL_BATCH,), height_target, dtype=jnp.float32)
+        state = state.replace(info=new_info)
         # Recompute obs from the patched info instead of poking a hardcoded
         # offset into the flat obs vector: the command's position and width
         # inside the observation are the env's own business.
         batched_get_obs = jax.jit(jax.vmap(eval_env._get_obs))
-        state = state.replace(obs=batched_get_obs(state.data, state.info))
+        zero_action = jnp.zeros((EVAL_BATCH, eval_env.mjx_model.nu))
+        state = state.replace(obs=batched_get_obs(state.data, state.info, zero_action))
 
     viewer_model = None
     viewer_data = None
@@ -898,7 +945,8 @@ def run_viewer_rollout(
             filename="reward_terms.png"
         )
         plot_reward_terms_separate(
-            terms=info_log, 
+            terms=info_log,
+            reward_scaling=eval_env._config.reward_config.scales,
             prefix="reward_terms/",
             out_dir=ckpt_dir,
         )
@@ -975,9 +1023,9 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
         networks = ppo_networks.make_ppo_networks(
             observation_size=env.observation_size,
             action_size=env.action_size,
-            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
             preprocess_observations_fn=running_statistics.normalize,
             distribution_type=DISTRIBUTION_TYPE,
+            **ALGO_PARAMS["network_factory"],
             #activation=linen.elu,
             #policy_network_kernel_init_fn=_policy_kernel_init_factory,
             #init_noise_std=INIT_STD
@@ -1120,17 +1168,17 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
 
 def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
               resume_dir: str | None = None, resume_suffix: str = "best",
-              env_name: str = "QuadrupedMPCEnv", algo: str = "ppo"):
+              env_name: str = "Go1JoystickFlatTerrain", algo: str = "ppo"):
     global REWARD_LOG_FILE, METRICS_LOG_FILE, CKPT_DIR
     os.makedirs(ckpt_dir, exist_ok=True)
     CKPT_DIR = ckpt_dir
     REWARD_LOG_FILE = os.path.join(ckpt_dir, "reward_log.txt")
     METRICS_LOG_FILE = os.path.join(ckpt_dir, "metrics_log.csv")
+    save_tita_env_files(env_name, ckpt_dir)
 
     if algo == "ppo":
-        _ppo_sig = inspect.signature(ppo_networks.make_ppo_networks)
-        policy_obs_key = _ppo_sig.parameters["policy_obs_key"].default
-        value_obs_key = _ppo_sig.parameters["value_obs_key"].default
+        policy_obs_key = ALGO_PARAMS["network_factory"]["policy_obs_key"]
+        value_obs_key = ALGO_PARAMS["network_factory"]["value_obs_key"]
     else:
         # SAC: single shared obs key, no policy/value split.
         policy_obs_key = value_obs_key = "state"
@@ -1148,6 +1196,8 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         f"  entropy cost : {ALGO_PARAMS.get('entropy_cost', 'N/A')}",
         f"  policy obs   : {policy_obs_key}",
         f"  value obs    : {value_obs_key if algo == 'ppo' else '(shared)'}",
+        f"  policy net shape: {env.observation_size[policy_obs_key] if algo == 'ppo' else env.observation_size}",
+        f"  value net shape : {env.observation_size[value_obs_key] if algo == 'ppo' else '(shared)'}",
         f"  obs size     : {env.observation_size}",
         f"  action size  : {env.action_size}",
         f"  --- {algo.upper()} params ---",
@@ -1183,31 +1233,59 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
             print(f"  Initializing training from checkpoint in '{resume_dir}'.")
     else:
         print("  Fresh training.")
+    
+    def _extract_actor_critic(restore_params):
+        """Return (policy_params, value_params) from a brax restore tuple, or (None, None)."""
+        if restore_params is None:
+            return None, None
+        # brax PPO save format: (normalizer_params, policy_params, value_params)
+        # older/other formats may pack differently; guard defensively.
+        try:
+            _, policy_params, value_params = restore_params
+            return policy_params, value_params
+        except (ValueError, TypeError):
+            return None, None
 
-        network_policy_params = built_networks.policy_network.init(jax.random.PRNGKey(ALGO_PARAMS["seed"]))
-        flat_debug = jax.tree_util.tree_flatten_with_path(network_policy_params)[0]
-        print("  policy param shapes:")
-        for path, value in flat_debug:
+    loaded_policy, loaded_value = _extract_actor_critic(restore_params)
+
+    def _dump_param_shapes(label, net, params):
+        # Fall back to a fresh init only if no loaded params are available.
+        if params is None:
+            params = net.init(jax.random.PRNGKey(ALGO_PARAMS["seed"]))
+        flat = jax.tree_util.tree_flatten_with_path(params)[0]
+        print(f"  {label} param shapes:")
+        total = 0
+        for path, value in flat:
             if hasattr(value, "shape"):
-                path_str = "/".join(str(p) for p in path)
-                print(f"    {path_str}: {tuple(value.shape)}")
+                n = int(np.prod(value.shape))
+                total += n
+                path_str = "/".join(str(getattr(p, "key", p)) for p in path)
+                print(f"    {path_str:<45}: {str(tuple(value.shape)):<15} ({n:,})")
+        print(f"    {'TOTAL scalars':<45}: {'':<15} ({total:,})")
+        return params
 
-        print(f"    Distribution_type: {DISTRIBUTION_TYPE}")
-        policy_module = inspect.getclosurevars(built_networks.policy_network.apply).nonlocals["policy_module"]
-        activation_fn = policy_module.activation
-        print(f"    Activation (read from policy_network module): {getattr(activation_fn, '__name__', activation_fn)}")
-        out_dim = built_networks.parametric_action_distribution.param_size
-        candidate_kernels = [
-            x for x in jax.tree_util.tree_leaves(network_policy_params)
-            if hasattr(x, "ndim") and x.ndim == 2 and x.shape[-1] == out_dim
-        ]
-        if candidate_kernels:
-            norms = [float(jnp.linalg.norm(k)) for k in candidate_kernels]
-            print(f"  policy output-kernel init norms: min={min(norms):.3e}, max={max(norms):.3e}, count={len(norms)}")
-        else:
-            print("  [WARN] Could not find output-kernel candidates for init check.")
+    src = "LOADED" if restore_params is not None else "FRESH INIT"
+    print(f"  [network params shown from: {src}]")
+    network_policy_params = _dump_param_shapes("actor (policy)", built_networks.policy_network, loaded_policy)
+    if ALGO == "ppo":
+        _dump_param_shapes("critic (value)", built_networks.value_network, loaded_value)
 
-        print(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"    Distribution_type: {DISTRIBUTION_TYPE}")
+    policy_module = inspect.getclosurevars(built_networks.policy_network.apply).nonlocals["policy_module"]
+    activation_fn = policy_module.activation
+    print(f"    Activation (read from policy_network module): {getattr(activation_fn, '__name__', activation_fn)}")
+    out_dim = built_networks.parametric_action_distribution.param_size
+    candidate_kernels = [
+        x for x in jax.tree_util.tree_leaves(network_policy_params)
+        if hasattr(x, "ndim") and x.ndim == 2 and x.shape[-1] == out_dim
+    ]
+    if candidate_kernels:
+        norms = [float(jnp.linalg.norm(k)) for k in candidate_kernels]
+        print(f"  policy output-kernel init norms: min={min(norms):.3e}, max={max(norms):.3e}, count={len(norms)}")
+    else:
+        print("  [WARN] Could not find output-kernel candidates for init check.")
+
+    print(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     latest_params = restore_params
     latest_step = 0
@@ -1275,8 +1353,8 @@ def main():
     parser.add_argument(
         "--name",
         type=str,
-        default="TitaJoystickFlatTerrain",
-        help="Environment name. Use 'QuadrupedMPCEnv' for custom SRBD; otherwise a MuJoCo Playground env name.",
+        default="TitaJoystickE2EFlatTerrain",
+        help="MuJoCo Playground environment name.",
     )
     parser.add_argument("--algo", type=str, choices=["ppo", "sac"], default="ppo",
                         help="RL algorithm: 'ppo' (default) o 'sac'")
@@ -1292,7 +1370,10 @@ def main():
     parser.add_argument("--cmd", nargs="+", type=float, default=None, metavar="CMD_I",
                         help="Fix joystick command for eval rollout. Number of values must match "
                              "the env's command_config (e.g. 2 values for Tita's [vx, wz], "
-                             "3 for a quadruped's [vx, vy, wz]), e.g. --cmd 0.5 0.0")
+                             "3 for a quadruped's [vx, vy, wz]), e.g. --cmd 0.5 0.0. One extra "
+                             "trailing value sets the target base height (envs that support it, "
+                             "e.g. Tita); if omitted, the env's own init height is used, "
+                             "e.g. --cmd 0.5 0.0 0.35")
     parser.add_argument(
         "--ckpt-dir",
         type=str,

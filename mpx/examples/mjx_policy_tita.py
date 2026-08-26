@@ -83,7 +83,11 @@ EPISODE_LENGTH = 10_000_000
 # fires. The keyboard becomes the sole authority over target_command; the env's
 # own smoothing (command += 0.02*(target_command - command)) still runs.
 NO_RESAMPLE_STEPS = 10_000_000
+HEIGHT_TARGET_INIT = 0.4
+HEIGHT_TARGET_STEP = 0.1
 
+KEY_PAGE_UP = 266
+KEY_PAGE_DOWN = 267
 _RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}$")
 
 
@@ -249,6 +253,17 @@ def set_target_command(state, keyboard_cmd: np.ndarray, cmd_dim: int):
         "steps_until_next_cmd": big,
     })
 
+def set_base_height_target(state, height_target: float, height_min: float, height_max: float):
+    """Set the interactive CoM-height target."""
+    target = jnp.full_like(
+        state.info["base_height_target"],
+        jnp.clip(height_target, height_min, height_max),
+    )
+
+    return state.replace(info={
+        **state.info,
+        "base_height_target": target,
+    })
 
 def sync_viewer_data(state, viewer_model, viewer_data):
     """Native MjData = pure visualization mirror of the MJX state (env 0)."""
@@ -269,50 +284,88 @@ def take_env0(obs):
     return obs[0]
 
 
-def build_hud(command_vec, target_vec, help_text):
-    """One set_texts() sequence, rebuilt every frame: keyboard help (TOPLEFT)
-    plus a single Command + Target-command block (TOPRIGHT).
-
-    command_vec  <- state.info['command']         (env-smoothed, moving)
-    target_vec   <- state.info['target_command']  (held at the keyboard value)
-
-    Both live in ONE overlay entry so a later set_texts for the keyboard help
-    cannot wipe them: everything goes out together in a single call.
-    """
+def build_hud(
+    command_vec,
+    target_vec,
+    actual_vec,
+    actual_height,
+    target_height,
+    command_handle
+):
     n = command_vec.shape[-1]
-    labels = {2: ("vx", "wz"), 3: ("vx", "vy", "wz")}.get(
-        n, tuple(f"c{i}" for i in range(n))
+
+    labels = {
+        2: ("vx", "wz"),
+        3: ("vx", "vy", "wz"),
+    }.get(n, tuple(f"c{i}" for i in range(n)))
+
+    # ----------------------------------------------------------
+    # LEFT: keyboard controls
+    # ----------------------------------------------------------
+    
+    fwd_step = command_handle.forward_step
+    yaw_step = command_handle.yaw_step
+
+    fwd_min, fwd_max = command_handle.forward_limits
+    yaw_min, yaw_max = command_handle.yaw_limits
+
+    help_left = (
+        "Key"
+        "\nUp/Down"
+        "\nLeft/Right"
+        "\nSpace"
+        "\nPageUp/Down"
     )
 
-    # Left column = labels/headers, right column = values, line-aligned.
-    title_lines = ["Command"]
-    value_lines = [""]
-    for lab, v in zip(labels, command_vec):
-        title_lines.append(f"  {lab}")
-        value_lines.append(f"{float(v):+.2f}")
-    title_lines += ["", "Target command"]
-    value_lines += ["", ""]
-    for lab, v in zip(labels, target_vec):
-        title_lines.append(f"  {lab}")
-        value_lines.append(f"{float(v):+.2f}")
+    help_right = (
+        "Command     Step      Min / Max"
+        f"\nforward     {fwd_step:.2f}      {fwd_min:+.1f} / {fwd_max:+.1f}"
+        f"\nyaw         {yaw_step:.2f}      {yaw_min:+.1f} / {yaw_max:+.1f}"
+        "\nstop        --        --"
+        f"\nheight      {HEIGHT_TARGET_STEP:.2f}      --"
+    )
+    # ----------------------------------------------------------
+    # RIGHT: tracking values
+    # ----------------------------------------------------------
+    title_lines = [
+        "",
+        *labels,
+        "height",
+    ]
 
-    entries = []
-    if help_text is not None:
-        entries.append((
+    value_lines = [
+        " Actual   Command   Target",
+    ]
+
+    for actual, command, target in zip(
+        actual_vec, command_vec, target_vec
+    ):
+        value_lines.append(
+            f"{float(actual):+7.2f}  "
+            f"{float(command):+7.2f}  "
+            f"{float(target):+7.2f}"
+        )
+
+    value_lines.append(
+        f"{float(actual_height):+7.2f}  "
+        f"{float(target_height):+7.2f}  "
+        f"{float(target_height):+7.2f}"
+    )
+
+    return [
+        (
             mujoco.mjtFont.mjFONT_NORMAL,
             mujoco.mjtGridPos.mjGRID_TOPLEFT,
-            help_text[0],
-            help_text[1],
-        ))
-    entries.append((
-        mujoco.mjtFont.mjFONT_NORMAL,
-        mujoco.mjtGridPos.mjGRID_TOPRIGHT,
-        "\n".join(title_lines),
-        "\n".join(value_lines),
-    ))
-    return entries
-
-
+            help_left,
+            help_right,
+        ),
+        (
+            mujoco.mjtFont.mjFONT_NORMAL,
+            mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+            "\n".join(title_lines),
+            "\n".join(value_lines),
+        ),
+    ]
 # -----------------------------------------------------------------------------
 # Main.
 # -----------------------------------------------------------------------------
@@ -360,18 +413,22 @@ def main(
     # One-off obs recompute so the FIRST action reflects the keyboard command
     # instead of the env's random reset command. Uses the env's own _get_obs
     # with a zero previous action (exactly what reset() feeds it).
-    _zeros_act = jnp.zeros((action_size,), dtype=jnp.float32)
 
     @jax.jit
     @jax.vmap
-    def batched_reset_obs(data, info):
-        return env._get_obs(data, info, _zeros_act)
+    def batched_get_obs(data, info, action):
+        return env._get_obs(data, info, action)
 
+    _zero_actions = jnp.zeros(
+        (EVAL_BATCH, action_size),
+        dtype=jnp.float32,
+    )
     # Reset — identical RNG to train_srbd.py --eval.
     rng = jax.random.PRNGKey(42)
     rng, *reset_rngs = jax.random.split(rng, EVAL_BATCH + 1)
     state = batched_reset(jnp.stack(reset_rngs))
 
+    height_target = HEIGHT_TARGET_INIT
     cmd_dim = int(state.info["command"].shape[-1])
 
     command_handle = sim_utils.KeyboardVelocityCommand(
@@ -384,6 +441,19 @@ def main(
         yaw_limits=(-1.5, 1.5),
     )
 
+    def key_callback(keycode):
+        nonlocal height_target
+
+        if keycode == KEY_PAGE_UP:
+            height_target += HEIGHT_TARGET_STEP
+            return
+
+        if keycode == KEY_PAGE_DOWN:
+            height_target -= HEIGHT_TARGET_STEP
+            return
+
+        command_handle.key_callback(keycode)
+
     # Reset init: start command at 0, set target_command from the keyboard,
     # and disable the resampler. From here on the env's 0.02 smoothing moves
     # command toward target on its own. Then rebuild obs so step 0 is clean.
@@ -393,8 +463,20 @@ def main(
         "command": jnp.zeros_like(state.info["command"]),
     })
     state = set_target_command(state, keyboard_cmd, cmd_dim)
-    state = state.replace(obs=batched_reset_obs(state.data, state.info))
+    state = set_base_height_target(
+        state,
+        height_target,
+        height_min=env._config.command_config.h[0],
+        height_max=env._config.command_config.h[1],
+    )
 
+    state = state.replace(
+        obs=batched_get_obs(
+            state.data,
+            state.info,
+            _zero_actions,
+        )
+    )
     # Native MjModel/MjData used ONLY as a visualization mirror.
     viewer_model = env.mj_model
     viewer_data = mujoco.MjData(viewer_model)
@@ -435,6 +517,20 @@ def main(
         # Before step: pin target_command to the keyboard and keep the
         # resampler off. command is left untouched (env smooths it in step()).
         state = set_target_command(state, keyboard_cmd, cmd_dim)
+        state = set_base_height_target(
+            state,
+            height_target,
+            height_min=env._config.command_config.h[0],
+            height_max=env._config.command_config.h[1],
+        )
+
+        state = state.replace(
+            obs=batched_get_obs(
+                state.data,
+                state.info,
+                state.info["last_act"],
+            )
+        )
 
         cmd_before = np.asarray(state.info["command"][0])
         tc_before = np.asarray(state.info["target_command"][0])
@@ -501,11 +597,10 @@ def main(
                     break
             return
 
-        help_cache = None
         with mujoco.viewer.launch_passive(
             viewer_model,
             viewer_data,
-            key_callback=command_handle.key_callback,
+            key_callback=key_callback,
         ) as viewer:
             viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
             viewer.cam.distance = 8.0
@@ -517,19 +612,39 @@ def main(
             while viewer.is_running():
                 tic = timer()
 
-                ov = command_handle.consume_overlay_text()
-                if ov is not None:
-                    help_cache = ov
-
                 done = _step_once(debug=debug_cmd)
                 sync_viewer_data(state, viewer_model, viewer_data)
                 if i % 2 == 0:
                     _record_frame()
 
+                local_linvel = np.asarray(
+                    state.info["robot"]["local_linvel"][0]
+                )
+
+                gyro = np.asarray(
+                    state.info["robot"]["gyro"][0]
+                )
+
+                actual_vec = np.array([
+                    local_linvel[0],
+                    gyro[2],
+                ])
+
+                actual_height = float(
+                    np.asarray(state.info["robot"]["com_height"][0])
+                )
+
+                target_height = float(
+                    np.asarray(state.info["base_height_target"][0])
+                )
+
                 viewer.set_texts(build_hud(
                     command_vec=np.asarray(state.info["command"][0]),
                     target_vec=np.asarray(state.info["target_command"][0]),
-                    help_text=help_cache,
+                    actual_vec=actual_vec,
+                    actual_height=actual_height,
+                    target_height=target_height,
+                    command_handle=command_handle
                 ))
 
                 com = np.asarray(viewer_data.subtree_com[_base_body_id]).copy()
