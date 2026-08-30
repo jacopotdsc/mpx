@@ -19,7 +19,7 @@ body_name = ['left_leg_4', 'right_leg_4']
 # Time and stage parameters
 #dt = 0.002  # Time step in seconds
 dt_mpc = 0.002
-N = 50        # Number of stages
+N = 250        # Number of stages
 T_TRAJECTORY = 60
 mpc_frequency = 100  # Frequency of MPC updates in Hz
 grav = 9.81
@@ -108,15 +108,15 @@ Qgrf = jnp.diag(jnp.array([1e0, 1e0, 1e0]))  # Cost matrix for
 
 # ── MPC cost weights ──────────────────────────────────────────────
 # State weights
-w_pcomxy = 1e1      # posizione xy
-w_pcomz  = 1e5     # altezza CoM
-w_vcomxy = 5e3      # velocità xy CoM
-w_vcomz  = 1e2      # velocità z CoM
-w_c      = 3e4      # posizione com_ground projection
-w_vcz    = 1e1      # velocità com_ground projection
-w_theta  = 1e1      # heading
-w_v      = 3e3      # velocità com_ground projection
-w_omega  = 5e3      # velocità angolare
+w_pcomxy = 0e0      # posizione xy
+w_pcomz  = 2e4     # altezza CoM
+w_vcomxy = 3e2      # velocità xy CoM
+w_vcomz  = 1e1      # velocità z CoM
+w_c      = 0e0      # posizione com_ground projection
+w_vcz    = 0e0      # velocità com_ground projection
+w_theta  = 0e0      # heading
+w_v      = 1e1      # velocità com_ground projection
+w_omega  = 5e0      # velocità angolare
 
 # Control weights – ruote (attuatori principali, non troppo economici)
 w_a      = 1e-1      # accelerazione lineare

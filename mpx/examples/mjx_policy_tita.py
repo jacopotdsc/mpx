@@ -668,7 +668,7 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", type=str, default="TitaJoystickE2EFlatTerrain")
+    parser.add_argument("--name", type=str, default="TitaJoystickFlatTerrain")
     parser.add_argument(
         "--load", nargs="?", const="best", default="best", metavar="RUN_OR_SUFFIX"
     )

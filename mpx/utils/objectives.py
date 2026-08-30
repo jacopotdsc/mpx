@@ -45,43 +45,90 @@ def wheeled_dfcip_obj(wheel_offset, N, W, reference, x, u, t):
     w_fcxy, w_fcz       = W[12, 12], W[13, 13]
     w_eq                = W[14, 14]
  
+    # ── STAGE COST: singoli contributi ───────────────────────────────
+
+    sc_pcomxy = 0.5 * w_pcomxy * jnp.sum((pcom[:2] - x_ref[0:2]) ** 2)
+    sc_pcomz  = 0.5 * w_pcomz  *         (pcom[2]  - x_ref[2])   ** 2
+
+    sc_vcomxy = 0.5 * w_vcomxy * jnp.sum((vcom[:2] - x_ref[3:5]) ** 2)
+    sc_vcomz  = 0.5 * w_vcomz  *         (vcom[2]  - x_ref[5])   ** 2
+
+    sc_c      = 0.5 * w_c      * jnp.sum((c        - x_ref[6:9]) ** 2)
+    sc_vcz    = 0.5 * w_vcz    *         (vc_z     - x_ref[9])   ** 2
+
+    sc_theta  = 0.5 * w_theta  *         (theta    - x_ref[10])  ** 2
+    sc_v      = 0.5 * w_v      *         (v        - x_ref[11])  ** 2
+    sc_w      = 0.5 * w_w      *         (w        - x_ref[12])  ** 2
+
+    sc_a      = 0.5 * w_a      *         (a        - u_ref[0])   ** 2
+    sc_ac_z   = 0.5 * w_ac_z   *         (ac_z     - u_ref[1])   ** 2
+    sc_alpha  = 0.5 * w_alpha  *         (alpha    - u_ref[2])   ** 2
+
+    sc_flxy   = 0.5 * w_fcxy   * jnp.sum((fl[:2]   - u_ref[3:5]) ** 2)
+    sc_flz    = 0.5 * w_fcz    *         (fl[2]    - u_ref[5])   ** 2
+
+    sc_frxy   = 0.5 * w_fcxy   * jnp.sum((fr[:2]   - u_ref[6:8]) ** 2)
+    sc_frz    = 0.5 * w_fcz    *         (fr[2]    - u_ref[8])   ** 2
+
+    sc_contact = 0.5 * w_eq * h_contact ** 2
+    sc_moment  = 0.5 * w_eq * jnp.dot(h_moment, h_moment)
+
     stage_cost = (
-          0.5 * w_pcomxy * jnp.sum((pcom[:2] - x_ref[0:2]) ** 2)
-        + 0.5 * w_pcomz  *         (pcom[2]  - x_ref[2])   ** 2
-        + 0.5 * w_vcomxy * jnp.sum((vcom[:2] - x_ref[3:5]) ** 2)
-        + 0.5 * w_vcomz  *         (vcom[2]  - x_ref[5])   ** 2
-        + 0.5 * w_c      * jnp.sum((c        - x_ref[6:9]) ** 2)
-        + 0.5 * w_vcz    *         (vc_z     - x_ref[9])   ** 2
-        + 0.5 * w_theta  *         (theta    - x_ref[10])  ** 2
-        + 0.5 * w_v      *         (v        - x_ref[11])  ** 2
-        + 0.5 * w_w      *         (w        - x_ref[12])  ** 2
-        + 0.5 * w_a      *         (a        - u_ref[0])   ** 2
-        + 0.5 * w_ac_z   *         (ac_z     - u_ref[1])   ** 2
-        + 0.5 * w_alpha  *         (alpha    - u_ref[2])   ** 2
-        + 0.5 * w_fcxy   * jnp.sum((fl[:2]   - u_ref[3:5]) ** 2)
-        + 0.5 * w_fcz    *         (fl[2]    - u_ref[5])   ** 2
-        + 0.5 * w_fcxy   * jnp.sum((fr[:2]   - u_ref[6:8]) ** 2)
-        + 0.5 * w_fcz    *         (fr[2]    - u_ref[8])   ** 2
-        + 0.5 * w_eq     *          h_contact ** 2
-        + 0.5 * w_eq     * jnp.dot(h_moment, h_moment)
+        sc_pcomxy
+        + sc_pcomz
+        + sc_vcomxy
+        + sc_vcomz
+        + sc_c
+        + sc_vcz
+        + sc_theta
+        + sc_v
+        + sc_w
+        + sc_a
+        + sc_ac_z
+        + sc_alpha
+        + sc_flxy
+        + sc_flz
+        + sc_frxy
+        + sc_frz
+        + sc_contact
+        + sc_moment
     )
- 
+
+
+    # ── TERMINAL COST: singoli contributi ────────────────────────────
+
+    tc_pcomxy = 0.5 * w_pcomxy * jnp.sum((pcom[:2] - x_ref[0:2]) ** 2)
+    tc_pcomz  = 0.5 * w_pcomz  *         (pcom[2]  - x_ref[2])   ** 2
+
+    tc_vcomxy = 0.5 * w_vcomxy * jnp.sum((vcom[:2] - x_ref[3:5]) ** 2)
+    tc_vcomz  = 0.5 * w_vcomz  *         (vcom[2]  - x_ref[5])   ** 2
+
+    tc_c      = 0.5 * w_c      * jnp.sum((c        - x_ref[6:9]) ** 2)
+    tc_vcz    = 0.5 * w_vcz    *         (vc_z     - x_ref[9])   ** 2
+
+    tc_theta  = 0.5 * w_theta  *         (theta    - x_ref[10])  ** 2
+    tc_v      = 0.5 * w_v      *         (v        - x_ref[11])  ** 2
+    tc_w      = 0.5 * w_w      *         (w        - x_ref[12])  ** 2
+
+    tc_contact   = 0.5 * w_eq * h_contact ** 2
+    tc_stability = 0.5 * w_eq * jnp.dot(h_stability, h_stability)
+
     term_cost = (
-          0.5 * w_pcomxy * jnp.sum((pcom[:2] - x_ref[:2])  ** 2)
-        + 0.5 * w_pcomz  *         (pcom[2]  - x_ref[2])   ** 2
-        + 0.5 * w_vcomxy * jnp.sum((vcom[:2] - x_ref[3:5]) ** 2)
-        + 0.5 * w_vcomz  *         (vcom[2]  - x_ref[5])   ** 2
-        + 0.5 * w_c      * jnp.sum((c        - x_ref[6:9]) ** 2)
-        + 0.5 * w_vcz    *         (vc_z     - x_ref[9])   ** 2
-        + 0.5 * w_theta  *         (theta    - x_ref[10])  ** 2
-        + 0.5 * w_v      *         (v        - x_ref[11])  ** 2
-        + 0.5 * w_w      *         (w        - x_ref[12])  ** 2
-        + 0.5 * w_eq     *          h_contact ** 2
-        + 0.5 * w_eq     * jnp.dot(h_stability, h_stability)
+        tc_pcomxy
+        + tc_pcomz
+        + tc_vcomxy
+        + tc_vcomz
+        + tc_c
+        + tc_vcz
+        + tc_theta
+        + tc_v
+        + tc_w
+        + tc_contact
+        + tc_stability
     )
- 
+
     return jnp.where(t == N, term_cost, stage_cost)
- 
+
 def wheeled_dfcip_hessian_gn(wheel_offset, N, W, reference, x, u, t):
     """Hessiana Gauss-Newton COERENTE con wheeled_dfcip_obj (stesso residuo)."""
     w_diag = jnp.array([

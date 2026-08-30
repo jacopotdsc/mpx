@@ -113,7 +113,7 @@ DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match ch
 ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
-NUM_TIMESTEPS = 100_000_000
+NUM_TIMESTEPS = 20_000_000
 NUM_EVALS = 10
 EPISODE_LENGTH = 1000
 NUM_ENVS = 1024
@@ -290,6 +290,8 @@ def progress(num_steps, metrics):
     entropy_data.append(entropy_loss)
     kl_data.append(kl_mean)
 
+    reward_text = f"reward: {y_data[-1]:.3f} ± {y_dataerr[-1]:.3f}"
+
     plt.clf()
     # x range si adatta ai dati raccolti finora, non al target finale: con
     # un training breve/interrotto l'xlim fisso a num_timesteps schiacciava
@@ -299,6 +301,11 @@ def progress(num_steps, metrics):
     plt.ylabel("reward per episode")
     plt.title(f"y={y_data[-1]:.3f} ± {y_dataerr[-1]:.3f}")
     plt.errorbar(x_data, y_data, yerr=y_dataerr, color="blue")
+    plt.gca().text(
+        0.02, 0.95, reward_text, transform=plt.gca().transAxes,
+        va="top", ha="left", fontsize=10, fontweight="bold",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+    )
     plt.savefig(os.path.join(CKPT_DIR, "training_curve.png"), dpi=120)
     plt.close()
 
@@ -310,6 +317,17 @@ def progress(num_steps, metrics):
         axes[0].set_ylabel("policy std")
         axes[0].legend(fontsize=8)
         axes[0].grid(True, alpha=0.3)
+        std_text = (
+            f"{reward_text}\n"
+            f"policy std: mean={std_mean:.4f}"
+            + (f" min={std_min:.4f}" if std_min is not None else "")
+            + (f" max={std_max:.4f}" if std_max is not None else "")
+        ) if std_mean is not None else reward_text
+        axes[0].text(
+            0.02, 0.95, std_text, transform=axes[0].transAxes,
+            va="top", ha="left", fontsize=9, fontweight="bold",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+        )
 
         axes[1].plot(x_data, entropy_data, color="tab:green", label="entropy_loss")
         axes[1].plot(x_data, kl_data, color="tab:red", label="kl_mean")
@@ -1353,7 +1371,7 @@ def main():
     parser.add_argument(
         "--name",
         type=str,
-        default="TitaJoystickE2EFlatTerrain",
+        default="TitaJoystickFlatTerrain",
         help="MuJoCo Playground environment name.",
     )
     parser.add_argument("--algo", type=str, choices=["ppo", "sac"], default="ppo",

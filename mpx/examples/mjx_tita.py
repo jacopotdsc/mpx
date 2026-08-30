@@ -247,6 +247,49 @@ def gather_raw_state(model, data, base_body_id, contact_ids):
         feet_vel[i] = vel[3:6]
     return pcom, vcom, centers, Rs, radii, feet_vel
 
+def build_hud(command_vec, target_vec, actual_vec, help_text):
+    """Build the HUD with actual, filtered command and keyboard target."""
+    labels = ("vx", "omega", "height")
+
+    title_lines = [
+        "",
+        *labels,
+    ]
+
+    value_lines = [
+        " Actual   Command   Target",
+    ]
+
+    for actual, command, target in zip(
+        actual_vec,
+        command_vec,
+        target_vec,
+    ):
+        value_lines.append(
+            f"{float(actual):+7.2f}  "
+            f"{float(command):+7.2f}  "
+            f"{float(target):+7.2f}"
+        )
+
+    entries = []
+
+    if help_text is not None:
+        entries.append((
+            mujoco.mjtFont.mjFONT_NORMAL,
+            mujoco.mjtGridPos.mjGRID_TOPLEFT,
+            help_text[0],
+            help_text[1],
+        ))
+
+    entries.append((
+        mujoco.mjtFont.mjFONT_NORMAL,
+        mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+        "\n".join(title_lines),
+        "\n".join(value_lines),
+    ))
+
+    return entries
+
 def main(headless=False, steps=500, scene="flat"):
 
     sim_logger = SimLogger()
@@ -308,8 +351,21 @@ def main(headless=False, steps=500, scene="flat"):
     tita_state = build_tita_state(model, data, base_body_name="base_link", contact_ids=contact_ids)
     x0, theta_prev = get_dfip_current_state(mpc, tita_state, theta_prev=theta_prev)
     mpc_state = mpc.init_state()
+    hud_x0 = x0
 
-    warm_command = jnp.asarray(command_handle.mpc_wheeled_input(config.com_z_to_track)) 
+    COMMAND_SMOOTHING = 0.02
+
+    # Raw keyboard target: [vx, vz, omega, height]
+    target_command = np.asarray(
+        command_handle.mpc_wheeled_input(config.com_z_to_track),
+        dtype=np.float64,
+    )
+
+    # The filtered command starts with zero planar velocity, but with the correct
+    # initial height. Starting height from zero would give the MPC an invalid
+    # vertical command during startup.
+    command = np.array([0.0, 0.0, 0.0, config.com_z_to_track,], dtype=np.float64)
+    warm_command = jnp.asarray(command)
     mpc_state, reference = solve_mpc(mpc_state, x0[None, :], warm_command[None, :])
     
     qpos_np = jnp.asarray(data.qpos)[None, :]
@@ -339,7 +395,7 @@ def main(headless=False, steps=500, scene="flat"):
     mpc_state = mpc.init_state()
 
     def step_controller(mpc_state, tau, qddot, reference, theta_prev=theta_prev):
-        nonlocal counter
+        nonlocal counter, command, target_command, hud_x0
 
         print(f"\n=== step {counter} ===")
         
@@ -369,13 +425,24 @@ def main(headless=False, steps=500, scene="flat"):
             state_start = timer()
             tita_state, x0, theta_prev = process_tita_state(*raw, theta_prev)
             state_stop = timer()
+            hud_x0 = x0
             print(f"[timing] state {1e3 * (state_stop - state_start):.2f} ms")
-            command = jnp.asarray(command_handle.mpc_wheeled_input(config.com_z_to_track))
             #print(F"command: {command[0]:.2f} m/s forward, {command[1]:.2f} m/s lateral, {command[2]:.2f} rad/s angular")
 
             print(f"[timing] init time: {1e3 * (init_stop - init_start):.2f} ms")
             print(f"---- {counter}%{period} = {counter % period} ----")
+            target_command = np.asarray(
+                command_handle.mpc_wheeled_input(config.com_z_to_track),
+                dtype=np.float64,
+            )
             if counter % period == 0:
+                command += COMMAND_SMOOTHING * (
+                    target_command - command
+                )
+
+                # In mjx_policy_tita the height target is not smoothed.
+                command[3] = target_command[3]
+
                 mpc_start = timer()
                 mpc_state, reference = solve_mpc(mpc_state, x0[None, :], command[None, :])
                 jax.block_until_ready((
@@ -532,10 +599,40 @@ def main(headless=False, steps=500, scene="flat"):
             viewer.cam.distance *= 5.5
             viewer.sync()
             while viewer.is_running():
-                overlay_text = command_handle.consume_overlay_text()
                 tic = timer()
-                if overlay_text is not None:
-                    viewer.set_texts((None, None, *overlay_text))
+                overlay = command_handle.consume_overlay_text()
+                if overlay is not None:
+                    help_cache = overlay
+
+                help_text = (
+                    f"{help_cache[0]} | PgUp/PgDown: z_com_ref",
+                    help_cache[1],
+                )
+
+                actual_vec = np.array([
+                    float(hud_x0[11]),  # Actual vx
+                    float(hud_x0[12]),  # Actual omega
+                    float(hud_x0[2]),   # Actual CoM height
+                ])
+
+                command_vec = np.array([
+                    float(command[0]),  # Filtered vx
+                    float(command[2]),  # Filtered omega
+                    float(command[3]),  # Commanded height
+                ])
+
+                target_vec = np.array([
+                    float(target_command[0]),  # Keyboard target vx
+                    float(target_command[2]),  # Keyboard target omega
+                    float(target_command[3]),  # Keyboard target height
+                ])
+
+                viewer.set_texts(build_hud(
+                    command_vec=command_vec,
+                    target_vec=target_vec,
+                    actual_vec=actual_vec,
+                    help_text=help_text,
+                ))
 
                 start_step = timer()
                 mpc_state, tau, qddot, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, qddot, reference, theta_prev=theta_prev)

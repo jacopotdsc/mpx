@@ -11,6 +11,9 @@ c_generated_code/
 *.egg*info/
 mpx/examples/plots/**
 **/checkpoints/**
-#!**/checkpoints/TitaJoystickE2EFlatTerrain/
-#!**/checkpoints/TitaJoystickE2EFlatTerrain/saved/
-#!**/checkpoints/TitaJoystickE2EFlatTerrain/saved/**
+!**/checkpoints/TitaJoystickE2EFlatTerrain/
+!**/checkpoints/TitaJoystickE2EFlatTerrain/saved/
+!**/checkpoints/TitaJoystickE2EFlatTerrain/saved/**
+#!**/checkpoints/TitaJoystickFlatTerrain/
+#!**/checkpoints/TitaJoystickFlatTerrain/saved/
+#!**/checkpoints/TitaJoystickFlatTerrain/saved/**
