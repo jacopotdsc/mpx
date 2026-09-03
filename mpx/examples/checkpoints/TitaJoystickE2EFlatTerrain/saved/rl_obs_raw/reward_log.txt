@@ -1,0 +1,181 @@
+============================================================
+  PPO Training  —  TitaJoystickE2EFlatTerrain
+  date         : 2026-09-01 13:06:08
+  JAX backend  : gpu
+  devices      : [CudaDevice(id=0)]
+  GPU name:    :   
+--- network ---
+  distribution : tanh_normal
+  hidden layers: (512, 256, 128)
+  entropy cost : 0.01
+  policy obs   : state
+  value obs    : privileged_state
+  policy net shape: (34,)
+  value net shape : (85,)
+  obs size     : {'privileged_state': (85,), 'state': (34,)}
+  action size  : 8
+  --- PPO params ---
+  num_timesteps            : 20000000
+  num_evals                : 10
+  reward_scaling           : 1.0
+  episode_length           : 1000
+  normalize_observations   : True
+  action_repeat            : 1
+  unroll_length            : 20
+  num_minibatches          : 32
+  num_updates_per_batch    : 4
+  discounting              : 0.99
+  learning_rate            : 0.0003
+  entropy_cost             : 0.01
+  num_envs                 : 1024
+  batch_size               : 256
+  max_grad_norm            : 1.0
+  network_factory          : {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}
+  num_resets_per_eval      : 10
+  seed                     : 0
+  deterministic_eval       : True
+============================================================
+
+--- environment config ---
+Kd: 1.0
+Kd_wheel: 0.5
+Kp: 50.0
+action_repeat: 1
+action_scale_pos: 0.5
+action_scale_vel: 25.0
+command_config:
+  a:
+  - 1.0
+  - 0.5
+  b:
+  - 0.75
+  - 0.75
+  h:
+  - 0.4
+  - 0.4
+ctrl_dt: 0.01
+episode_length: 1000
+impl: jax
+naconmax: 32768
+njmax: 40
+noise_config:
+  level: 0.0
+  scales:
+    gravity: 0.05
+    gyro: 0.2
+    joint_pos: 0.01
+    joint_vel: 1.5
+    linvel: 0.1
+pert_config:
+  enable: false
+  kick_durations:
+  - 0.05
+  - 0.2
+  kick_wait_times:
+  - 1.0
+  - 3.0
+  velocity_kick:
+  - 0.0
+  - 3.0
+reward_config:
+  base_height_target: 0.4
+  only_positive_rewards: false
+  posture_cmd_sigma: 0.25
+  scales:
+    action_rate: -0.01
+    ang_vel_xy: -0.3
+    base_height: -1.0
+    dof_pos_limits: -1.0
+    dof_vel: -0.0
+    orientation: -1.0
+    posture: -1.0
+    termination: -100.0
+    torques: -0.0001
+    tracking_ang_vel: 0.5
+    tracking_lin_vel: 1.0
+  tracking_sigma: 0.0625
+sim_dt: 0.002
+soft_joint_pos_limit_factor: 0.95
+
+============================================================
+
+  eval#0 
+	num_steps =            0
+	reward = -3.661 ± 0.064
+	std = n/a
+	kl = n/a
+	elapsed 00:16
+	time 13:06:24
+-------------------------------
+  eval#1 
+	num_steps =    3,276,800
+	reward = +1.966 ± 2.929
+	std = 0.4706
+	kl = 0.0329
+	elapsed 02:09
+	time 13:08:16
+-------------------------------
+  eval#2 
+	num_steps =    6,553,600
+	reward = +8.726 ± 6.085
+	std = 0.2792
+	kl = 0.0407
+	elapsed 04:00
+	time 13:10:08
+-------------------------------
+  eval#3 
+	num_steps =    9,830,400
+	reward = +13.658 ± 0.863
+	std = 0.1620
+	kl = 0.0447
+	elapsed 05:49
+	time 13:11:56
+-------------------------------
+  eval#4 
+	num_steps =   13,107,200
+	reward = +14.033 ± 0.689
+	std = 0.1130
+	kl = 0.0541
+	elapsed 07:21
+	time 13:13:29
+-------------------------------
+  eval#5 
+	num_steps =   16,384,000
+	reward = +13.986 ± 0.958
+	std = 0.0953
+	kl = 0.0603
+	elapsed 08:53
+	time 13:15:01
+-------------------------------
+  eval#6 
+	num_steps =   19,660,800
+	reward = +13.943 ± 1.022
+	std = 0.0887
+	kl = 0.0546
+	elapsed 10:25
+	time 13:16:32
+-------------------------------
+  eval#7 
+	num_steps =   22,937,600
+	reward = +14.172 ± 0.264
+	std = 0.0848
+	kl = 0.0542
+	elapsed 11:56
+	time 13:18:04
+-------------------------------
+  eval#8 
+	num_steps =   26,214,400
+	reward = +14.228 ± 0.187
+	std = 0.0842
+	kl = 0.0482
+	elapsed 13:27
+	time 13:19:35
+-------------------------------
+  eval#9 
+	num_steps =   29,491,200
+	reward = +14.225 ± 0.175
+	std = 0.0835
+	kl = 0.0503
+	elapsed 14:58
+	time 13:21:06
+-------------------------------

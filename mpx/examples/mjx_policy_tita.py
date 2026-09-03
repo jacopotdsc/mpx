@@ -42,7 +42,7 @@ jax.config.update("jax_enable_x64", True)
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.abspath(os.path.join(dir_path, "..")))
-TITA_PATH = os.path.join(dir_path, "plots", "tita_validation")
+CKPT_DIR = "."
 
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 
@@ -57,6 +57,13 @@ from mujoco_playground import registry
 
 import mpx.utils.sim as sim_utils
 from plot_rollout_info import _save_sim_video
+from plot_validation import (
+    SimLogger,
+    plot_velocity_tracking,
+    plot_velocity_error,
+    plot_com_and_forces,
+    plot_all,
+)
 
 
 jax.config.update("jax_compilation_cache_dir", "./jax_cache")
@@ -377,9 +384,14 @@ def main(
     headless: bool = False,
     steps: int = EPISODE_LENGTH,
     debug_cmd: bool = False,
+    zero: bool = False,
 ):
+    global CKPT_DIR
+
     print("=" * 60)
     print(f"  Interactive policy test — {env_name}")
+    if zero:
+        print("  [NET-INIT] --zero flag: forcing zero actions (ignoring policy network).")
     print("=" * 60)
 
     # --name: same MuJoCo Playground environment as training/eval, but with a
@@ -390,11 +402,20 @@ def main(
         env_name,
         config_overrides={"episode_length": EPISODE_LENGTH},
     )
+    sim_logger = SimLogger()
 
     # --load: same checkpoint layout/resolution as train_srbd.py.
     env_base_dir = os.path.join(ckpt_root, env_name)
     run_dir, load_suffix = _resolve_load(env_base_dir, load_arg)
-    params = load_params(run_dir, suffix=load_suffix)
+
+    CKPT_DIR = run_dir
+    run_tag = time.strftime("run_%Y%m%d_%H%M%S")
+    joystick_eval_dir = os.path.join(CKPT_DIR, "joystick_evaluation", run_tag)
+    os.makedirs(joystick_eval_dir, exist_ok=True)
+
+    params = load_params(CKPT_DIR, suffix=load_suffix)
+
+    print(f"  [INFO] Joystick evaluation directory: {joystick_eval_dir}")
 
     policy_fn = build_policy(env, params)
     jit_infer = jax.jit(policy_fn)
@@ -536,10 +557,15 @@ def main(
         tc_before = np.asarray(state.info["target_command"][0])
         steps_before = int(np.asarray(state.info["steps_until_next_cmd"]).reshape(-1)[0])
 
-        obs0 = take_env0(state.obs)
-        rng, act_rng = jax.random.split(rng)
-        action0, _ = jit_infer(obs0, act_rng)
-        action = jnp.broadcast_to(action0, (EVAL_BATCH, action_size))
+        if zero:
+            # --zero: ignore the policy network entirely, matching
+            # train_srbd.py --zero (action = zero_action every step).
+            action = _zero_actions
+        else:
+            obs0 = take_env0(state.obs)
+            rng, act_rng = jax.random.split(rng)
+            action0, _ = jit_infer(obs0, act_rng)
+            action = jnp.broadcast_to(action0, (EVAL_BATCH, action_size))
 
         state = env_step(state, action)
 
@@ -554,6 +580,29 @@ def main(
                 f"steps_until_next_cmd {steps_before}->{steps_after}"
             )
 
+        info = state.info
+
+        command = np.asarray(info["command"][0])
+
+        logger_cmd = np.array([
+            command[0],                                      # vx
+            0.0,                                             # vz
+            command[1],                                      # omega
+            float(np.asarray(info["base_height_target"][0])), # height
+        ])
+
+        sim_logger.append(
+            t=int(np.asarray(info["step"][0])),
+            model=viewer_model,
+            data=viewer_data,
+            tita_state=np.asarray(info["tita_state"][0]),
+            x0=np.asarray(info["dfcip_state"][0]),
+            cmd=logger_cmd,
+            ext_force=np.asarray(info["robot"]["ext_force"][0]),
+            fl=None,
+            fr=None,
+)
+
         return bool(state.done[0])
 
     # bind batched_step to a local name for readability
@@ -561,6 +610,20 @@ def main(
 
     def finalize_outputs():
         print("\n[finalize] Saving outputs...")
+
+        try:
+            _renderer.close()
+        except Exception:
+            pass
+        try:
+            plot_all(
+                sim_logger,
+                save_path=joystick_eval_dir,
+                show=False
+            )
+        except Exception as e:
+            print(f"[finalize] error on generating all plots")
+            pass
         try:
             for slow, name in (
                 (1.0, "policy_simulation_video.mp4"),
@@ -568,7 +631,7 @@ def main(
                 (15.0, "policy_simulation_video_slow15.mp4"),
             ):
                 _save_sim_video(
-                    video_dir=TITA_PATH,
+                    video_dir=joystick_eval_dir,
                     video_fps=int(round(1.0 / env_dt)),
                     frames=_sim_frames,
                     slowdown_factor=slow,
@@ -576,9 +639,6 @@ def main(
                 )
         except Exception as exc:
             print(f"[finalize] failed to save video: {exc}")
-        try:
-            _renderer.close()
-        except Exception:
             pass
 
     try:
@@ -676,6 +736,10 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=EPISODE_LENGTH)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
+        "--zero", action="store_true",
+        help="Force zero actions (ignore policy network), like train_srbd.py --zero.",
+    )
+    parser.add_argument(
         "--debug-cmd",
         action="store_true",
         help="Print keyboard target / target_command / command / "
@@ -702,4 +766,5 @@ if __name__ == "__main__":
         headless=args.headless,
         steps=args.steps,
         debug_cmd=args.debug_cmd,
+        zero=args.zero,
     )

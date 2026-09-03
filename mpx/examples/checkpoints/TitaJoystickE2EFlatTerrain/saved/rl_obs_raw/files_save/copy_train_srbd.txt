@@ -111,7 +111,6 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
 DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match checkpoint
 ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for safe exploration)
-ZERO_INIT_LOAD = True # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
 NUM_TIMESTEPS = 20_000_000
