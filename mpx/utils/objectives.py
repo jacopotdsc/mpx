@@ -72,6 +72,16 @@ def wheeled_dfcip_obj(wheel_offset, N, W, reference, x, u, t):
 
     sc_contact = 0.5 * w_eq * h_contact ** 2
     sc_moment  = 0.5 * w_eq * jnp.dot(h_moment, h_moment)
+    # h_fz = sum(min(fz,0)^2) is already a squared hinge residual (not a raw
+    # residual to be squared again), so it's combined the same way sc_contact
+    # combines its (already-scalar) residual: previously computed but never
+    # added here, so the MPC's own force references were free to go negative
+    # (pull on the ground) with zero penalty; only the downstream WBC QP's
+    # friction cone constrained Fz>=0, and the WBC isn't required to honor
+    # the MPC's force plan. Wiring it in keeps the MPC's own GRF references
+    # physically valid, which matters most exactly when combined vx+omega
+    # commands shift the planned per-wheel normal load.
+    sc_hfz     = 0.5 * w_eq * h_fz
 
     stage_cost = (
         sc_pcomxy
@@ -92,6 +102,7 @@ def wheeled_dfcip_obj(wheel_offset, N, W, reference, x, u, t):
         + sc_frz
         + sc_contact
         + sc_moment
+        + sc_hfz
     )
 
 
@@ -174,7 +185,7 @@ def wheeled_dfcip_hessian_gn(wheel_offset, N, W, reference, x, u, t):
             u - u_ref,
             h_contact,
             h_moment,
-            jnp.zeros_like(h_fz),
+            h_fz,
             jnp.zeros_like(h_stability),
         ])  # (30,)
  

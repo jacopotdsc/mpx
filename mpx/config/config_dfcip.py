@@ -33,7 +33,14 @@ step_height = 0.065  # Step height in meters
 robot_height = 0.44  # Height of the robot's base in meters
 com_z_to_track = 0.4
 clearence_speed = 0.4
-mu = 0.6  # Coefficient of friction
+# NOTE: was 0.6. The C++ baseline (WholeBodyController's WBC friction-cone
+# constraint) is initialized to 0.5 in getDefaultParams() but overridden to
+# 0.9 at runtime in WalkingManager::init (TITA_MJ/src/WalkingManager.cpp).
+# 0.6 gave the WBC QP a much tighter friction budget than the real
+# controller, which starves the differential wheel forces needed for
+# combined vx+omega commands and was a primary cause of instability under
+# combined commands. Matched to the real C++ runtime value.
+mu = 0.9  # Coefficient of friction (matches C++ runtime WalkingManager::init override)
 use_terrain_estimator = False  # Whether to use state estimation
 # Initial positions, orientations, and joint angles
 p0 = jnp.array([0, 0, robot_height])  # Initial position of the robot's base
@@ -76,9 +83,18 @@ Kp_motion = 5e1
 Kd_motion = 3e1
 Kp_wheel  = 5e1
 Kd_wheel  = 3e1 
-Kp_reg    = 1e2 
-Kd_reg    = 2e1 
-w_posture = 1e-1
+Kp_reg    = 1e2
+Kd_reg    = 2e1
+# NOTE: was 1e-1. The C++ baseline's joint-posture-regulation WBC task has
+# weight_regulation = 0.0 both in getDefaultParams() and after the
+# WalkingManager::init override (TITA_MJ/src/WholeBodyController.cpp /
+# WalkingManager.cpp) -- it is fully dead in the reference controller. A
+# nonzero posture task here pulls the legs toward the fixed q0 pose and
+# competes with the CoM/wheel/base tasks specifically when both a forward
+# velocity and a yaw-rate command are active simultaneously (the leg
+# configuration needed to satisfy both differs from q0). Zeroed to match
+# the real C++ runtime behavior.
+w_posture = 0.0
 
 w_qddot     = 1e-12
 w_com       = 1e0
@@ -108,6 +124,25 @@ Qgrf = jnp.diag(jnp.array([1e0, 1e0, 1e0]))  # Cost matrix for
 
 # ── MPC cost weights ──────────────────────────────────────────────
 # State weights
+#
+# NOTE on w_pcomxy/w_pcomz/w_vcomxy/w_vcomz: an earlier pass rebalanced
+# these four to match the C++ baseline's nominal DFIPActionModel ctor
+# weights (C++: 10 / 100000 / 10 / 1 vs this file's original 0 / 2e4 / 3e2
+# / 1e1) on the theory that the JAX port had drifted 30x too aggressive on
+# CoM-xy-velocity tracking and 5x too weak on CoM-height tracking. That
+# rebalance was tested head-to-head against the original values on the
+# combined vx=0.6/omega=0.4 command and made things measurably WORSE: the
+# original weights track that combined command stably (no NaN, no fall,
+# steady-state ~0.24 m/s / ~0.43 rad/s over a 5s hold), while the
+# "C++-matched" weights produced a NaN WBC torque and a fall within ~2-4s.
+# Reverted to the original values. The likely explanation is that the C++
+# weights were tuned in a controller with its own MPC internal-step /
+# call-rate mismatch (see AUDIT_CPP_CONTROLLER.md S2 -- the C++ solver's
+# warm-start trajectory advances 5x faster than real elapsed time), so its
+# absolute weight magnitudes aren't actually transferable 1:1 to this
+# port's clean (non-galloping) timing -- numeric parity with the C++
+# source is not the same as behavioral parity here. Verified experimentally
+# rather than assumed; see AUDIT_CPP_CONTROLLER.md / AUDIT_MPX_CONTROLLER.md.
 w_pcomxy = 0e0      # posizione xy
 w_pcomz  = 2e4     # altezza CoM
 w_vcomxy = 3e2      # velocità xy CoM
@@ -115,8 +150,25 @@ w_vcomz  = 1e1      # velocità z CoM
 w_c      = 0e0      # posizione com_ground projection
 w_vcz    = 0e0      # velocità com_ground projection
 w_theta  = 0e0      # heading
+# w_v: C++'s equivalent weight (w_v_k_) is aliased with vc_z's weight and
+# is left at 0.0 -- an accidental bug (DFIPActionModel.hpp reuses the same
+# member for two different residuals), not an intentional design choice.
+# Keeping forward-speed tracking active here (unlike the buggy C++ 0) is
+# intentional: it is required to hit the vx tracking targets and does not
+# reproduce a bug just for parity's sake.
 w_v      = 1e1      # velocità com_ground projection
 w_omega  = 5e0      # velocità angolare
+# NOTE: tried raising w_v to 15 and 40 to fix the residual forward-speed
+# undershoot under the combined vx=0.6/omega=0.4 command (see fix log in
+# AUDIT_MPX_CONTROLLER.md). Both reintroduced the same NaN-WBC-torque
+# fall that mu/posture/h_fz/fz_min fixed for the single-axis and milder
+# combined cases -- even +50% (15) fell within ~4s. This operating point
+# is right at a stability boundary that's sensitive to small increases in
+# forward-velocity-tracking aggressiveness while turning; left at the
+# stable value (10). The remaining combined-command undershoot looks like
+# it needs a structural fix (WBC/QP feasibility margin, more than 1 FDDP
+# iteration under a stiffer cost, or better constraint softening), not
+# further cost-weight tuning -- see AUDIT_MPX_CONTROLLER.md.
 
 # Control weights – ruote (attuatori principali, non troppo economici)
 w_a      = 1e-1      # accelerazione lineare
