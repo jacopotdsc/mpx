@@ -1280,12 +1280,26 @@ def whole_body_interface_wheeled_legged_qp(
     #                   0,  1, -mu,
     #                  -1,  0, -mu,
     #                   0, -1, -mu;
+    #                   0,  0, -1    <- added: Fz >= fz_min
+    # The 4-row pyramid alone only constrains |Fx|,|Fy| <= mu*Fz -- it has no
+    # explicit lower bound on Fz itself, so a combined vx+omega command that
+    # pushes the optimizer toward a small/negative planned normal force on
+    # one wheel makes this constraint block infeasible (mu*Fz<0 with the
+    # |Fx|,|Fy|<=mu*Fz rows admits no solution). qpax's QP solver does not
+    # degrade gracefully on infeasibility -- it was observed to return NaN
+    # torques under the vx=0.6/omega=0.4 combined case, which is the root
+    # cause of the residual instability there (confirmed by an ablation:
+    # the NaN reproduces identically with/without the MPC-side h_fz fix
+    # above, isolating it to this QP, not the MPC). Adding an explicit small
+    # positive floor on Fz keeps the friction-cone block always feasible.
+    fz_min = 5.0  # N, small margin -- not meant to be a real load-bearing bound
     C_force_block = jnp.array([
         [ 1.0,  0.0, -mu_],
         [ 0.0,  1.0, -mu_],
         [-1.0,  0.0, -mu_],
         [ 0.0, -1.0, -mu_],
-    ])  # (4, 3)
+        [ 0.0,  0.0, -1.0],
+    ])  # (5, 3)
 
     # C_force_left  = C_force_block * l_contact_frame'
     # C_force_right = C_force_block * r_contact_frame'
@@ -1299,10 +1313,12 @@ def whole_body_interface_wheeled_legged_qp(
     C_force_right = jax.scipy.linalg.block_diag(
         *[C_force_right_one for _ in range(n_contacts)]
     )
-    # d_min_force_one = -10000 * ones(4*n_contacts)
-    d_min_force_one = -10000.0 * jnp.ones(4 * n_contacts)
-    # d_max_force_one = zeros(4*n_contacts)
-    d_max_force_one = jnp.zeros(4 * n_contacts)
+    # d_min_force_one = -10000 * ones(5*n_contacts); d_max_force_one = 0 for
+    # the 4 friction-pyramid rows, -fz_min for the added Fz>=fz_min row.
+    d_min_force_one = -10000.0 * jnp.ones(5 * n_contacts)
+    d_max_force_one = jnp.tile(
+        jnp.array([0.0, 0.0, 0.0, 0.0, -fz_min]), n_contacts
+    )
 
     # ══════════════════════════════════════════════════════════════════════
     #  6. EQUALITY CONSTRAINTS  A, b
@@ -1389,8 +1405,8 @@ def whole_body_interface_wheeled_legged_qp(
     #
     #  C = [C_acc | 0 | 0;  0 | C_force_left | 0;  0 | 0 | C_force_right]
     # ══════════════════════════════════════════════════════════════════════
-    zeros_acc_f = jnp.zeros((4 * n_contacts, nv))
-    zeros_f_f   = jnp.zeros((4 * n_contacts, n_f * n_contacts))
+    zeros_acc_f = jnp.zeros((5 * n_contacts, nv))
+    zeros_f_f   = jnp.zeros((5 * n_contacts, n_f * n_contacts))
 
     C_ineq = jnp.block([
         # joint limits rows: (2*nj, n_var)

@@ -297,6 +297,7 @@ def main(headless=False, steps=500, scene="flat"):
         dir_path + f"/../data/tita/scene_{scene}.xml"
     )
     data = mujoco.MjData(model)
+    #sim_frequency = float(config.simulation_frequency)
     sim_frequency = float(config.whole_body_frequency)
     model.opt.timestep = 1.0 / sim_frequency
 
