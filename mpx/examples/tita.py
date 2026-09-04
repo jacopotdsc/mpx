@@ -43,7 +43,7 @@ BASE_DIR = dir_path
 TITA_PATH = os.path.join(dir_path, "plots","tita_outputs")
 os.makedirs(TITA_PATH, exist_ok=True)
 
-MAX_STEPS = round(int( (2 + config.T_TRAJECTORY ) / config.dt_ref) )
+MAX_STEPS = round(int( (2 + config.T_TRAJECTORY ) / config.dt_sim) )
 DEFAULT_VIDEO_SLOWDOWN_FACTOR = 4.0
 LLC_ROLLOUT_CSV = os.path.join(TITA_PATH, "rollout_info_llc.csv")
 TORQUE_LIST = []
@@ -697,7 +697,7 @@ def main(headless=False, steps=500, scene="flat"):
     )
     nj = model.nv - 6
     data = mujoco.MjData(model)
-    sim_frequency = float(config.whole_body_frequency)
+    sim_frequency = float(config.simulation_frequency)
     video_fps = max(1, int(round(sim_frequency / max(DEFAULT_VIDEO_SLOWDOWN_FACTOR, 1e-6))))
     counter = 0
 
@@ -772,7 +772,7 @@ def main(headless=False, steps=500, scene="flat"):
 
     # ── print MPC config parameters ──────────────────────────────────────
     _mpc_params = [
-        "dt_mpc", "dt_ref", "N", "mpc_frequency", "grav", "whole_body_frequency",
+        "dt_mpc", "dt_sim", "N", "mpc_frequency", "grav", "simulation_frequency", "whole_body_frequency",
         "duty_factor", "step_freq", "step_height", "robot_height", "clearence_speed",
         "mu", "mass",
         "w_pcomxy", "w_pcomz", "w_vcomxy", "w_vcomz", "w_c", "w_vcz",

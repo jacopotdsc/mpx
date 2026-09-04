@@ -9,13 +9,13 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(os.path.abspath(os.path.join(dir_path, "..")))
+# Insert at the front so that THIS working tree wins over any editable/site-packages
+# install of mpx (an editable install of another checkout would otherwise shadow it).
+sys.path.insert(0, os.path.abspath(os.path.join(dir_path, "..", "..")))
 TITA_PATH = os.path.join(dir_path, "plots","tita_validation")
 
 import mpx.config.config_dfcip as config
 
-dir_path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(os.path.abspath(os.path.join(dir_path, "..")))
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 
 import jax.numpy as jnp
@@ -27,6 +27,7 @@ import numpy as np
 import mpx.utils.mpc_wrapper_dfcip as mpc_wrapper_dfcip
 import mpx.utils.mpc_utils as mpc_utils
 import mpx.utils.sim as sim_utils
+from mpx.utils.timing import derive_timing, check_model_timestep, describe_timing
 from plot_validation import (
     SimLogger,
     plot_velocity_tracking,
@@ -297,8 +298,14 @@ def main(headless=False, steps=500, scene="flat"):
         dir_path + f"/../data/tita/scene_{scene}.xml"
     )
     data = mujoco.MjData(model)
-    sim_frequency = float(config.whole_body_frequency)
-    model.opt.timestep = 1.0 / sim_frequency
+    # MuJoCo integrates at simulation_frequency (500 Hz); MPC and WBC are updated
+    # at mpc_frequency / whole_body_frequency (100 Hz). The XML timestep must
+    # already agree with 1/simulation_frequency (checked, never silently changed).
+    timing = derive_timing(config)
+    check_model_timestep(model.opt.timestep, timing)
+    sim_frequency = float(timing["sim_f"])
+    model.opt.timestep = timing["dt_sim"]
+    print("[timing] " + describe_timing(timing, int(getattr(config, "mpc_iterations", 1))))
 
     # ── MuJoCo video recording ───────────────────────────────────────────
     _sim_frames: list = []
@@ -388,7 +395,8 @@ def main(headless=False, steps=500, scene="flat"):
     )
     tau.block_until_ready()
 
-    period = int(sim_frequency / config.mpc_frequency)
+    period = timing["mpc_period_sim_steps"]        # simulation steps between MPC updates (5)
+    wbc_period = timing["wbc_period_sim_steps"]    # simulation steps between WBC updates (5)
     counter = 0
     theta_prev = 0.0
     qddot = np.zeros_like(model.nv)
@@ -400,6 +408,12 @@ def main(headless=False, steps=500, scene="flat"):
         print(f"\n=== step {counter} ===")
         
         init_start = timer()
+        # Forward pass (mj_step1) so that every derived quantity read below
+        # (geom positions/velocities, subtree CoM) corresponds to the SAME
+        # qpos/qvel handed to the WBC. After mj_step the derived quantities still
+        # belong to the pre-integration state (one simulation step old), which
+        # created spurious ~2 mm / 2 mm/s errors in the WBC task PD terms.
+        mujoco.mj_step1(model, data)
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
 
@@ -457,6 +471,10 @@ def main(headless=False, steps=500, scene="flat"):
                 mpc_stop = timer()
                 print(f"[timing] MPC time: {1e3 * (mpc_stop - mpc_start):.2f} ms")
 
+            if counter % wbc_period == 0:
+                # WBC update: uses the latest MPC first-stage control and the
+                # current measured state. tau and qddot are then held for
+                # wbc_period simulation steps.
                 pl_world_wbc = tita_state[6:9][None, :]
                 pr_world_wbc = tita_state[9:12][None, :]
                 dpl_world_wbc = tita_state[12:15][None, :]
@@ -501,25 +519,27 @@ def main(headless=False, steps=500, scene="flat"):
         extra_start = timer()
         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
 
-        q_target = np.array([0.0, 0.5, -1.0, 0.0,]*2)
-
-        dt = model.opt.timestep
+        # Outer joint PD on top of the held WBC torque, evaluated at every
+        # simulation step: it predicts the joint motion ONE SIMULATION STEP ahead
+        # (dt_sim = 0.002 s, not dt_wbc) from the current joint state using the
+        # held WBC joint accelerations.
+        dt_sim = model.opt.timestep
         qpos_joint  = qpos[7:]
         qvel_joint  = qvel[6:]
-        qddot_joint = np.asarray(qddot[0, 6:])   # JAX → numpy una volta sola, a monte
+        qddot_joint = np.asarray(qddot[0, 6:])   # JAX -> numpy once per step
 
-        dq_desired = qvel_joint + qddot_joint * dt
-        q_desired  = qpos_joint + qvel_joint * dt + 0.5 * qddot_joint * dt**2
+        dq_desired = qvel_joint + qddot_joint * dt_sim
+        q_desired  = qpos_joint + qvel_joint * dt_sim + 0.5 * qddot_joint * dt_sim**2
 
         p_ctrl = 35.0 * (q_desired - qpos_joint)
         d_ctrl = 10.0 * (dq_desired - qvel_joint)
 
-        p_ctrl[[3, 7]] = 0.0        # ruote: niente termine P
+        p_ctrl[[3, 7]] = 0.0        # wheels: no position term
 
         total_ctrl = p_ctrl + d_ctrl + np.asarray(tau[0])
         data.ctrl = total_ctrl
 
-        mujoco.mj_step(model, data)
+        mujoco.mj_step2(model, data)   # integrate (mj_step1 was called at the top of this step)
         update_com_tracking_camera(
             _sim_cam,
             model,
@@ -539,8 +559,7 @@ def main(headless=False, steps=500, scene="flat"):
         print("\n[finalize] Saving outputs...")
 
         try:
-            # Se catturi ogni 2 step, hai 250 frame/s simulati se sim_frequency=500.
-            # Quindi fps corretto per video real-time:
+            # One frame every 2 simulation steps = 250 frames per simulated second at 500 Hz.
             video_fps = int(sim_frequency / 2)
 
             _save_sim_video(
@@ -584,7 +603,6 @@ def main(headless=False, steps=500, scene="flat"):
     try:
         if headless:
             for _ in range(steps):
-                cmd = command_handle.get_command()
                 mpc_state, tau, qddot, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, qddot, reference, theta_prev=theta_prev)
                 if touch_floor:
                     print(f"Base touched the floor at step {counter}. Ending simulation.")

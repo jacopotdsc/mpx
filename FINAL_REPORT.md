@@ -1,3 +1,5 @@
+> **Superseded (2026-09-04):** the combined-command analysis, the validation numbers in section 9 and the timing description in this report refer to the previous revision. See `COMBINED_COMMAND_FIX.md` for the demonstrated root cause, the new timing scheme (sim 500 Hz, MPC/WBC 100 Hz, dt_mpc 0.01, N 50) and the current results.
+
 # TITA MPC/WBC (JAX/MPX) + Residual RL — Investigation & Fix Report
 
 Date: 2026-09-03. Repos touched (as authorized): `TITA-dynamic-obstacle-avoidance` (`crocoddyl`),

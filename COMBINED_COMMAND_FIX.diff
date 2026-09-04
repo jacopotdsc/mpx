@@ -1,0 +1,1486 @@
+diff --git a/mpx/config/config_dfcip.py b/mpx/config/config_dfcip.py
+index a8031bc..e9dbb10 100644
+--- a/mpx/config/config_dfcip.py
++++ b/mpx/config/config_dfcip.py
+@@ -16,15 +16,35 @@ joints_name = [
+ contact_frame = ['left_leg_4_collision', 'right_leg_4_collision',]
+ body_name = ['left_leg_4', 'right_leg_4']
+ 
+-# Time and stage parameters
+-#dt = 0.002  # Time step in seconds
+-dt_mpc = 0.002
+-N = 250        # Number of stages
++# ── Timing ───────────────────────────────────────────────────────────────
++# Three independent rates. MuJoCo integrates at simulation_frequency; the MPC
++# and the whole-body QP are updated at mpc_frequency / whole_body_frequency and
++# the resulting torque / joint accelerations are held between updates
++# (simulation_frequency // whole_body_frequency simulation steps).
++# The derived quantities and all consistency checks live in
++# mpx.utils.timing.derive_timing (called at the end of this file).
++simulation_frequency = 500   # Hz  -> dt_sim = 0.002 s (must equal the XML timestep)
++whole_body_frequency = 100   # Hz  -> dt_wbc = 0.01 s (WBC update period)
++mpc_frequency = 100          # Hz  -> MPC update period 0.01 s
++dt_mpc = 0.01                # s   MPC prediction step
++N = 50                       # MPC stages -> horizon N * dt_mpc = 0.5 s
++mpc_horizon_s = 0.5          # s   required prediction horizon (checked)
++# FDDP iterations per MPC update (real-time iteration scheme: 1). Kept as an
++# explicit parameter for ablations; the combined-command fix does not need > 1.
++mpc_iterations = 1
++# Lookahead [s] used to build the WBC position/velocity references from the
++# measured state: pos_ref = p + dt*v, vel_ref = v + dt*a_mpc. The C++ baseline
++# uses its 2 ms control period here, which turns the WBC task PD into a
++# Kp*dt*v positive velocity feedback (bias) whose gain scales with the WBC
++# period: at dt = dt_wbc = 0.01 s it destabilises the yaw (measured omega
++# 5 rad/s for a 0.8 rad/s command). With 0 the references are evaluated at
++# the current instant, the CoM/wheel task PD terms vanish identically and the
++# WBC tracks the MPC accelerations as a pure feedforward inverse-dynamics
++# stage (feedback is closed by the 100 Hz MPC). Validated: omega tracking
++# error 0.8 -> 0.800 (0.0) vs 0.825 (0.002) vs 5.0 (0.01).
++wbc_lookahead_dt = 0.0
+ T_TRAJECTORY = 60
+-mpc_frequency = 100  # Frequency of MPC updates in Hz
+ grav = 9.81
+-whole_body_frequency = 500
+-dt_ref = 1.0 / whole_body_frequency
+ # Timer values (make sure the values match your intended configuration)
+ timer_t = jnp.array([0.5, 0.0, 0.0, 0.5])  # Timer values for each leg
+ duty_factor = 0.65  # Duty factor for the gait
+@@ -85,22 +105,30 @@ Kp_wheel  = 5e1
+ Kd_wheel  = 3e1 
+ Kp_reg    = 1e2
+ Kd_reg    = 2e1
+-# NOTE: was 1e-1. The C++ baseline's joint-posture-regulation WBC task has
+-# weight_regulation = 0.0 both in getDefaultParams() and after the
+-# WalkingManager::init override (TITA_MJ/src/WholeBodyController.cpp /
+-# WalkingManager.cpp) -- it is fully dead in the reference controller. A
+-# nonzero posture task here pulls the legs toward the fixed q0 pose and
+-# competes with the CoM/wheel/base tasks specifically when both a forward
+-# velocity and a yaw-rate command are active simultaneously (the leg
+-# configuration needed to satisfy both differs from q0). Zeroed to match
+-# the real C++ runtime behavior.
+-w_posture = 0.0
++# Joint posture regulation task (WBC). Restricted to the two hip-abduction
++# joints (posture_joint_ids): they are the kinematic redundancy of the stance
++# (track width) and nothing else anchors them -- under the lateral load of a
++# turn they drift (measured 19 mrad at v=1, omega=0.8), the contact midpoint
++# c shifts 3-5 mm sideways with respect to the CoM and the MPC terminal
++# stability constraint pcom(N)=c(N) then bends the base path to chase it
++# (steady omega +5%). Regulating all leg joints toward q0 instead fights the
++# CoM-height task (q0 corresponds to a 0.396 m CoM, tracked height 0.4 m):
++# steady pitch -0.02 rad. Validated at (1.0,0.8): omega 0.807 (abduction
++# only, with w_base=1) vs 0.843 (no posture task) vs 0.806 with -0.019 rad
++# pitch (all joints, w=1e-2).
++w_posture = 0.1
++posture_joint_ids = (0, 4)   # joint_left_leg_1, joint_right_leg_1 (indices in the 8 actuated joints)
+ 
+ w_qddot     = 1e-12
+ w_com       = 1e0
+ w_lwheel    = 1e0
+ w_rwheel    = 1e0
+-w_base      = 1e-2
++# Base-orientation task (roll/pitch to zero, yaw to the axle heading). The C++
++# value 1e-2 leaves the base free to roll ~15 mrad into a turn under the
++# lateral contact force (CoM 5 mm inside the base point, same omega bias as
++# above through the terminal stability constraint). 1.0 keeps roll within
++# 2 mrad at v=1, omega=0.8; 0.1 is not sufficient (omega 0.825 vs 0.807).
++w_base      = 1e0
+ 
+ # Cost matrices (diagonal matrices created using jnp.diag)
+ Qp    = jnp.diag(jnp.array([1e2, 1e2, 1e3]))  # Cost matrix for position
+@@ -158,17 +186,9 @@ w_theta  = 0e0      # heading
+ # reproduce a bug just for parity's sake.
+ w_v      = 1e1      # velocità com_ground projection
+ w_omega  = 5e0      # velocità angolare
+-# NOTE: tried raising w_v to 15 and 40 to fix the residual forward-speed
+-# undershoot under the combined vx=0.6/omega=0.4 command (see fix log in
+-# AUDIT_MPX_CONTROLLER.md). Both reintroduced the same NaN-WBC-torque
+-# fall that mu/posture/h_fz/fz_min fixed for the single-axis and milder
+-# combined cases -- even +50% (15) fell within ~4s. This operating point
+-# is right at a stability boundary that's sensitive to small increases in
+-# forward-velocity-tracking aggressiveness while turning; left at the
+-# stable value (10). The remaining combined-command undershoot looks like
+-# it needs a structural fix (WBC/QP feasibility margin, more than 1 FDDP
+-# iteration under a stiffer cost, or better constraint softening), not
+-# further cost-weight tuning -- see AUDIT_MPX_CONTROLLER.md.
++# NOTE: raising w_v (15, 40) had been tried against the combined-command
++# undershoot and reintroduced the NaN/fall; that was a symptom of the w_eq
++# conditioning problem documented above, not of w_v itself. Left at 10.
+ 
+ # Control weights – ruote (attuatori principali, non troppo economici)
+ w_a      = 1e-1      # accelerazione lineare
+@@ -179,8 +199,25 @@ w_alpha  = 1e-3      # accelerazione angolare
+ w_fcxy   = 1e-7      # forze orizzontali → penalizza, devono stare ~0
+ w_fcz    = 1e-4     # forza verticale  → libera di adattarsi
+ 
+-# Equality constraints
+-w_eq     = 1e8    # momento + contatto
++# Soft equality constraints (moment balance, flat contact, Fz >= 0, terminal
++# CoM-over-base stability) -- a single penalty weight shared by all of them.
++#
++# NOTE: was 1e8 (the C++ baseline value). With the real-time-iteration scheme
++# (one FDDP iteration per 10 ms update) a 1e8 penalty on the bilinear moment
++# residual makes the problem so ill-conditioned that the Goldstein line search
++# rejects the step whenever the reference rotates and the GRF plan has to
++# rotate with it (combined v and omega): the plan then stops converging, the
++# multiple-shooting defects grow, the moment residual reaches 0.4-0.9 N m and
++# the WBC QP fails (NaN torque). Measured on the mandatory validation set:
++#   w_eq = 1e8 : (0.6,0.4) -> 0.51/0.43, (1.0,+-0.8) -> fall, 18-24 rejected steps
++#   w_eq = 1e7 : all cases tracked, 1-3 rejected steps, residual 0.2-0.35 N m
++#   w_eq = 1e6 : all cases tracked, 0 rejected steps, residual 0.01 N m
++#   w_eq = 1e5 : all cases tracked, 0 rejected steps, residual 0.03 N m
++# i.e. the larger penalty produces LARGER constraint violations because the
++# optimiser cannot converge. 1e6 keeps the violation physically negligible
++# (0.01 N m = 0.04 mm lever arm at body weight) while the single iteration
++# converges; it is still 5 orders of magnitude above the tracking weights.
++w_eq     = 1e6
+ 
+ 
+ # ── Assemble W (15×15 diagonal) ──────────────────────────────────
+@@ -192,4 +229,17 @@ W = 1e0 * jnp.diag(jnp.array([
+     w_a,      w_ac_z, w_alpha,
+     w_fcxy,   w_fcz,
+     w_eq,
+-]))
+\ No newline at end of file
++]))
++
++# ── Derived timing (validated at import, see mpx.utils.timing) ─────────────
++import types as _types
++from mpx.utils.timing import derive_timing as _derive_timing
++_timing = _derive_timing(_types.SimpleNamespace(
++    simulation_frequency=simulation_frequency, mpc_frequency=mpc_frequency,
++    whole_body_frequency=whole_body_frequency, dt_mpc=dt_mpc, N=N,
++    mpc_horizon_s=mpc_horizon_s))
++dt_sim = _timing["dt_sim"]                              # 0.002 s
++dt_wbc = _timing["dt_wbc"]                              # 0.01 s
++mpc_period_sim_steps = _timing["mpc_period_sim_steps"]  # 5
++wbc_period_sim_steps = _timing["wbc_period_sim_steps"]  # 5
++mpc_shift_nodes = _timing["mpc_shift_nodes"]            # 1 MPC node per update
+diff --git a/mpx/examples/mjx_tita.py b/mpx/examples/mjx_tita.py
+index 7341122..092139c 100644
+--- a/mpx/examples/mjx_tita.py
++++ b/mpx/examples/mjx_tita.py
+@@ -9,13 +9,13 @@ import jax
+ jax.config.update("jax_enable_x64", True)
+ 
+ dir_path = os.path.dirname(os.path.realpath(__file__))
+-sys.path.append(os.path.abspath(os.path.join(dir_path, "..")))
++# Insert at the front so that THIS working tree wins over any editable/site-packages
++# install of mpx (an editable install of another checkout would otherwise shadow it).
++sys.path.insert(0, os.path.abspath(os.path.join(dir_path, "..", "..")))
+ TITA_PATH = os.path.join(dir_path, "plots","tita_validation")
+ 
+ import mpx.config.config_dfcip as config
+ 
+-dir_path = os.path.dirname(os.path.realpath(__file__))
+-sys.path.append(os.path.abspath(os.path.join(dir_path, "..")))
+ os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
+ 
+ import jax.numpy as jnp
+@@ -27,6 +27,7 @@ import numpy as np
+ import mpx.utils.mpc_wrapper_dfcip as mpc_wrapper_dfcip
+ import mpx.utils.mpc_utils as mpc_utils
+ import mpx.utils.sim as sim_utils
++from mpx.utils.timing import derive_timing, check_model_timestep, describe_timing
+ from plot_validation import (
+     SimLogger,
+     plot_velocity_tracking,
+@@ -297,8 +298,14 @@ def main(headless=False, steps=500, scene="flat"):
+         dir_path + f"/../data/tita/scene_{scene}.xml"
+     )
+     data = mujoco.MjData(model)
+-    sim_frequency = float(config.whole_body_frequency)
+-    model.opt.timestep = 1.0 / sim_frequency
++    # MuJoCo integrates at simulation_frequency (500 Hz); MPC and WBC are updated
++    # at mpc_frequency / whole_body_frequency (100 Hz). The XML timestep must
++    # already agree with 1/simulation_frequency (checked, never silently changed).
++    timing = derive_timing(config)
++    check_model_timestep(model.opt.timestep, timing)
++    sim_frequency = float(timing["sim_f"])
++    model.opt.timestep = timing["dt_sim"]
++    print("[timing] " + describe_timing(timing, int(getattr(config, "mpc_iterations", 1))))
+ 
+     # ── MuJoCo video recording ───────────────────────────────────────────
+     _sim_frames: list = []
+@@ -388,7 +395,8 @@ def main(headless=False, steps=500, scene="flat"):
+     )
+     tau.block_until_ready()
+ 
+-    period = int(sim_frequency / config.mpc_frequency)
++    period = timing["mpc_period_sim_steps"]        # simulation steps between MPC updates (5)
++    wbc_period = timing["wbc_period_sim_steps"]    # simulation steps between WBC updates (5)
+     counter = 0
+     theta_prev = 0.0
+     qddot = np.zeros_like(model.nv)
+@@ -400,6 +408,12 @@ def main(headless=False, steps=500, scene="flat"):
+         print(f"\n=== step {counter} ===")
+         
+         init_start = timer()
++        # Forward pass (mj_step1) so that every derived quantity read below
++        # (geom positions/velocities, subtree CoM) corresponds to the SAME
++        # qpos/qvel handed to the WBC. After mj_step the derived quantities still
++        # belong to the pre-integration state (one simulation step old), which
++        # created spurious ~2 mm / 2 mm/s errors in the WBC task PD terms.
++        mujoco.mj_step1(model, data)
+         qpos = data.qpos.copy()
+         qvel = data.qvel.copy()
+ 
+@@ -457,6 +471,10 @@ def main(headless=False, steps=500, scene="flat"):
+                 mpc_stop = timer()
+                 print(f"[timing] MPC time: {1e3 * (mpc_stop - mpc_start):.2f} ms")
+ 
++            if counter % wbc_period == 0:
++                # WBC update: uses the latest MPC first-stage control and the
++                # current measured state. tau and qddot are then held for
++                # wbc_period simulation steps.
+                 pl_world_wbc = tita_state[6:9][None, :]
+                 pr_world_wbc = tita_state[9:12][None, :]
+                 dpl_world_wbc = tita_state[12:15][None, :]
+@@ -501,25 +519,27 @@ def main(headless=False, steps=500, scene="flat"):
+         extra_start = timer()
+         touch_floor = _base_touches_floor(model, data, base_body_name=config.base_body_name)
+ 
+-        q_target = np.array([0.0, 0.5, -1.0, 0.0,]*2)
+-
+-        dt = model.opt.timestep
++        # Outer joint PD on top of the held WBC torque, evaluated at every
++        # simulation step: it predicts the joint motion ONE SIMULATION STEP ahead
++        # (dt_sim = 0.002 s, not dt_wbc) from the current joint state using the
++        # held WBC joint accelerations.
++        dt_sim = model.opt.timestep
+         qpos_joint  = qpos[7:]
+         qvel_joint  = qvel[6:]
+-        qddot_joint = np.asarray(qddot[0, 6:])   # JAX → numpy una volta sola, a monte
++        qddot_joint = np.asarray(qddot[0, 6:])   # JAX -> numpy once per step
+ 
+-        dq_desired = qvel_joint + qddot_joint * dt
+-        q_desired  = qpos_joint + qvel_joint * dt + 0.5 * qddot_joint * dt**2
++        dq_desired = qvel_joint + qddot_joint * dt_sim
++        q_desired  = qpos_joint + qvel_joint * dt_sim + 0.5 * qddot_joint * dt_sim**2
+ 
+         p_ctrl = 35.0 * (q_desired - qpos_joint)
+         d_ctrl = 10.0 * (dq_desired - qvel_joint)
+ 
+-        p_ctrl[[3, 7]] = 0.0        # ruote: niente termine P
++        p_ctrl[[3, 7]] = 0.0        # wheels: no position term
+ 
+         total_ctrl = p_ctrl + d_ctrl + np.asarray(tau[0])
+         data.ctrl = total_ctrl
+ 
+-        mujoco.mj_step(model, data)
++        mujoco.mj_step2(model, data)   # integrate (mj_step1 was called at the top of this step)
+         update_com_tracking_camera(
+             _sim_cam,
+             model,
+@@ -539,8 +559,7 @@ def main(headless=False, steps=500, scene="flat"):
+         print("\n[finalize] Saving outputs...")
+ 
+         try:
+-            # Se catturi ogni 2 step, hai 250 frame/s simulati se sim_frequency=500.
+-            # Quindi fps corretto per video real-time:
++            # One frame every 2 simulation steps = 250 frames per simulated second at 500 Hz.
+             video_fps = int(sim_frequency / 2)
+ 
+             _save_sim_video(
+@@ -584,7 +603,6 @@ def main(headless=False, steps=500, scene="flat"):
+     try:
+         if headless:
+             for _ in range(steps):
+-                cmd = command_handle.get_command()
+                 mpc_state, tau, qddot, reference, theta_prev, touch_floor = step_controller(mpc_state, tau, qddot, reference, theta_prev=theta_prev)
+                 if touch_floor:
+                     print(f"Base touched the floor at step {counter}. Ending simulation.")
+diff --git a/mpx/examples/tita.py b/mpx/examples/tita.py
+index 5804a17..614cbd4 100644
+--- a/mpx/examples/tita.py
++++ b/mpx/examples/tita.py
+@@ -43,7 +43,7 @@ BASE_DIR = dir_path
+ TITA_PATH = os.path.join(dir_path, "plots","tita_outputs")
+ os.makedirs(TITA_PATH, exist_ok=True)
+ 
+-MAX_STEPS = round(int( (2 + config.T_TRAJECTORY ) / config.dt_ref) )
++MAX_STEPS = round(int( (2 + config.T_TRAJECTORY ) / config.dt_sim) )
+ DEFAULT_VIDEO_SLOWDOWN_FACTOR = 4.0
+ LLC_ROLLOUT_CSV = os.path.join(TITA_PATH, "rollout_info_llc.csv")
+ TORQUE_LIST = []
+@@ -697,7 +697,7 @@ def main(headless=False, steps=500, scene="flat"):
+     )
+     nj = model.nv - 6
+     data = mujoco.MjData(model)
+-    sim_frequency = float(config.whole_body_frequency)
++    sim_frequency = float(config.simulation_frequency)
+     video_fps = max(1, int(round(sim_frequency / max(DEFAULT_VIDEO_SLOWDOWN_FACTOR, 1e-6))))
+     counter = 0
+ 
+@@ -772,7 +772,7 @@ def main(headless=False, steps=500, scene="flat"):
+ 
+     # ── print MPC config parameters ──────────────────────────────────────
+     _mpc_params = [
+-        "dt_mpc", "dt_ref", "N", "mpc_frequency", "grav", "whole_body_frequency",
++        "dt_mpc", "dt_sim", "N", "mpc_frequency", "grav", "simulation_frequency", "whole_body_frequency",
+         "duty_factor", "step_freq", "step_height", "robot_height", "clearence_speed",
+         "mu", "mass",
+         "w_pcomxy", "w_pcomz", "w_vcomxy", "w_vcomz", "w_c", "w_vcz",
+diff --git a/mpx/examples/validate_dfcip_controller.py b/mpx/examples/validate_dfcip_controller.py
+index 670c969..671e02a 100644
+--- a/mpx/examples/validate_dfcip_controller.py
++++ b/mpx/examples/validate_dfcip_controller.py
+@@ -1,34 +1,118 @@
+-"""Headless validation harness for the DFCIP MPC+WBC controller (mjx_tita.py's
+-control law), used to check velocity-tracking / stability at the vx/omega
+-operating points requested for Objective A. No viewer, no video, no
+-matplotlib dependency -- reuses only the core wrapper/config modules so it
+-can run on CPU quickly for iteration.
+-
+-Usage:
+-    python validate_dfcip_controller.py
++"""Headless validation and diagnostic harness for the DFCIP MPC + WBC controller.
++
++Reproduces exactly the control law of ``mjx_tita.py`` (MPC and WBC solved at
++``mpc_frequency`` / ``whole_body_frequency``, MuJoCo integrated at
++``simulation_frequency``, WBC torque and joint accelerations held between
++controller updates, optional outer joint PD) without any viewer, video or
++matplotlib dependency, and logs everything needed to locate where a commanded
++(vx, omega) pair is lost along the chain
++
++    command -> reference -> MPC (a, alpha, Fl, Fr) -> WBC references -> QP -> torque -> MuJoCo.
++
++Usage examples::
++
++    python validate_dfcip_controller.py                       # all cases, 1 s ramp + 6 s hold
++    python validate_dfcip_controller.py --cases 3 --hold 8    # only (vx, omega) = (0.6, 0.4)
++    python validate_dfcip_controller.py --set w_v=20          # ablation: override a config value
++    python validate_dfcip_controller.py --no-outer-pd         # ablation: WBC torque only
++    python validate_dfcip_controller.py --set mpc_iterations=3
++
++Every ``--set key=value`` overrides one attribute of ``mpx.config.config_dfcip``
++(the MPC weight matrix W is rebuilt from the individual weights).
+ """
++import argparse
++import json
+ import os
+ import sys
+ import time
+-import json
++import types
++
++import numpy as np
++
++# JAX_PLATFORMS must be set before jax is imported.
++if "--device" in sys.argv:
++    _dev = sys.argv[sys.argv.index("--device") + 1]
++    os.environ["JAX_PLATFORMS"] = "cuda" if _dev == "gpu" else _dev
++else:
++    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+ 
+ import jax
+ jax.config.update("jax_enable_x64", True)
+ import jax.numpy as jnp
+-import numpy as np
+ import mujoco
+ 
+ dir_path = os.path.dirname(os.path.realpath(__file__))
+-sys.path.append(os.path.abspath(os.path.join(dir_path, "..")))
+-os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
++# Insert at the front so that THIS working tree wins over any editable/site-packages install of mpx.
++sys.path.insert(0, os.path.abspath(os.path.join(dir_path, "..", "..")))
+ 
+-import mpx.config.config_dfcip as config
++import mpx.config.config_dfcip as base_config
+ import mpx.utils.mpc_wrapper_dfcip as mpc_wrapper_dfcip
+ import mpx.utils.mpc_utils as mpc_utils
+ import mpx.utils.sim as sim_utils
+-
+-
+-def build_tita_state_np(model, data, base_body_id, contact_ids):
++import mpx.utils.timing as timing_utils
++
++# (label, vx [m/s], omega [rad/s]) -- the mandatory validation set.
++CASES = [
++    ("vx=1.0,omega=0.0", 1.0, 0.0),
++    ("vx=0.0,omega=0.8", 0.0, 0.8),
++    ("vx=0.3,omega=0.2", 0.3, 0.2),
++    ("vx=0.6,omega=0.4", 0.6, 0.4),
++    ("vx=1.0,omega=0.8", 1.0, 0.8),
++    ("vx=1.0,omega=-0.8", 1.0, -0.8),
++]
++
++W_KEYS = [
++    "w_pcomxy", "w_pcomz", "w_vcomxy", "w_vcomz", "w_c", "w_vcz",
++    "w_theta", "w_v", "w_omega", "w_a", "w_ac_z", "w_alpha",
++    "w_fcxy", "w_fcz", "w_eq",
++]
++
++# Outer joint PD gains used by mjx_tita.py on top of the WBC torque.
++OUTER_KP = 35.0
++OUTER_KD = 10.0
++COMMAND_SMOOTHING = 0.02
++
++
++def make_config(overrides):
++    """Copy the config module into a namespace and apply ``overrides``."""
++    cfg = types.SimpleNamespace()
++    for k in dir(base_config):
++        if k.startswith("__"):
++            continue
++        setattr(cfg, k, getattr(base_config, k))
++    for k, v in overrides.items():
++        if not hasattr(cfg, k):
++            print(f"[config] NOTE: '{k}' is not a base config attribute (added as an override)")
++        setattr(cfg, k, v)
++    cfg.W = jnp.diag(jnp.array([float(getattr(cfg, k)) for k in W_KEYS]))
++    return cfg
++
++
++def derive_timing(cfg):
++    """Sim / MPC / WBC timing from the config (shared checks in mpx.utils.timing)."""
++    t = timing_utils.derive_timing(cfg)
++    t["mpc_period_steps"] = t["mpc_period_sim_steps"]
++    t["wbc_period_steps"] = t["wbc_period_sim_steps"]
++    t["horizon"] = t["horizon_s"]
++    return t
++
++
++def parse_value(text):
++    if text[:1] in "([{":
++        import ast as _ast
++        return _ast.literal_eval(text)
++    for cast in (int, float):
++        try:
++            return cast(text)
++        except ValueError:
++            pass
++    if text.lower() in ("true", "false"):
++        return text.lower() == "true"
++    return text
++
++
++# ── state estimation (identical to mjx_tita.py) ─────────────────────────────
++def gather_raw_state(model, data, base_body_id, contact_ids):
+     mujoco.mj_subtreeVel(model, data)
+     pcom = data.subtree_com[base_body_id].copy()
+     vcom = data.subtree_linvel[base_body_id].copy()
+@@ -43,30 +127,32 @@ def build_tita_state_np(model, data, base_body_id, contact_ids):
+     return pcom, vcom, centers, Rs, radii, feet_vel
+ 
+ 
+-@jax.jit
+-def process_tita_state(pcom, vcom, centers, Rs, radii, feet_vel, theta_prev):
+-    l_rcp = mpc_utils.get_rCP(Rs[0], radii[0])
+-    r_rcp = mpc_utils.get_rCP(Rs[1], radii[1])
+-    pl_world = centers[0] + l_rcp
+-    pr_world = centers[1] + r_rcp
+-    dpl_world, dpr_world = feet_vel[0], feet_vel[1]
+-    tita_state = jnp.concatenate([pcom, vcom, pl_world, pr_world, dpl_world, dpr_world])
+-    c_world = (pl_world + pr_world) / 2.0
+-    vc_world = (dpl_world + dpr_world) / 2.0
+-    diff = pl_world - pr_world
+-    theta_wrapped = jnp.arctan2(-diff[0], diff[1])
+-    a = (theta_wrapped - theta_prev + jnp.pi) % (2 * jnp.pi)
+-    a = jnp.where(a < 0, a + 2 * jnp.pi, a) - jnp.pi
+-    theta = theta_prev + a
+-    ct, st = jnp.cos(theta), jnp.sin(theta)
+-    R = jnp.array([[ct, -st, 0.], [st, ct, 0.], [0., 0., 1.]])
+-    dpl_b = R.T @ dpl_world
+-    dpr_b = R.T @ dpr_world
+-    w = (dpr_b[0] - dpl_b[0]) / config.d
+-    v = (dpr_b[0] + dpl_b[0]) / 2.0
+-    x0 = jnp.concatenate([pcom, vcom, c_world, jnp.array([vc_world[2]]),
+-                          jnp.array([theta]), jnp.array([v]), jnp.array([w])])
+-    return tita_state, x0, theta
++def make_process_tita_state(d_track):
++    @jax.jit
++    def process_tita_state(pcom, vcom, centers, Rs, radii, feet_vel, theta_prev):
++        l_rcp = mpc_utils.get_rCP(Rs[0], radii[0])
++        r_rcp = mpc_utils.get_rCP(Rs[1], radii[1])
++        pl_world = centers[0] + l_rcp
++        pr_world = centers[1] + r_rcp
++        dpl_world, dpr_world = feet_vel[0], feet_vel[1]
++        tita_state = jnp.concatenate([pcom, vcom, pl_world, pr_world, dpl_world, dpr_world])
++        c_world = (pl_world + pr_world) / 2.0
++        vc_world = (dpl_world + dpr_world) / 2.0
++        diff = pl_world - pr_world
++        theta_wrapped = jnp.arctan2(-diff[0], diff[1])
++        a = (theta_wrapped - theta_prev + jnp.pi) % (2 * jnp.pi)
++        a = jnp.where(a < 0, a + 2 * jnp.pi, a) - jnp.pi
++        theta = theta_prev + a
++        ct, st = jnp.cos(theta), jnp.sin(theta)
++        R = jnp.array([[ct, -st, 0.], [st, ct, 0.], [0., 0., 1.]])
++        dpl_b = R.T @ dpl_world
++        dpr_b = R.T @ dpr_world
++        w = (dpr_b[0] - dpl_b[0]) / d_track
++        v = (dpr_b[0] + dpl_b[0]) / 2.0
++        x0 = jnp.concatenate([pcom, vcom, c_world, jnp.array([vc_world[2]]),
++                              jnp.array([theta]), jnp.array([v]), jnp.array([w])])
++        return tita_state, x0, theta
++    return process_tita_state
+ 
+ 
+ def reset_to_initial_state(model, data):
+@@ -75,154 +161,351 @@ def reset_to_initial_state(model, data):
+     mujoco.mj_forward(model, data)
+ 
+ 
+-def run_case(mpc, solve_mpc, solve_wbc, model, base_body_id, contact_ids,
+-             vx_cmd, wz_cmd, duration_s=3.0, ramp_s=1.0, label=""):
++def quat_to_rpy(q):
++    w_, x_, y_, z_ = q
++    roll = np.arctan2(2 * (w_ * x_ + y_ * z_), 1 - 2 * (x_ * x_ + y_ * y_))
++    pitch = np.arcsin(np.clip(2 * (w_ * y_ - z_ * x_), -1.0, 1.0))
++    yaw = np.arctan2(2 * (w_ * z_ + x_ * y_), 1 - 2 * (y_ * y_ + z_ * z_))
++    return roll, pitch, yaw
++
++
++class Context:
++    def __init__(self, cfg, scene="flat"):
++        self.cfg = cfg
++        self.timing = derive_timing(cfg)
++        self.model = mujoco.MjModel.from_xml_path(dir_path + f"/../data/tita/scene_{scene}.xml")
++        # MuJoCo integrates at the simulation frequency, never at the WBC rate;
++        # the XML timestep must agree with it.
++        timing_utils.check_model_timestep(self.model.opt.timestep, self.timing)
++        self.model.opt.timestep = self.timing["dt_sim"]
++        self.base_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, cfg.base_body_name)
++        self.contact_ids = sim_utils.geom_ids(self.model, cfg.contact_frame)
++        self.mpc = mpc_wrapper_dfcip.BatchedMPCControllerWrapper(cfg, n_env=1)
++        self.process_tita_state = make_process_tita_state(float(cfg.d))
++        mpc = self.mpc
++
++        @jax.jit
++        def solve_mpc(mpc_state, x0, command):
++            return mpc.run_diag(mpc_state, x0, command)
++
++        @jax.jit
++        def solve_wbc(mpc_state, x0, qpos, qvel, pl_world, pr_world, dpl_world, dpr_world):
++            return mpc.whole_body_run_diag(mpc_state, x0, qpos, qvel, pl_world, pr_world, dpl_world, dpr_world)
++
++        self.solve_mpc = solve_mpc
++        self.solve_wbc = solve_wbc
++
++
++def _np(x):
++    return np.asarray(jax.device_get(x))
++
++
++def run_case(ctx, vx_cmd, wz_cmd, ramp_s, hold_s, label, outer_pd=True,
++             steady_window_s=2.0, verbose_every=0, outer_pd_mode="legacy", fresh_state=True):
++    cfg, T = ctx.cfg, ctx.timing
++    model = ctx.model
+     data = mujoco.MjData(model)
+     reset_to_initial_state(model, data)
+ 
+-    sim_frequency = float(config.whole_body_frequency)
+-    period = int(sim_frequency / config.mpc_frequency)
+-    n_steps = int(duration_s * sim_frequency)
+-    n_ramp_steps = max(1, int(ramp_s * sim_frequency))
++    n_steps = int(round((ramp_s + hold_s) * T["sim_f"]))
++    dt_sim = T["dt_sim"]
++    mpc_period = T["mpc_period_steps"]
++    wbc_period = T["wbc_period_steps"]
+ 
+-    counter = 0
+     theta_prev = 0.0
+-    mpc_state = mpc.init_state()
+-    command = np.array([0.0, 0.0, 0.0, config.com_z_to_track], dtype=np.float64)
+-    COMMAND_SMOOTHING = 0.02
+-
++    mpc_state = ctx.mpc.init_state()
++    command = np.array([0.0, 0.0, 0.0, cfg.com_z_to_track], dtype=np.float64)
+     tau = jnp.zeros((1, model.nu))
+     qddot = jnp.zeros((1, model.nv))
+-
+-    log = {"t": [], "vx": [], "wz": [], "height": [], "roll": [], "pitch": [],
+-           "tau_max": [], "fell": False}
++    reference = None
++    mdiag = None
++    wdiag = None
++    desired = None
++
++    L = {k: [] for k in [
++        "t", "target_vx", "target_wz", "cmd_vx", "cmd_wz",
++        "ref_v0", "ref_w0", "ref_v1", "ref_w1", "ref_vcom1", "ref_theta1",
++        "x0", "base_wz_body", "vcom_speed",
++        "a", "ac_z", "alpha", "Fl", "Fr",
++        "mpc_accepted", "mpc_cost_before", "mpc_cost_after", "mpc_defect", "mpc_defect0",
++        "mpc_hmoment_max", "mpc_hmoment_0", "mpc_lean0", "mpc_lean_max", "mpc_ftot_body0", "mpc_stabN",
++        "des_com_acc", "des_lw_acc", "des_rw_acc", "des_lw_vel", "des_rw_vel", "des_base_omega", "des_base_alpha",
++        "wbc_a_com", "wbc_a_lw", "wbc_a_rw", "wbc_a_base",
++        "wbc_res_com", "wbc_res_lw", "wbc_res_rw", "wbc_res_base",
++        "wbc_err_com", "wbc_err_com_vel", "wbc_err_lw", "wbc_err_rw", "wbc_err_base",
++        "wbc_converged", "wbc_iters", "wbc_eq_res", "wbc_joint_slack",
++        "wbc_fric_l", "wbc_fric_r", "wbc_fl_local", "wbc_fr_local",
++        "qddot", "tau_wbc", "tau_total", "q_joint", "qd_joint",
++        "height", "roll", "pitch", "yaw", "com_acc_meas", "mpc_x1", "mpc_xN",
++    ]}
+ 
+     fell = False
+-    for counter in range(n_steps):
+-        ramp = min(1.0, counter / n_ramp_steps)
+-        target_command = np.array([vx_cmd * ramp, 0.0, wz_cmd * ramp, config.com_z_to_track])
+-
+-        raw = build_tita_state_np(model, data, base_body_id, contact_ids)
+-        tita_state, x0, theta_prev_j = process_tita_state(*raw, theta_prev)
+-        theta_prev = float(theta_prev_j)
+-
+-        if counter % period == 0:
+-            command += COMMAND_SMOOTHING * (target_command - command)
+-            command[3] = target_command[3]
+-            mpc_state, reference = solve_mpc(mpc_state, x0[None, :], jnp.asarray(command)[None, :])
+-
+-            pl_world_wbc = tita_state[6:9][None, :]
+-            pr_world_wbc = tita_state[9:12][None, :]
+-            dpl_world_wbc = tita_state[12:15][None, :]
+-            dpr_world_wbc = tita_state[15:18][None, :]
+-            mpc_state, tau, qddot, fl, fr, desired = solve_wbc(
+-                mpc_state, x0, jnp.asarray(data.qpos)[None, :], jnp.asarray(data.qvel)[None, :],
+-                pl_world_wbc, pr_world_wbc, dpl_world_wbc, dpr_world_wbc,
++    nan_hit = False
++    nan_where = None
++    vcom_prev = None
++    total_ctrl = np.zeros(model.nu)
++
++    for k in range(n_steps):
++        t = k * dt_sim
++        ramp = min(1.0, t / ramp_s) if ramp_s > 0 else 1.0
++        target = np.array([vx_cmd * ramp, 0.0, wz_cmd * ramp, cfg.com_z_to_track])
++
++        if fresh_state:
++            # Forward pass (mj_step1) so that every derived quantity read below
++            # (geom positions/velocities, subtree CoM) corresponds to the SAME
++            # qpos/qvel that is handed to the WBC. After mj_step the derived
++            # quantities are still those of the pre-integration state.
++            mujoco.mj_step1(model, data)
++        raw = gather_raw_state(model, data, ctx.base_body_id, ctx.contact_ids)
++        tita_state, x0, theta_j = ctx.process_tita_state(*raw, theta_prev)
++        theta_prev = float(theta_j)
++
++        controller_tick = (k % mpc_period == 0)
++        if controller_tick:
++            command += COMMAND_SMOOTHING * (target - command)
++            command[3] = target[3]
++            mpc_state, reference, mdiag = ctx.solve_mpc(mpc_state, x0[None, :], jnp.asarray(command)[None, :])
++
++        if k % wbc_period == 0:
++            mpc_state, tau, qddot, fl, fr, desired, wdiag = ctx.solve_wbc(
++                mpc_state, x0,
++                jnp.asarray(data.qpos)[None, :], jnp.asarray(data.qvel)[None, :],
++                tita_state[6:9][None, :], tita_state[9:12][None, :],
++                tita_state[12:15][None, :], tita_state[15:18][None, :],
+             )
++            k_wbc = k
++            q_wbc = data.qpos[7:].copy()
++            qd_wbc = data.qvel[6:].copy()
++
++        qpos_joint = data.qpos[7:].copy()
++        qvel_joint = data.qvel[6:].copy()
++        tau_np = _np(tau[0])
++        if outer_pd:
++            qddot_joint = _np(qddot[0, 6:])
++            if outer_pd_mode == "plan":
++                # Track the WBC plan integrated from the WBC-instant joint state over
++                # the elapsed time inside the hold interval.
++                tau_hold = (k - k_wbc + 1) * dt_sim
++                dq_desired = qd_wbc + qddot_joint * tau_hold
++                q_desired = q_wbc + qd_wbc * tau_hold + 0.5 * qddot_joint * tau_hold ** 2
++            else:
++                # mjx_tita.py outer joint PD: one-simulation-step (dt_sim) prediction
++                # from the current joint state with the held qddot.
++                dq_desired = qvel_joint + qddot_joint * dt_sim
++                q_desired = qpos_joint + qvel_joint * dt_sim + 0.5 * qddot_joint * dt_sim ** 2
++            p_ctrl = OUTER_KP * (q_desired - qpos_joint)
++            d_ctrl = OUTER_KD * (dq_desired - qvel_joint)
++            p_ctrl[[3, 7]] = 0.0
++            total_ctrl = p_ctrl + d_ctrl + tau_np
++        else:
++            total_ctrl = tau_np.copy()
++
++        if not np.all(np.isfinite(total_ctrl)):
++            nan_hit = True
++            nan_where = ("tau" if not np.all(np.isfinite(tau_np)) else "outer_pd", t)
++            total_ctrl = np.nan_to_num(total_ctrl)
+ 
+-        qpos_joint = data.qpos[7:]
+-        qvel_joint = data.qvel[6:]
+-        qddot_joint = np.asarray(qddot[0, 6:])
+-        dt = model.opt.timestep
+-        dq_desired = qvel_joint + qddot_joint * dt
+-        q_desired = qpos_joint + qvel_joint * dt + 0.5 * qddot_joint * dt ** 2
+-        p_ctrl = 35.0 * (q_desired - qpos_joint)
+-        d_ctrl = 10.0 * (dq_desired - qvel_joint)
+-        p_ctrl[[3, 7]] = 0.0
+-        total_ctrl = p_ctrl + d_ctrl + np.asarray(tau[0])
+         data.ctrl = total_ctrl
+-
+-        mujoco.mj_step(model, data)
+-
+-        quat = data.qpos[3:7]
+-        # roll/pitch from quaternion (wxyz)
+-        w_, x_, y_, z_ = quat
+-        roll = np.arctan2(2 * (w_ * x_ + y_ * z_), 1 - 2 * (x_ * x_ + y_ * y_))
+-        pitch = np.arcsin(np.clip(2 * (w_ * y_ - z_ * x_), -1.0, 1.0))
+-        upvector_z = 1 - 2 * (x_ * x_ + y_ * y_)
+-
+-        actual_vx = float(x0[11])  # unicycle forward speed v (body-x)
+-        actual_wz = float(x0[12])  # unicycle yaw rate w
+-
+-        if counter % 25 == 0:
+-            log["t"].append(counter * dt)
+-            log["vx"].append(actual_vx)
+-            log["wz"].append(actual_wz)
+-            log["height"].append(float(data.qpos[2]))
+-            log["roll"].append(float(roll))
+-            log["pitch"].append(float(pitch))
+-            log["tau_max"].append(float(np.max(np.abs(total_ctrl))))
+-
+-        if upvector_z < 0.3 or data.qpos[2] < 0.15:
++        if fresh_state:
++            mujoco.mj_step2(model, data)
++        else:
++            mujoco.mj_step(model, data)
++
++        roll, pitch, yaw = quat_to_rpy(data.qpos[3:7])
++        upvector_z = 1 - 2 * (data.qpos[4] ** 2 + data.qpos[5] ** 2)
++
++        if controller_tick:
++            x0n = _np(x0)
++            xr = _np(reference[0])
++            u_first = np.concatenate([np.atleast_1d(_np(mpc_state.sol.a[0])), np.atleast_1d(_np(mpc_state.sol.ac_z[0])),
++                                      np.atleast_1d(_np(mpc_state.sol.alpha[0])), np.atleast_1d(_np(mpc_state.sol.grf[0]))])
++            des = mpc_utils.unpack_reference(_np(desired[0]), model.nv - 6)
++            vcom_now = x0n[3:6]
++            com_acc = (vcom_now - vcom_prev) / (mpc_period * dt_sim) if vcom_prev is not None else np.zeros(3)
++            vcom_prev = vcom_now.copy()
++            L["t"].append(t)
++            L["target_vx"].append(target[0]); L["target_wz"].append(target[2])
++            L["cmd_vx"].append(command[0]); L["cmd_wz"].append(command[2])
++            L["ref_v0"].append(xr[0, 11]); L["ref_w0"].append(xr[0, 12])
++            L["ref_v1"].append(xr[1, 11]); L["ref_w1"].append(xr[1, 12])
++            L["ref_vcom1"].append(xr[1, 3:5]); L["ref_theta1"].append(xr[1, 10])
++            L["x0"].append(x0n)
++            L["base_wz_body"].append(float(data.qvel[5]))
++            L["vcom_speed"].append(float(np.linalg.norm(x0n[3:5])))
++            L["a"].append(u_first[0]); L["ac_z"].append(u_first[1]); L["alpha"].append(u_first[2])
++            L["Fl"].append(u_first[3:6]); L["Fr"].append(u_first[6:9])
++            L["mpc_accepted"].append(bool(_np(mdiag["accepted"][0])))
++            L["mpc_cost_before"].append(float(_np(mdiag["cost_before"][0])))
++            L["mpc_cost_after"].append(float(_np(mdiag["cost_after"][0])))
++            L["mpc_defect"].append(float(_np(mdiag["defect_norm"][0])))
++            L["mpc_defect0"].append(float(_np(mdiag["defect0_norm"][0])))
++            L["mpc_hmoment_max"].append(float(_np(mdiag["h_moment_max"][0])))
++            L["mpc_hmoment_0"].append(_np(mdiag["h_moment_0"][0]))
++            L["mpc_lean0"].append(_np(mdiag["lean_body_0"][0]))
++            L["mpc_lean_max"].append(_np(mdiag["lean_body_max"][0]))
++            L["mpc_ftot_body0"].append(_np(mdiag["f_tot_body_0"][0]))
++            L["mpc_stabN"].append(_np(mdiag["stability_N"][0]))
++            L["des_com_acc"].append(des["com_acc"]); L["des_lw_acc"].append(des["lwheel_acc"])
++            L["des_rw_acc"].append(des["rwheel_acc"]); L["des_lw_vel"].append(des["lwheel_vel"])
++            L["des_rw_vel"].append(des["rwheel_vel"]); L["des_base_omega"].append(des["base_omega"])
++            L["des_base_alpha"].append(des["base_alpha"])
++            g = lambda key: _np(wdiag[key][0])
++            L["wbc_a_com"].append(g("a_com_total")); L["wbc_a_lw"].append(g("a_lwheel_total"))
++            L["wbc_a_rw"].append(g("a_rwheel_total")); L["wbc_a_base"].append(g("a_base_total"))
++            L["wbc_res_com"].append(g("res_com")); L["wbc_res_lw"].append(g("res_lwheel"))
++            L["wbc_res_rw"].append(g("res_rwheel")); L["wbc_res_base"].append(g("res_base"))
++            L["wbc_err_com"].append(g("err_com")); L["wbc_err_com_vel"].append(g("err_com_vel"))
++            L["wbc_err_lw"].append(g("err_lwheel")); L["wbc_err_rw"].append(g("err_rwheel"))
++            L["wbc_err_base"].append(g("err_base"))
++            L["wbc_converged"].append(bool(g("converged"))); L["wbc_iters"].append(int(g("iters")))
++            L["wbc_eq_res"].append(float(g("eq_res_norm"))); L["wbc_joint_slack"].append(float(g("ineq_slack_min_joint")))
++            L["wbc_fric_l"].append(g("fric_margin_l")); L["wbc_fric_r"].append(g("fric_margin_r"))
++            L["wbc_fl_local"].append(g("fl_local")); L["wbc_fr_local"].append(g("fr_local"))
++            L["qddot"].append(_np(qddot[0])); L["tau_wbc"].append(tau_np.copy()); L["tau_total"].append(total_ctrl.copy())
++            L["q_joint"].append(qpos_joint); L["qd_joint"].append(qvel_joint)
++            L["height"].append(float(data.qpos[2])); L["roll"].append(roll); L["pitch"].append(pitch); L["yaw"].append(yaw)
++            L["com_acc_meas"].append(com_acc)
++            L["mpc_x1"].append(_np(mpc_state.X_prediction[0, 1])); L["mpc_xN"].append(_np(mpc_state.X_prediction[0, -1]))
++
++            if verbose_every and (k // mpc_period) % verbose_every == 0:
++                print(f"  t={t:5.2f} cmd=({command[0]:+.3f},{command[2]:+.3f}) v={x0n[11]:+.3f} w={x0n[12]:+.3f}"
++                      f" |vcom|={np.linalg.norm(x0n[3:5]):.3f} a={u_first[0]:+.3f} al={u_first[2]:+.3f}"
++                      f" Fl=({u_first[3]:+.1f},{u_first[4]:+.1f},{u_first[5]:.1f}) Fr=({u_first[6]:+.1f},{u_first[7]:+.1f},{u_first[8]:.1f})"
++                      f" acc={'Y' if L['mpc_accepted'][-1] else 'N'} J={L['mpc_cost_after'][-1]:.3g}"
++                      f" |def|={L['mpc_defect'][-1]:.2e} hM={L['mpc_hmoment_max'][-1]:.2e}"
++                      f" lean0=({L['mpc_lean0'][-1][0]:+.3f},{L['mpc_lean0'][-1][1]:+.3f})"
++                      f" qp={'ok' if L['wbc_converged'][-1] else 'FAIL'}/{L['wbc_iters'][-1]}"
++                      f" fricL={np.min(L['wbc_fric_l'][-1]):+.1f} fricR={np.min(L['wbc_fric_r'][-1]):+.1f}"
++                      f" |res_com|={np.linalg.norm(L['wbc_res_com'][-1]):.2e} q1=({qpos_joint[0]:+.2f},{qpos_joint[4]:+.2f})"
++                      f" h={data.qpos[2]:.3f} rp=({roll:+.3f},{pitch:+.3f}) |tau|={np.max(np.abs(total_ctrl)):.1f}")
++
++        if upvector_z < 0.3 or data.qpos[2] < 0.15 or not np.all(np.isfinite(data.qpos)):
+             fell = True
+             break
+ 
+-    log["fell"] = fell
+-    log["final_step"] = counter
+-    # summary stats over the last 1s (steady state)
+-    steady_n = max(1, int(1.0 * sim_frequency / 25))
+-    vx_ss = np.array(log["vx"][-steady_n:]) if log["vx"] else np.array([0.0])
+-    wz_ss = np.array(log["wz"][-steady_n:]) if log["wz"] else np.array([0.0])
+-    summary = {
+-        "label": label, "vx_cmd": vx_cmd, "wz_cmd": wz_cmd,
+-        "fell": fell, "fell_at_step": counter if fell else None,
+-        "steady_vx_mean": float(np.mean(vx_ss)), "steady_vx_std": float(np.std(vx_ss)),
+-        "steady_wz_mean": float(np.mean(wz_ss)), "steady_wz_std": float(np.std(wz_ss)),
+-        "height_min": float(np.min(log["height"])) if log["height"] else None,
+-        "height_max": float(np.max(log["height"])) if log["height"] else None,
+-        "roll_max_abs": float(np.max(np.abs(log["roll"]))) if log["roll"] else None,
+-        "pitch_max_abs": float(np.max(np.abs(log["pitch"]))) if log["pitch"] else None,
+-        "tau_max": float(np.max(log["tau_max"])) if log["tau_max"] else None,
+-    }
+-    return summary, log
++    for k2 in list(L.keys()):
++        L[k2] = np.asarray(L[k2])
++
++    t_arr = L["t"]
++    steady = t_arr >= (ramp_s + hold_s - steady_window_s) if len(t_arr) else np.zeros(0, bool)
++    x0s = L["x0"]
++
++    def ss(arr):
++        arr = np.asarray(arr)
++        return (float(np.mean(arr[steady])), float(np.std(arr[steady]))) if steady.any() else (float("nan"), float("nan"))
++
++    vx_ss = ss(x0s[:, 11]) if len(x0s) else (np.nan, np.nan)
++    wz_ss = ss(x0s[:, 12]) if len(x0s) else (np.nan, np.nan)
++    wz_body_ss = ss(L["base_wz_body"]) if len(x0s) else (np.nan, np.nan)
++    vcom_ss = ss(L["vcom_speed"]) if len(x0s) else (np.nan, np.nan)
++    summary = dict(
++        label=label, vx_cmd=vx_cmd, wz_cmd=wz_cmd, ramp_s=ramp_s, hold_s=hold_s,
++        fell=fell, fell_at_t=float(k * dt_sim) if fell else None,
++        nan=nan_hit, nan_where=nan_where,
++        steady_vx_mean=vx_ss[0], steady_vx_std=vx_ss[1],
++        steady_wz_mean=wz_ss[0], steady_wz_std=wz_ss[1],
++        steady_wz_body_mean=wz_body_ss[0], steady_vcom_speed_mean=vcom_ss[0],
++        vx_tracking_ratio=(vx_ss[0] / vx_cmd) if vx_cmd else None,
++        wz_tracking_ratio=(wz_ss[0] / wz_cmd) if wz_cmd else None,
++        height_min=float(np.min(L["height"])) if len(x0s) else None,
++        height_max=float(np.max(L["height"])) if len(x0s) else None,
++        roll_max_abs=float(np.max(np.abs(L["roll"]))) if len(x0s) else None,
++        pitch_max_abs=float(np.max(np.abs(L["pitch"]))) if len(x0s) else None,
++        tau_max=float(np.max(np.abs(L["tau_total"]))) if len(x0s) else None,
++        mpc_rejected_steps=int(np.sum(~L["mpc_accepted"])) if len(x0s) else None,
++        mpc_hmoment_max=float(np.max(L["mpc_hmoment_max"])) if len(x0s) else None,
++        wbc_failed_steps=int(np.sum(~L["wbc_converged"])) if len(x0s) else None,
++        wbc_iters_max=int(np.max(L["wbc_iters"])) if len(x0s) else None,
++        fric_margin_min=float(min(np.min(L["wbc_fric_l"]), np.min(L["wbc_fric_r"]))) if len(x0s) else None,
++        joint_slack_min=float(np.min(L["wbc_joint_slack"])) if len(x0s) else None,
++        q1_abs_max=float(np.max(np.abs(L["q_joint"][:, [0, 4]]))) if len(x0s) else None,
++        res_com_max=float(np.max(np.linalg.norm(L["wbc_res_com"], axis=1))) if len(x0s) else None,
++        res_wheel_max=float(max(np.max(np.linalg.norm(L["wbc_res_lw"], axis=1)),
++                                np.max(np.linalg.norm(L["wbc_res_rw"], axis=1)))) if len(x0s) else None,
++    )
++    return summary, L
++
++
++def print_summary(s):
++    def f(v, fmt):
++        return ("   nan " if v is None or (isinstance(v, float) and np.isnan(v)) else fmt.format(v))
++    print(f"[{s['label']:>18}] fell={str(s['fell']):5} nan={str(s['nan']):5}"
++          f" vx={f(s['steady_vx_mean'], '{:+.3f}')}/{s['vx_cmd']:+.1f}"
++          f" wz={f(s['steady_wz_mean'], '{:+.3f}')}/{s['wz_cmd']:+.1f}"
++          f" (base wz {f(s['steady_wz_body_mean'], '{:+.3f}')}, |vcom| {f(s['steady_vcom_speed_mean'], '{:.3f}')})"
++          f" h=[{f(s['height_min'], '{:.3f}')},{f(s['height_max'], '{:.3f}')}]"
++          f" rp_max=({f(s['roll_max_abs'], '{:.3f}')},{f(s['pitch_max_abs'], '{:.3f}')})"
++          f" |tau|max={f(s['tau_max'], '{:.1f}')}"
++          f" mpc_rej={s['mpc_rejected_steps']} hM={f(s['mpc_hmoment_max'], '{:.1e}')}"
++          f" qp_fail={s['wbc_failed_steps']} fric_min={f(s['fric_margin_min'], '{:+.1f}')}"
++          f" q1max={f(s['q1_abs_max'], '{:.2f}')} wall={s.get('wall_s', 0):.1f}s")
+ 
+ 
+ def main():
+-    model = mujoco.MjModel.from_xml_path(dir_path + "/../data/tita/scene_flat.xml")
+-    model.opt.timestep = 1.0 / float(config.whole_body_frequency)
+-    base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, config.base_body_name)
+-    contact_ids = sim_utils.geom_ids(model, config.contact_frame)
+-
+-    mpc = mpc_wrapper_dfcip.BatchedMPCControllerWrapper(config, n_env=1)
+-
+-    @jax.jit
+-    def solve_mpc(mpc_state, x0, command):
+-        return mpc.run(mpc_state, x0, command)
+-
+-    @jax.jit
+-    def solve_wbc(mpc_state, x0, qpos, qvel, pl_world, pr_world, dpl_world, dpr_world):
+-        return mpc.whole_body_run(mpc_state, x0, qpos, qvel, pl_world, pr_world, dpl_world, dpr_world)
+-
+-    cases = [
+-        ("vx=0.0", 0.0, 0.0),
+-        ("vx=0.2", 0.2, 0.0),
+-        ("vx=0.6", 0.6, 0.0),
+-        ("vx=1.0", 1.0, 0.0),
+-        ("omega=0.2", 0.0, 0.2),
+-        ("omega=0.4", 0.0, 0.4),
+-        ("omega=0.8", 0.0, 0.8),
+-        ("vx=0.3,omega=0.2", 0.3, 0.2),
+-        ("vx=0.6,omega=0.4", 0.6, 0.4),
+-    ]
+-
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--cases", default="all", help="comma-separated case indices (0-based) or 'all'")
++    ap.add_argument("--ramp", type=float, default=1.0, help="command ramp duration [s]")
++    ap.add_argument("--hold", type=float, default=8.0, help="hold duration after the ramp [s]")
++    ap.add_argument("--steady-window", type=float, default=2.0, help="window at the end used for steady-state stats [s]")
++    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a config attribute")
++    ap.add_argument("--no-outer-pd", action="store_true", help="apply the WBC torque only (no outer joint PD)")
++    ap.add_argument("--outer-pd-mode", default="legacy", choices=["legacy", "plan"], help="outer PD target: legacy (one sim step ahead of the current state) or plan (WBC plan integrated over the hold interval)")
++    ap.add_argument("--stale-state", action="store_true", help="legacy read: gather the state after mj_step without a forward pass (derived quantities one simulation step old)")
++    ap.add_argument("--wbc-every", type=int, default=None, help="override the WBC period in simulation steps (legacy mjx_tita cadence = MPC period)")
++    ap.add_argument("--scene", default="flat")
++    ap.add_argument("--out", default=os.path.join(dir_path, "validation_results.json"))
++    ap.add_argument("--save-logs", default=None, help="save full time series to this .npz file")
++    ap.add_argument("--verbose-every", type=int, default=0, help="print one diagnostic line every N MPC steps")
++    ap.add_argument("--device", default="cpu", help="cpu or gpu (must be given as '--device X')")
++    ap.add_argument("--tag", default="", help="free-text tag stored in the results")
++    args = ap.parse_args()
++
++    overrides = {}
++    for item in args.set:
++        k, v = item.split("=", 1)
++        overrides[k.strip()] = parse_value(v.strip())
++    cfg = make_config(overrides)
++    ctx = Context(cfg, scene=args.scene)
++    if args.wbc_every is not None:
++        ctx.timing["wbc_period_steps"] = int(args.wbc_every)
++    T = ctx.timing
++    print(f"[timing] sim {T['sim_f']} Hz (dt {T['dt_sim']:.4f}) | MPC {T['mpc_f']} Hz every {T['mpc_period_steps']} sim steps"
++          f" | WBC {T['wbc_f']} Hz every {T['wbc_period_steps']} sim steps (dt_wbc {T['dt_wbc']:.4f})"
++          f" | dt_mpc {T['dt_mpc']} N {T['N']} horizon {T['horizon']:.3f} s | shift {ctx.mpc.shift} node(s)"
++          f" | fddp iterations {ctx.mpc.mpc_iterations} | WBC lookahead {ctx.mpc.wbc_lookahead_dt} s | outer PD {'off' if args.no_outer_pd else args.outer_pd_mode} | state read {'stale (after mj_step)' if args.stale_state else 'fresh (mj_step1/mj_step2)'}")
++    if overrides:
++        print(f"[config] overrides: {overrides}")
++
++    idx = list(range(len(CASES))) if args.cases == "all" else [int(i) for i in args.cases.split(",")]
+     results = []
+-    for label, vx_cmd, wz_cmd in cases:
++    logs = {}
++    for i in idx:
++        label, vx_cmd, wz_cmd = CASES[i]
+         t0 = time.time()
+-        summary, log = run_case(mpc, solve_mpc, solve_wbc, model, base_body_id, contact_ids,
+-                                 vx_cmd, wz_cmd, duration_s=3.0, ramp_s=1.0, label=label)
+-        dt_wall = time.time() - t0
+-        summary["wall_s"] = dt_wall
++        summary, L = run_case(ctx, vx_cmd, wz_cmd, args.ramp, args.hold, label,
++                              outer_pd=not args.no_outer_pd, steady_window_s=args.steady_window,
++                              verbose_every=args.verbose_every, outer_pd_mode=args.outer_pd_mode,
++                              fresh_state=not args.stale_state)
++        summary["wall_s"] = time.time() - t0
++        summary["overrides"] = overrides
++        summary["outer_pd"] = not args.no_outer_pd
++        summary["outer_pd_mode"] = args.outer_pd_mode
++        summary["fresh_state"] = not args.stale_state
++        summary["tag"] = args.tag
+         results.append(summary)
+-        print(f"[{label}] fell={summary['fell']} steady_vx={summary['steady_vx_mean']:.3f}"
+-              f"+-{summary['steady_vx_std']:.3f} steady_wz={summary['steady_wz_mean']:.3f}"
+-              f"+-{summary['steady_wz_std']:.3f} height=[{summary['height_min']:.3f},{summary['height_max']:.3f}]"
+-              f" roll_max={summary['roll_max_abs']:.3f} pitch_max={summary['pitch_max_abs']:.3f}"
+-              f" tau_max={summary['tau_max']:.1f} wall={dt_wall:.1f}s")
+-
+-    out_path = os.path.join(dir_path, "validation_results.json")
+-    with open(out_path, "w") as f:
+-        json.dump(results, f, indent=2)
+-    print(f"\nSaved results to {out_path}")
++        logs[label] = L
++        print_summary(summary)
++
++    with open(args.out, "w") as fh:
++        json.dump(results, fh, indent=2, default=lambda o: None if isinstance(o, float) and np.isnan(o) else str(o))
++    print(f"Saved results to {args.out}")
++    if args.save_logs:
++        flat = {}
++        for label, L in logs.items():
++            for k, v in L.items():
++                flat[f"{label}/{k}"] = v
++        np.savez_compressed(args.save_logs, **flat)
++        print(f"Saved logs to {args.save_logs}")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/mpx/utils/mpc_utils.py b/mpx/utils/mpc_utils.py
+index 02af6ad..c62a36e 100644
+--- a/mpx/utils/mpc_utils.py
++++ b/mpx/utils/mpc_utils.py
+@@ -483,10 +483,17 @@ def reference_generator_dfcip_online(
+             theta, v, omega                  # 10:13
+         ]
+ 
+-    Command layout:
+-        cmd[0] = desired forward velocity v_des
+-        cmd[1] = desired yaw rate omega_des
+-        cmd[2] = desired vertical CoM velocity vz_des, ignored here for flat walking
++    Command layout (same as KeyboardVelocityCommand.mpc_wheeled_input and the
++    RL environment: [vx, vz, omega, height]):
++        cmd[0] = desired forward velocity v_des [m/s]
++        cmd[1] = desired vertical CoM velocity vz_des [m/s], ignored for flat ground
++        cmd[2] = desired yaw rate omega_des [rad/s]
++        cmd[3] = desired CoM height [m], currently ignored (z_com_ref is fixed below)
++
++    Args:
++        N:  number of MPC stages; the reference has N+1 nodes
++        dt: MPC prediction step (the reference is generated directly at the
++            MPC discretisation, no decimation)
+ 
+     Returns:
+         x_ref: (N+1, nx)
+@@ -586,18 +593,26 @@ def reference_generator_dfcip_online(
+         )
+ 
+         # --------------------------------------------------------
+-        # C++-style unicycle Euler integration
+-        # vx/vy are velocities, not displacements
++        # Unicycle forward-Euler integration, consistent with the MPC model
++        # (models.wheeled_dfcip_dynamics): the base point moves with the
++        # velocity/heading of the CURRENT node, and the reference CoM velocity
++        # at the NEXT node is expressed along the heading of that same node.
++        # NOTE: the previous version used cos/sin(theta) of the current node for
++        # the next node's CoM velocity, i.e. the reference CoM direction lagged
++        # the reference heading by one MPC node. Through the terminal
++        # stability constraint (pcom(N) = c(N)) that lag (N*dt^2*v*omega, 4 mm
++        # at v=1, omega=0.8, dt=0.01) made the MPC trade yaw-rate tracking for
++        # CoM/base alignment (measured omega 0.75 for a 0.8 rad/s command).
+         # --------------------------------------------------------
+-        vx_next = v_next * jnp.cos(theta)
+-        vy_next = v_next * jnp.sin(theta)
+-
+         p_xy_next = p_xy + jnp.array([
+-            vx_next * dt,
+-            vy_next * dt,
++            v * jnp.cos(theta) * dt,
++            v * jnp.sin(theta) * dt,
+         ])
+ 
+-        theta_next = theta + omega_next * dt
++        theta_next = theta + omega * dt
++
++        vx_next = v_next * jnp.cos(theta_next)
++        vy_next = v_next * jnp.sin(theta_next)
+ 
+         x_ref_t = build_state(
+             p_xy=p_xy_next,
+@@ -965,7 +980,7 @@ from mujoco import mjx
+ import jaxopt
+ import qpax
+ 
+-def whole_body_interface_wheeled_legged_qp(
++def _whole_body_interface_wheeled_legged_qp_impl(
+     mjx_model,
+     # ── static (via partial) ──────────────────────────────────────────────
+     mass, grav, d,
+@@ -984,7 +999,8 @@ def whole_body_interface_wheeled_legged_qp(
+     w_base,     # params_.weight_base
+     mu_,        # params_.mu
+     # ── runtime ───────────────────────────────────────────────────────────
+-    qpos, qvel, desired
++    qpos, qvel, desired,
++    posture_mask=None,
+ ):
+     nq    = qpos.shape[0]
+     nv    = mjx_model.nv
+@@ -1166,8 +1182,13 @@ def whole_body_interface_wheeled_legged_qp(
+     # err_posture_vel << 0(6), desired.qjntdot - qdot_joint
+     err_posture_vel = jnp.concatenate([jnp.zeros(6), des['qjntdot']  - qdot_jnt])
+ 
+-    # matrix_with_no_wheel: Identity(nj) with wheel dof zeroed out (joints 3 and 7 = wheels)
+-    matrix_with_no_wheel = jnp.eye(nj).at[3, 3].set(0.0).at[7, 7].set(0.0)
++    # Posture-regulation selection: by default every leg joint except the wheel
++    # spin DOFs (joints 3 and 7); a custom (nj,) 0/1 mask restricts the task to a
++    # subset (e.g. the hip abduction joints only, see config.posture_joint_ids).
++    if posture_mask is None:
++        matrix_with_no_wheel = jnp.eye(nj).at[3, 3].set(0.0).at[7, 7].set(0.0)
++    else:
++        matrix_with_no_wheel = jnp.diag(jnp.asarray(posture_mask, dtype=qpos.dtype))
+     err_posture_selection_matrix = jax.scipy.linalg.block_diag(
+         jnp.zeros((6, 6)), matrix_with_no_wheel
+     )  # (nv, nv)
+@@ -1450,10 +1471,66 @@ def whole_body_interface_wheeled_legged_qp(
+     #     tau = Ma * q_ddot + ca - Jla' * T_l * fl - Jra' * T_r * fr
+     # ══════════════════════════════════════════════════════════════════════
+     tau = Ma @ qddot + ca - Jla.T @ T_l @ fl - Jra.T @ T_r @ fr
+-    
++
++    # ══════════════════════════════════════════════════════════════════════
++    #  10. DIAGNOSTICS (not used by the control law; consumed by the headless
++    #      validation harness through BatchedMPCControllerWrapper.whole_body_run_diag)
++    # ══════════════════════════════════════════════════════════════════════
++    fl_local = l_contact_frame.T @ fl          # contact frame: [tangent, lateral, normal]
++    fr_local = r_contact_frame.T @ fr
++    ineq_slack = h - G @ x                     # >= 0 when satisfied
++    n_jl = 2 * nj
++    diag = dict(
++        converged=converged,
++        iters=iters,
++        # task residuals: J qddot + Jdot qdot - a_total (zero = task exactly realised)
++        res_com=J_com @ qddot + a_com_drift - a_com_total,
++        res_lwheel=J_left_wheel_lin @ qddot + a_lwheel_drift - a_lwheel_total,
++        res_rwheel=J_right_wheel_lin @ qddot + a_rwheel_drift - a_rwheel_total,
++        res_base=J_base_link_rot @ qddot + a_base_orientation_drift - a_base_orientation_total,
++        # accelerations actually requested to the QP (feedforward + PD)
++        a_com_total=a_com_total,
++        a_lwheel_total=a_lwheel_total,
++        a_rwheel_total=a_rwheel_total,
++        a_base_total=a_base_orientation_total,
++        # PD error terms feeding those requests
++        err_com=err_com,
++        err_com_vel=err_com_vel,
++        err_lwheel=err_lwheel,
++        err_rwheel=err_rwheel,
++        err_base=err_base_orientation,
++        # constraint satisfaction
++        eq_res_norm=jnp.linalg.norm(A_eq @ x - b_eq),
++        ineq_slack_min_joint=jnp.min(jnp.concatenate([ineq_slack[:n_jl], ineq_slack[G.shape[0] // 2: G.shape[0] // 2 + n_jl]])),
++        # friction margins in the contact frame: [mu Fz - |Fx|, mu Fz - |Fy|, Fz - fz_min]
++        fric_margin_l=jnp.array([mu_ * fl_local[2] - jnp.abs(fl_local[0]),
++                                 mu_ * fl_local[2] - jnp.abs(fl_local[1]),
++                                 fl_local[2] - fz_min]),
++        fric_margin_r=jnp.array([mu_ * fr_local[2] - jnp.abs(fr_local[0]),
++                                 mu_ * fr_local[2] - jnp.abs(fr_local[1]),
++                                 fr_local[2] - fz_min]),
++        fl_local=fl_local,
++        fr_local=fr_local,
++    )
++    return tau, qddot, fl, fr, diag
++
++
++def whole_body_interface_wheeled_legged_qp(*args, **kwargs):
++    """Whole-body QP (public entry point). Returns (tau, qddot, fl, fr).
++
++    The diagnostics computed by the implementation are dropped here so that the
++    call signature used by the controller wrappers and the RL environment is
++    unchanged; use ``whole_body_interface_wheeled_legged_qp_diag`` to get them.
++    """
++    tau, qddot, fl, fr, _ = _whole_body_interface_wheeled_legged_qp_impl(*args, **kwargs)
+     return tau, qddot, fl, fr
+ 
+ 
++def whole_body_interface_wheeled_legged_qp_diag(*args, **kwargs):
++    """Whole-body QP returning also a diagnostics dict (see the implementation)."""
++    return _whole_body_interface_wheeled_legged_qp_impl(*args, **kwargs)
++
++
+ import time
+ 
+ _WBC_TIMING = {}
+diff --git a/mpx/utils/mpc_wrapper_dfcip.py b/mpx/utils/mpc_wrapper_dfcip.py
+index 821a599..0fea134 100644
+--- a/mpx/utils/mpc_wrapper_dfcip.py
++++ b/mpx/utils/mpc_wrapper_dfcip.py
+@@ -10,6 +10,7 @@ import mpx.utils.objectives as mpc_objectives
+ import mujoco 
+ from mujoco import mjx
+ import mpx.jax_ocp_solvers.optimizers as optimizers
++from mpx.utils.timing import derive_timing, check_model_timestep, describe_timing
+ from jax import dlpack as jax_dlpack
+ from timeit import default_timer as timer
+ import time
+@@ -40,8 +41,8 @@ class BatchedMPCControllerWrapper:
+         Initializes the MPC controller wrapper.
+         
+         Args:
+-            config: Configuration object containing MPC and gait parameters.
+-            mpc_frequency: Frequency (Hz) at which MPC updates occur.
++            config: Configuration module/namespace (see mpx.config.config_dfcip).
++            n_env: Number of environments solved in parallel (vmapped).
+         """
+         #jax.config.update("jax_compilation_cache_dir", "./jax_cache")
+         #jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+@@ -51,9 +52,23 @@ class BatchedMPCControllerWrapper:
+         model = mujoco.MjModel.from_xml_path(config.model_path)
+         mjx_model = mjx.put_model(model)
+         self.config = config
++        # Simulation / MPC / WBC timing, derived from the primitive config values
++        # with explicit consistency checks (see mpx.utils.timing).
++        self.timing = derive_timing(config)
++        check_model_timestep(model.opt.timestep, self.timing)
+         self.mpc_frequency = config.mpc_frequency
+-        self.shift = int(1 / (config.dt_mpc * config.mpc_frequency))
+-        print(f"MPC update every {self.shift} simulation steps (mpc_frequency={self.mpc_frequency} Hz, dt={config.dt_mpc} s)")
++        # Warm-start shift in MPC nodes per MPC update (one update period).
++        self.shift = self.timing["mpc_shift_nodes"]
++        # Number of FDDP iterations per MPC call (real-time iteration scheme
++        # uses 1; larger values are only meant for diagnostics / ablations).
++        self.mpc_iterations = int(getattr(config, "mpc_iterations", 1))
++        # Lookahead used to build the WBC position/velocity references from the
++        # measured state and the MPC first-stage accelerations. 0 = references
++        # evaluated at the current instant (pure feedforward acceleration
++        # tracking, see config_dfcip.wbc_lookahead_dt).
++        self.wbc_lookahead_dt = float(getattr(config, "wbc_lookahead_dt", 0.0))
++        print("[MPC/WBC timing] " + describe_timing(self.timing, self.mpc_iterations)
++              + f" | WBC reference lookahead {self.wbc_lookahead_dt} s")
+         
+         # Timer and liftoff states for the reference generator.
+         self.q0 = config.q0.copy()          # Initial joint configuration
+@@ -90,11 +105,18 @@ class BatchedMPCControllerWrapper:
+         self.dynamics = partial(mpc_dyn_model.wheeled_dfcip_dynamics,
+             mjx_model, config.mass, config.grav, config.dt_mpc)
+ 
+-        work = partial(optimizers.fddp_mpc, self.cost, self.dynamics, self.hessian_approx, False)
++        _fddp = partial(optimizers.fddp_mpc, self.cost, self.dynamics, self.hessian_approx, False)
++
++        def work(reference, parameter, W, x0, X_init, U_init):
++            X_it, U_it, D_it = X_init, U_init, None
++            for _ in range(self.mpc_iterations):
++                X_it, U_it, D_it = _fddp(reference, parameter, W, x0, X_it, U_it)
++            return X_it, U_it, D_it
+         
+-        self.ref_substeps = int(round(config.dt_mpc / config.dt_ref))
+-        self.N_dense = config.N * self.ref_substeps                
+-        reference_generator = partial(mpc_utils.reference_generator_dfcip_online, self.N_dense, config.dt_ref, config.mass, config.grav)
++        # The online reference generator produces exactly the MPC discretisation:
++        # N+1 nodes spaced by dt_mpc (no dense generation followed by decimation).
++        reference_generator = partial(mpc_utils.reference_generator_dfcip_online,
++                                      config.N, config.dt_mpc, config.mass, config.grav)
+ 
+         # Whole-body controller: static args frozen via partial, runtime args
+         # (X0_prev, U0_prev, V0_prev, qpos, qvel, desired) passed at call time.
+@@ -124,7 +146,7 @@ class BatchedMPCControllerWrapper:
+         _bid   = body_id
+         _bbid  = base_body_id
+         _wr    = config.wheel_radius
+-        _st    = 1.0 / config.whole_body_frequency
++        _st    = self.timing["dt_wbc"]     # WBC period: joint limit prediction step
+         _nc    = 1 #config.n_contact
+         _Kpm   = config.Kp_motion;  _Kdm  = config.Kd_motion
+         _Kpw   = config.Kp_wheel;   _Kdw  = config.Kd_wheel
+@@ -132,7 +154,14 @@ class BatchedMPCControllerWrapper:
+         _w_ps  = config.w_posture
+         _wq    = config.w_qddot;    _wc   = config.w_com
+         _wl    = config.w_lwheel;   _wrr  = config.w_rwheel;  _wb = config.w_base
+-        _mu    = config.mu               # 0.5 in C++
++        _mu    = config.mu
++        # Posture task joint selection (None = all leg joints except the wheels).
++        _pj = getattr(config, "posture_joint_ids", None)
++        if _pj is None:
++            _posture_mask = None
++        else:
++            _posture_mask = jnp.zeros(nj).at[jnp.array(list(_pj))].set(1.0)
++        self._posture_mask = _posture_mask
+ 
+         _Kpr = config.Kp_reg;  _Kdr = config.Kd_reg
+ 
+@@ -146,9 +175,72 @@ class BatchedMPCControllerWrapper:
+                 _w_ps,
+                 _wq, _wc, _wl, _wrr, _wb,
+                 _mu,
+-                qpos, qvel, desired
++                qpos, qvel, desired,
++                posture_mask=_posture_mask,
++            )
++
++        def whole_body_control_diag(qpos, qvel, desired):
++            return mpc_utils.whole_body_interface_wheeled_legged_qp_diag(
++                _mjx, config.mass, config.grav, config.d,
++                _cid, _bid, _bbid,
++                _wr, _st, _nc,
++                _Kpm, _Kdm, _Kpw, _Kdw, _Kpr, _Kdr,
++                _w_ps,
++                _wq, _wc, _wl, _wrr, _wb,
++                _mu,
++                qpos, qvel, desired,
++                posture_mask=_posture_mask,
++            )
++
++        # MPC diagnostics (harness only): cost before/after the FDDP step,
++        # multiple-shooting defects, step acceptance and the physical
++        # consistency (moment balance, CoM lean) of the returned plan.
++        _cost_full = self.cost
++        _dyn_full = partial(self.dynamics, parameter=None)
++        _N = config.N
++        _d_half = jnp.array([0.0, config.d / 2.0, 0.0])
++
++        def mpc_diag(reference, W, x0, X_prev, U_prev, X, U):
++            cost_fn = partial(_cost_full, W, reference)
++            ts = jnp.arange(_N + 1)
++            pad = lambda U_: jnp.concatenate([U_, jnp.zeros((1, U_.shape[1]))], axis=0)
++            cost_before = jnp.sum(jax.vmap(cost_fn)(X_prev, pad(U_prev), ts))
++            cost_after = jnp.sum(jax.vmap(cost_fn)(X, pad(U), ts))
++            defects = jnp.vstack([
++                x0 - X[0],
++                jax.vmap(lambda t: _dyn_full(X[t], U[t], t) - X[t + 1])(jnp.arange(_N)),
++            ])
++            accepted = jnp.any(jnp.abs(U - U_prev) > 0.0)
++
++            def plan_consistency(x, u):
++                pcom, c, theta = x[0:3], x[6:9], x[10]
++                fl, fr = u[3:6], u[6:9]
++                ct, st = jnp.cos(theta), jnp.sin(theta)
++                R = jnp.array([[ct, -st, 0.0], [st, ct, 0.0], [0.0, 0.0, 1.0]])
++                pl = c + R @ _d_half
++                pr = c - R @ _d_half
++                h_moment = jnp.cross(pl - pcom, fl) + jnp.cross(pr - pcom, fr)
++                lean_body = R.T @ (pcom - c)      # CoM offset from the base point, body frame
++                f_tot_body = R.T @ (fl + fr)      # total GRF, body frame [fwd, lat, up]
++                return h_moment, lean_body, f_tot_body
++
++            h_moment, lean_body, f_tot_body = jax.vmap(plan_consistency)(X[:-1], U)
++            return dict(
++                cost_before=cost_before,
++                cost_after=cost_after,
++                defect_norm=jnp.linalg.norm(defects),
++                defect0_norm=jnp.linalg.norm(defects[0]),
++                accepted=accepted,
++                h_moment_max=jnp.max(jnp.abs(h_moment)),
++                h_moment_0=h_moment[0],
++                lean_body_0=lean_body[0],
++                lean_body_max=jnp.max(jnp.abs(lean_body[:, :2]), axis=0),
++                f_tot_body_0=f_tot_body[0],
++                stability_N=X[-1, 0:2] - X[-1, 6:8],
+             )
+ 
++        self._mpc_diag = jax.jit(jax.vmap(mpc_diag))
++        self._whole_body_interface_diag = jax.jit(jax.vmap(whole_body_control_diag))
+         self._solve = jax.jit(jax.vmap(work))
+         self._ref_gen = jax.jit(jax.vmap(reference_generator))
+         self._build_desired_jit = jax.jit(
+@@ -195,8 +287,7 @@ class BatchedMPCControllerWrapper:
+         # Generate reference trajectory and additional MPC parameters.
+         
+         x_ref, u_ref = self._ref_gen(x0, cmd)
+-        reference_full = jnp.concatenate([x_ref, u_ref], axis=-1)
+-        reference = reference_full[:, ::self.ref_substeps, :]
++        reference = jnp.concatenate([x_ref, u_ref], axis=-1)   # (n_env, N+1, nx+nu)
+         
+         parameter = None
+ 
+@@ -214,7 +305,8 @@ class BatchedMPCControllerWrapper:
+         new_alpha = U[:,0,2]
+         new_grf = U[:,0,3:]
+         
+-        # Warm-start for the next call: shift trajectories forward.
++        # Warm-start for the next call: shift the trajectories forward by one
++        # MPC update period (self.shift MPC nodes, not simulation steps).
+         s = self.shift
+         new_X0  = jnp.concatenate([X[:, s:, :], jnp.tile(X[:, -1:, :], (1, s, 1))], axis=1)
+         new_U0  = jnp.concatenate([U[:, s:, :], jnp.tile(U[:, -1:, :], (1, s, 1))], axis=1)
+@@ -231,6 +323,31 @@ class BatchedMPCControllerWrapper:
+ 
+         return new_state, reference
+ 
++    def run_diag(self, state: MPCState, x0, cmd):
++        """Same as ``run`` but also returns a diagnostics dict (harness only)."""
++        new_state, reference = self.run(state, x0, cmd)
++        diag = self._mpc_diag(
++            reference,
++            jnp.tile(self.config.W, (self.n_env, 1, 1)),
++            x0,
++            state.X0_shifted,
++            state.U0_shifted,
++            new_state.X_prediction,
++            new_state.U_prediction,
++        )
++        return new_state, reference, diag
++
++    def whole_body_run_diag(self, state: MPCState, x0, qpos, qvel,
++                            pl_world, pr_world, dpl_world, dpr_world,
++                            action_nn=None, use_nn=False):
++        """Same as ``whole_body_run`` but also returns the WBC QP diagnostics dict."""
++        desired = self._build_desired_jit(
++            x0, qpos, state, pl_world, pr_world, dpl_world, dpr_world,
++            action_nn=action_nn, use_nn=use_nn,
++        )
++        tau_cmd, qddot, fl, fr, diag = self._whole_body_interface_diag(qpos, qvel, desired)
++        return state, tau_cmd, qddot, fl, fr, desired, diag
++
+     def _build_desired_impl(
+         self,
+         x0,
+@@ -345,7 +462,7 @@ class BatchedMPCControllerWrapper:
+         # ── acc_com_ = 1/m * (fcl + fcr) + g_vec ─────────────────────────
+         # ── vel_com_ = vcom_curr + dt_ * acc_com_ ────────────────────────
+         # ── pos_com_ = pcom_curr + dt_ * vcom_curr ───────────────────────
+-        dt = 1.0 / self.config.whole_body_frequency
++        dt = self.wbc_lookahead_dt
+         acc_com_ = (fcl + fcr) / self.config.mass + g_vec[None, :]
+         if use_nn:
+             weights_acc = jnp.array([0.5, 0.5, 0.5])
+
+--- /dev/null
++++ b/mpx/utils/timing.py
+@@ -0,0 +1,88 @@
++"""Timing bookkeeping for the DFCIP MPC + WBC controller.
++
++All rates are derived from the primitive configuration values
++(``simulation_frequency``, ``mpc_frequency``, ``whole_body_frequency``,
++``dt_mpc``, ``N``) so that any override of a primitive propagates consistently,
++and every derivation is checked explicitly: no silent rounding can alter the
++timing. Shared by the config module (self-check at import), the controller
++wrapper, the example drivers and the validation harness.
++"""
++from __future__ import annotations
++
++_TOL = 1e-9
++
++
++def derive_timing(config) -> dict:
++    """Return a dict with the simulation / MPC / WBC timing implied by ``config``.
++
++    Keys:
++        sim_f, dt_sim                      MuJoCo integration rate and step
++        mpc_f, mpc_period_s                MPC update rate and period
++        wbc_f, dt_wbc                      WBC update rate and step (also the WBC
++                                           joint-limit prediction step)
++        dt_mpc, N, horizon_s               MPC discretisation and horizon
++        mpc_period_sim_steps               simulation steps between MPC updates
++        wbc_period_sim_steps               simulation steps between WBC updates
++        mpc_shift_nodes                    MPC nodes the warm start is shifted by
++                                           at every MPC update (NOT simulation steps)
++
++    Raises ``ValueError`` on any inconsistency.
++    """
++    sim_f = int(config.simulation_frequency)
++    mpc_f = int(config.mpc_frequency)
++    wbc_f = int(config.whole_body_frequency)
++    dt_mpc = float(config.dt_mpc)
++    N = int(config.N)
++    horizon_required = float(getattr(config, "mpc_horizon_s", 0.5))
++
++    if sim_f <= 0 or mpc_f <= 0 or wbc_f <= 0:
++        raise ValueError("simulation_frequency, mpc_frequency and whole_body_frequency must be positive")
++    if float(config.simulation_frequency) != sim_f or float(config.mpc_frequency) != mpc_f \
++            or float(config.whole_body_frequency) != wbc_f:
++        raise ValueError("frequencies must be integers (Hz)")
++    if sim_f % mpc_f != 0:
++        raise ValueError(f"simulation_frequency ({sim_f} Hz) must be an integer multiple of mpc_frequency ({mpc_f} Hz)")
++    if sim_f % wbc_f != 0:
++        raise ValueError(f"simulation_frequency ({sim_f} Hz) must be an integer multiple of whole_body_frequency ({wbc_f} Hz)")
++    if mpc_f % wbc_f != 0 and wbc_f % mpc_f != 0:
++        raise ValueError(f"mpc_frequency ({mpc_f} Hz) and whole_body_frequency ({wbc_f} Hz) must be integer multiples of each other")
++
++    horizon_s = N * dt_mpc
++    if abs(horizon_s - horizon_required) > _TOL:
++        raise ValueError(f"MPC horizon N*dt_mpc = {N}*{dt_mpc} = {horizon_s:.6f} s differs from the required {horizon_required} s")
++
++    mpc_period_s = 1.0 / mpc_f
++    shift_exact = mpc_period_s / dt_mpc
++    shift = int(round(shift_exact))
++    if shift < 1:
++        raise ValueError(f"the MPC update period ({mpc_period_s} s) is shorter than dt_mpc ({dt_mpc} s): shift = {shift_exact:.4f} < 1 node")
++    if abs(shift - shift_exact) > _TOL:
++        raise ValueError(f"the MPC update period ({mpc_period_s} s) is not an integer multiple of dt_mpc ({dt_mpc} s): shift = {shift_exact:.6f} nodes")
++
++    return dict(
++        sim_f=sim_f, dt_sim=1.0 / sim_f,
++        mpc_f=mpc_f, mpc_period_s=mpc_period_s,
++        wbc_f=wbc_f, dt_wbc=1.0 / wbc_f,
++        dt_mpc=dt_mpc, N=N, horizon_s=horizon_s,
++        mpc_period_sim_steps=sim_f // mpc_f,
++        wbc_period_sim_steps=sim_f // wbc_f,
++        mpc_shift_nodes=shift,
++    )
++
++
++def check_model_timestep(model_timestep: float, timing: dict, tol: float = 1e-12) -> None:
++    """Raise if the MuJoCo model timestep does not equal 1/simulation_frequency."""
++    if abs(float(model_timestep) - timing["dt_sim"]) > tol:
++        raise ValueError(
++            f"model.opt.timestep = {float(model_timestep):.6g} s but 1/simulation_frequency = "
++            f"{timing['dt_sim']:.6g} s ({timing['sim_f']} Hz); make the XML timestep and "
++            f"config.simulation_frequency consistent")
++
++
++def describe_timing(timing: dict, mpc_iterations: int = 1) -> str:
++    """One-line human readable summary of the timing scheme."""
++    return (f"sim {timing['sim_f']} Hz (dt_sim {timing['dt_sim']:.4f} s) | "
++            f"MPC {timing['mpc_f']} Hz: dt_mpc {timing['dt_mpc']} s, N {timing['N']}, horizon {timing['horizon_s']:.2f} s, "
++            f"update every {timing['mpc_period_sim_steps']} sim steps = {timing['mpc_shift_nodes']} MPC node(s), "
++            f"{mpc_iterations} FDDP iteration(s) per update | "
++            f"WBC {timing['wbc_f']} Hz: dt_wbc {timing['dt_wbc']:.4f} s, every {timing['wbc_period_sim_steps']} sim steps")

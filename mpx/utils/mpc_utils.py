@@ -483,10 +483,17 @@ def reference_generator_dfcip_online(
             theta, v, omega                  # 10:13
         ]
 
-    Command layout:
-        cmd[0] = desired forward velocity v_des
-        cmd[1] = desired yaw rate omega_des
-        cmd[2] = desired vertical CoM velocity vz_des, ignored here for flat walking
+    Command layout (same as KeyboardVelocityCommand.mpc_wheeled_input and the
+    RL environment: [vx, vz, omega, height]):
+        cmd[0] = desired forward velocity v_des [m/s]
+        cmd[1] = desired vertical CoM velocity vz_des [m/s], ignored for flat ground
+        cmd[2] = desired yaw rate omega_des [rad/s]
+        cmd[3] = desired CoM height [m], currently ignored (z_com_ref is fixed below)
+
+    Args:
+        N:  number of MPC stages; the reference has N+1 nodes
+        dt: MPC prediction step (the reference is generated directly at the
+            MPC discretisation, no decimation)
 
     Returns:
         x_ref: (N+1, nx)
@@ -586,18 +593,26 @@ def reference_generator_dfcip_online(
         )
 
         # --------------------------------------------------------
-        # C++-style unicycle Euler integration
-        # vx/vy are velocities, not displacements
+        # Unicycle forward-Euler integration, consistent with the MPC model
+        # (models.wheeled_dfcip_dynamics): the base point moves with the
+        # velocity/heading of the CURRENT node, and the reference CoM velocity
+        # at the NEXT node is expressed along the heading of that same node.
+        # NOTE: the previous version used cos/sin(theta) of the current node for
+        # the next node's CoM velocity, i.e. the reference CoM direction lagged
+        # the reference heading by one MPC node. Through the terminal
+        # stability constraint (pcom(N) = c(N)) that lag (N*dt^2*v*omega, 4 mm
+        # at v=1, omega=0.8, dt=0.01) made the MPC trade yaw-rate tracking for
+        # CoM/base alignment (measured omega 0.75 for a 0.8 rad/s command).
         # --------------------------------------------------------
-        vx_next = v_next * jnp.cos(theta)
-        vy_next = v_next * jnp.sin(theta)
-
         p_xy_next = p_xy + jnp.array([
-            vx_next * dt,
-            vy_next * dt,
+            v * jnp.cos(theta) * dt,
+            v * jnp.sin(theta) * dt,
         ])
 
-        theta_next = theta + omega_next * dt
+        theta_next = theta + omega * dt
+
+        vx_next = v_next * jnp.cos(theta_next)
+        vy_next = v_next * jnp.sin(theta_next)
 
         x_ref_t = build_state(
             p_xy=p_xy_next,
@@ -965,7 +980,7 @@ from mujoco import mjx
 import jaxopt
 import qpax
 
-def whole_body_interface_wheeled_legged_qp(
+def _whole_body_interface_wheeled_legged_qp_impl(
     mjx_model,
     # ── static (via partial) ──────────────────────────────────────────────
     mass, grav, d,
@@ -984,7 +999,8 @@ def whole_body_interface_wheeled_legged_qp(
     w_base,     # params_.weight_base
     mu_,        # params_.mu
     # ── runtime ───────────────────────────────────────────────────────────
-    qpos, qvel, desired
+    qpos, qvel, desired,
+    posture_mask=None,
 ):
     nq    = qpos.shape[0]
     nv    = mjx_model.nv
@@ -1166,8 +1182,13 @@ def whole_body_interface_wheeled_legged_qp(
     # err_posture_vel << 0(6), desired.qjntdot - qdot_joint
     err_posture_vel = jnp.concatenate([jnp.zeros(6), des['qjntdot']  - qdot_jnt])
 
-    # matrix_with_no_wheel: Identity(nj) with wheel dof zeroed out (joints 3 and 7 = wheels)
-    matrix_with_no_wheel = jnp.eye(nj).at[3, 3].set(0.0).at[7, 7].set(0.0)
+    # Posture-regulation selection: by default every leg joint except the wheel
+    # spin DOFs (joints 3 and 7); a custom (nj,) 0/1 mask restricts the task to a
+    # subset (e.g. the hip abduction joints only, see config.posture_joint_ids).
+    if posture_mask is None:
+        matrix_with_no_wheel = jnp.eye(nj).at[3, 3].set(0.0).at[7, 7].set(0.0)
+    else:
+        matrix_with_no_wheel = jnp.diag(jnp.asarray(posture_mask, dtype=qpos.dtype))
     err_posture_selection_matrix = jax.scipy.linalg.block_diag(
         jnp.zeros((6, 6)), matrix_with_no_wheel
     )  # (nv, nv)
@@ -1450,8 +1471,64 @@ def whole_body_interface_wheeled_legged_qp(
     #     tau = Ma * q_ddot + ca - Jla' * T_l * fl - Jra' * T_r * fr
     # ══════════════════════════════════════════════════════════════════════
     tau = Ma @ qddot + ca - Jla.T @ T_l @ fl - Jra.T @ T_r @ fr
-    
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  10. DIAGNOSTICS (not used by the control law; consumed by the headless
+    #      validation harness through BatchedMPCControllerWrapper.whole_body_run_diag)
+    # ══════════════════════════════════════════════════════════════════════
+    fl_local = l_contact_frame.T @ fl          # contact frame: [tangent, lateral, normal]
+    fr_local = r_contact_frame.T @ fr
+    ineq_slack = h - G @ x                     # >= 0 when satisfied
+    n_jl = 2 * nj
+    diag = dict(
+        converged=converged,
+        iters=iters,
+        # task residuals: J qddot + Jdot qdot - a_total (zero = task exactly realised)
+        res_com=J_com @ qddot + a_com_drift - a_com_total,
+        res_lwheel=J_left_wheel_lin @ qddot + a_lwheel_drift - a_lwheel_total,
+        res_rwheel=J_right_wheel_lin @ qddot + a_rwheel_drift - a_rwheel_total,
+        res_base=J_base_link_rot @ qddot + a_base_orientation_drift - a_base_orientation_total,
+        # accelerations actually requested to the QP (feedforward + PD)
+        a_com_total=a_com_total,
+        a_lwheel_total=a_lwheel_total,
+        a_rwheel_total=a_rwheel_total,
+        a_base_total=a_base_orientation_total,
+        # PD error terms feeding those requests
+        err_com=err_com,
+        err_com_vel=err_com_vel,
+        err_lwheel=err_lwheel,
+        err_rwheel=err_rwheel,
+        err_base=err_base_orientation,
+        # constraint satisfaction
+        eq_res_norm=jnp.linalg.norm(A_eq @ x - b_eq),
+        ineq_slack_min_joint=jnp.min(jnp.concatenate([ineq_slack[:n_jl], ineq_slack[G.shape[0] // 2: G.shape[0] // 2 + n_jl]])),
+        # friction margins in the contact frame: [mu Fz - |Fx|, mu Fz - |Fy|, Fz - fz_min]
+        fric_margin_l=jnp.array([mu_ * fl_local[2] - jnp.abs(fl_local[0]),
+                                 mu_ * fl_local[2] - jnp.abs(fl_local[1]),
+                                 fl_local[2] - fz_min]),
+        fric_margin_r=jnp.array([mu_ * fr_local[2] - jnp.abs(fr_local[0]),
+                                 mu_ * fr_local[2] - jnp.abs(fr_local[1]),
+                                 fr_local[2] - fz_min]),
+        fl_local=fl_local,
+        fr_local=fr_local,
+    )
+    return tau, qddot, fl, fr, diag
+
+
+def whole_body_interface_wheeled_legged_qp(*args, **kwargs):
+    """Whole-body QP (public entry point). Returns (tau, qddot, fl, fr).
+
+    The diagnostics computed by the implementation are dropped here so that the
+    call signature used by the controller wrappers and the RL environment is
+    unchanged; use ``whole_body_interface_wheeled_legged_qp_diag`` to get them.
+    """
+    tau, qddot, fl, fr, _ = _whole_body_interface_wheeled_legged_qp_impl(*args, **kwargs)
     return tau, qddot, fl, fr
+
+
+def whole_body_interface_wheeled_legged_qp_diag(*args, **kwargs):
+    """Whole-body QP returning also a diagnostics dict (see the implementation)."""
+    return _whole_body_interface_wheeled_legged_qp_impl(*args, **kwargs)
 
 
 import time

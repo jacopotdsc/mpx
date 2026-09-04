@@ -16,15 +16,35 @@ joints_name = [
 contact_frame = ['left_leg_4_collision', 'right_leg_4_collision',]
 body_name = ['left_leg_4', 'right_leg_4']
 
-# Time and stage parameters
-#dt = 0.002  # Time step in seconds
-dt_mpc = 0.002
-N = 250        # Number of stages
+# ── Timing ───────────────────────────────────────────────────────────────
+# Three independent rates. MuJoCo integrates at simulation_frequency; the MPC
+# and the whole-body QP are updated at mpc_frequency / whole_body_frequency and
+# the resulting torque / joint accelerations are held between updates
+# (simulation_frequency // whole_body_frequency simulation steps).
+# The derived quantities and all consistency checks live in
+# mpx.utils.timing.derive_timing (called at the end of this file).
+simulation_frequency = 500   # Hz  -> dt_sim = 0.002 s (must equal the XML timestep)
+whole_body_frequency = 100   # Hz  -> dt_wbc = 0.01 s (WBC update period)
+mpc_frequency = 100          # Hz  -> MPC update period 0.01 s
+dt_mpc = 0.01                # s   MPC prediction step
+N = 50                       # MPC stages -> horizon N * dt_mpc = 0.5 s
+mpc_horizon_s = 0.5          # s   required prediction horizon (checked)
+# FDDP iterations per MPC update (real-time iteration scheme: 1). Kept as an
+# explicit parameter for ablations; the combined-command fix does not need > 1.
+mpc_iterations = 1
+# Lookahead [s] used to build the WBC position/velocity references from the
+# measured state: pos_ref = p + dt*v, vel_ref = v + dt*a_mpc. The C++ baseline
+# uses its 2 ms control period here, which turns the WBC task PD into a
+# Kp*dt*v positive velocity feedback (bias) whose gain scales with the WBC
+# period: at dt = dt_wbc = 0.01 s it destabilises the yaw (measured omega
+# 5 rad/s for a 0.8 rad/s command). With 0 the references are evaluated at
+# the current instant, the CoM/wheel task PD terms vanish identically and the
+# WBC tracks the MPC accelerations as a pure feedforward inverse-dynamics
+# stage (feedback is closed by the 100 Hz MPC). Validated: omega tracking
+# error 0.8 -> 0.800 (0.0) vs 0.825 (0.002) vs 5.0 (0.01).
+wbc_lookahead_dt = 0.0
 T_TRAJECTORY = 60
-mpc_frequency = 100  # Frequency of MPC updates in Hz
 grav = 9.81
-whole_body_frequency = 500
-dt_ref = 1.0 / whole_body_frequency
 # Timer values (make sure the values match your intended configuration)
 timer_t = jnp.array([0.5, 0.0, 0.0, 0.5])  # Timer values for each leg
 duty_factor = 0.65  # Duty factor for the gait
@@ -85,22 +105,30 @@ Kp_wheel  = 5e1
 Kd_wheel  = 3e1 
 Kp_reg    = 1e2
 Kd_reg    = 2e1
-# NOTE: was 1e-1. The C++ baseline's joint-posture-regulation WBC task has
-# weight_regulation = 0.0 both in getDefaultParams() and after the
-# WalkingManager::init override (TITA_MJ/src/WholeBodyController.cpp /
-# WalkingManager.cpp) -- it is fully dead in the reference controller. A
-# nonzero posture task here pulls the legs toward the fixed q0 pose and
-# competes with the CoM/wheel/base tasks specifically when both a forward
-# velocity and a yaw-rate command are active simultaneously (the leg
-# configuration needed to satisfy both differs from q0). Zeroed to match
-# the real C++ runtime behavior.
-w_posture = 0.0
+# Joint posture regulation task (WBC). Restricted to the two hip-abduction
+# joints (posture_joint_ids): they are the kinematic redundancy of the stance
+# (track width) and nothing else anchors them -- under the lateral load of a
+# turn they drift (measured 19 mrad at v=1, omega=0.8), the contact midpoint
+# c shifts 3-5 mm sideways with respect to the CoM and the MPC terminal
+# stability constraint pcom(N)=c(N) then bends the base path to chase it
+# (steady omega +5%). Regulating all leg joints toward q0 instead fights the
+# CoM-height task (q0 corresponds to a 0.396 m CoM, tracked height 0.4 m):
+# steady pitch -0.02 rad. Validated at (1.0,0.8): omega 0.807 (abduction
+# only, with w_base=1) vs 0.843 (no posture task) vs 0.806 with -0.019 rad
+# pitch (all joints, w=1e-2).
+w_posture = 0.1
+posture_joint_ids = (0, 4)   # joint_left_leg_1, joint_right_leg_1 (indices in the 8 actuated joints)
 
 w_qddot     = 1e-12
 w_com       = 1e0
 w_lwheel    = 1e0
 w_rwheel    = 1e0
-w_base      = 1e-2
+# Base-orientation task (roll/pitch to zero, yaw to the axle heading). The C++
+# value 1e-2 leaves the base free to roll ~15 mrad into a turn under the
+# lateral contact force (CoM 5 mm inside the base point, same omega bias as
+# above through the terminal stability constraint). 1.0 keeps roll within
+# 2 mrad at v=1, omega=0.8; 0.1 is not sufficient (omega 0.825 vs 0.807).
+w_base      = 1e0
 
 # Cost matrices (diagonal matrices created using jnp.diag)
 Qp    = jnp.diag(jnp.array([1e2, 1e2, 1e3]))  # Cost matrix for position
@@ -158,17 +186,9 @@ w_theta  = 0e0      # heading
 # reproduce a bug just for parity's sake.
 w_v      = 1e1      # velocità com_ground projection
 w_omega  = 5e0      # velocità angolare
-# NOTE: tried raising w_v to 15 and 40 to fix the residual forward-speed
-# undershoot under the combined vx=0.6/omega=0.4 command (see fix log in
-# AUDIT_MPX_CONTROLLER.md). Both reintroduced the same NaN-WBC-torque
-# fall that mu/posture/h_fz/fz_min fixed for the single-axis and milder
-# combined cases -- even +50% (15) fell within ~4s. This operating point
-# is right at a stability boundary that's sensitive to small increases in
-# forward-velocity-tracking aggressiveness while turning; left at the
-# stable value (10). The remaining combined-command undershoot looks like
-# it needs a structural fix (WBC/QP feasibility margin, more than 1 FDDP
-# iteration under a stiffer cost, or better constraint softening), not
-# further cost-weight tuning -- see AUDIT_MPX_CONTROLLER.md.
+# NOTE: raising w_v (15, 40) had been tried against the combined-command
+# undershoot and reintroduced the NaN/fall; that was a symptom of the w_eq
+# conditioning problem documented above, not of w_v itself. Left at 10.
 
 # Control weights – ruote (attuatori principali, non troppo economici)
 w_a      = 1e-1      # accelerazione lineare
@@ -179,8 +199,25 @@ w_alpha  = 1e-3      # accelerazione angolare
 w_fcxy   = 1e-7      # forze orizzontali → penalizza, devono stare ~0
 w_fcz    = 1e-4     # forza verticale  → libera di adattarsi
 
-# Equality constraints
-w_eq     = 1e8    # momento + contatto
+# Soft equality constraints (moment balance, flat contact, Fz >= 0, terminal
+# CoM-over-base stability) -- a single penalty weight shared by all of them.
+#
+# NOTE: was 1e8 (the C++ baseline value). With the real-time-iteration scheme
+# (one FDDP iteration per 10 ms update) a 1e8 penalty on the bilinear moment
+# residual makes the problem so ill-conditioned that the Goldstein line search
+# rejects the step whenever the reference rotates and the GRF plan has to
+# rotate with it (combined v and omega): the plan then stops converging, the
+# multiple-shooting defects grow, the moment residual reaches 0.4-0.9 N m and
+# the WBC QP fails (NaN torque). Measured on the mandatory validation set:
+#   w_eq = 1e8 : (0.6,0.4) -> 0.51/0.43, (1.0,+-0.8) -> fall, 18-24 rejected steps
+#   w_eq = 1e7 : all cases tracked, 1-3 rejected steps, residual 0.2-0.35 N m
+#   w_eq = 1e6 : all cases tracked, 0 rejected steps, residual 0.01 N m
+#   w_eq = 1e5 : all cases tracked, 0 rejected steps, residual 0.03 N m
+# i.e. the larger penalty produces LARGER constraint violations because the
+# optimiser cannot converge. 1e6 keeps the violation physically negligible
+# (0.01 N m = 0.04 mm lever arm at body weight) while the single iteration
+# converges; it is still 5 orders of magnitude above the tracking weights.
+w_eq     = 1e6
 
 
 # ── Assemble W (15×15 diagonal) ──────────────────────────────────
@@ -193,3 +230,16 @@ W = 1e0 * jnp.diag(jnp.array([
     w_fcxy,   w_fcz,
     w_eq,
 ]))
+
+# ── Derived timing (validated at import, see mpx.utils.timing) ─────────────
+import types as _types
+from mpx.utils.timing import derive_timing as _derive_timing
+_timing = _derive_timing(_types.SimpleNamespace(
+    simulation_frequency=simulation_frequency, mpc_frequency=mpc_frequency,
+    whole_body_frequency=whole_body_frequency, dt_mpc=dt_mpc, N=N,
+    mpc_horizon_s=mpc_horizon_s))
+dt_sim = _timing["dt_sim"]                              # 0.002 s
+dt_wbc = _timing["dt_wbc"]                              # 0.01 s
+mpc_period_sim_steps = _timing["mpc_period_sim_steps"]  # 5
+wbc_period_sim_steps = _timing["wbc_period_sim_steps"]  # 5
+mpc_shift_nodes = _timing["mpc_shift_nodes"]            # 1 MPC node per update

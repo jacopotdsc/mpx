@@ -10,6 +10,7 @@ import mpx.utils.objectives as mpc_objectives
 import mujoco 
 from mujoco import mjx
 import mpx.jax_ocp_solvers.optimizers as optimizers
+from mpx.utils.timing import derive_timing, check_model_timestep, describe_timing
 from jax import dlpack as jax_dlpack
 from timeit import default_timer as timer
 import time
@@ -40,8 +41,8 @@ class BatchedMPCControllerWrapper:
         Initializes the MPC controller wrapper.
         
         Args:
-            config: Configuration object containing MPC and gait parameters.
-            mpc_frequency: Frequency (Hz) at which MPC updates occur.
+            config: Configuration module/namespace (see mpx.config.config_dfcip).
+            n_env: Number of environments solved in parallel (vmapped).
         """
         #jax.config.update("jax_compilation_cache_dir", "./jax_cache")
         #jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
@@ -51,9 +52,23 @@ class BatchedMPCControllerWrapper:
         model = mujoco.MjModel.from_xml_path(config.model_path)
         mjx_model = mjx.put_model(model)
         self.config = config
+        # Simulation / MPC / WBC timing, derived from the primitive config values
+        # with explicit consistency checks (see mpx.utils.timing).
+        self.timing = derive_timing(config)
+        check_model_timestep(model.opt.timestep, self.timing)
         self.mpc_frequency = config.mpc_frequency
-        self.shift = int(1 / (config.dt_mpc * config.mpc_frequency))
-        print(f"MPC update every {self.shift} simulation steps (mpc_frequency={self.mpc_frequency} Hz, dt={config.dt_mpc} s)")
+        # Warm-start shift in MPC nodes per MPC update (one update period).
+        self.shift = self.timing["mpc_shift_nodes"]
+        # Number of FDDP iterations per MPC call (real-time iteration scheme
+        # uses 1; larger values are only meant for diagnostics / ablations).
+        self.mpc_iterations = int(getattr(config, "mpc_iterations", 1))
+        # Lookahead used to build the WBC position/velocity references from the
+        # measured state and the MPC first-stage accelerations. 0 = references
+        # evaluated at the current instant (pure feedforward acceleration
+        # tracking, see config_dfcip.wbc_lookahead_dt).
+        self.wbc_lookahead_dt = float(getattr(config, "wbc_lookahead_dt", 0.0))
+        print("[MPC/WBC timing] " + describe_timing(self.timing, self.mpc_iterations)
+              + f" | WBC reference lookahead {self.wbc_lookahead_dt} s")
         
         # Timer and liftoff states for the reference generator.
         self.q0 = config.q0.copy()          # Initial joint configuration
@@ -90,11 +105,18 @@ class BatchedMPCControllerWrapper:
         self.dynamics = partial(mpc_dyn_model.wheeled_dfcip_dynamics,
             mjx_model, config.mass, config.grav, config.dt_mpc)
 
-        work = partial(optimizers.fddp_mpc, self.cost, self.dynamics, self.hessian_approx, False)
+        _fddp = partial(optimizers.fddp_mpc, self.cost, self.dynamics, self.hessian_approx, False)
+
+        def work(reference, parameter, W, x0, X_init, U_init):
+            X_it, U_it, D_it = X_init, U_init, None
+            for _ in range(self.mpc_iterations):
+                X_it, U_it, D_it = _fddp(reference, parameter, W, x0, X_it, U_it)
+            return X_it, U_it, D_it
         
-        self.ref_substeps = int(round(config.dt_mpc / config.dt_ref))
-        self.N_dense = config.N * self.ref_substeps                
-        reference_generator = partial(mpc_utils.reference_generator_dfcip_online, self.N_dense, config.dt_ref, config.mass, config.grav)
+        # The online reference generator produces exactly the MPC discretisation:
+        # N+1 nodes spaced by dt_mpc (no dense generation followed by decimation).
+        reference_generator = partial(mpc_utils.reference_generator_dfcip_online,
+                                      config.N, config.dt_mpc, config.mass, config.grav)
 
         # Whole-body controller: static args frozen via partial, runtime args
         # (X0_prev, U0_prev, V0_prev, qpos, qvel, desired) passed at call time.
@@ -124,7 +146,7 @@ class BatchedMPCControllerWrapper:
         _bid   = body_id
         _bbid  = base_body_id
         _wr    = config.wheel_radius
-        _st    = 1.0 / config.whole_body_frequency
+        _st    = self.timing["dt_wbc"]     # WBC period: joint limit prediction step
         _nc    = 1 #config.n_contact
         _Kpm   = config.Kp_motion;  _Kdm  = config.Kd_motion
         _Kpw   = config.Kp_wheel;   _Kdw  = config.Kd_wheel
@@ -132,7 +154,14 @@ class BatchedMPCControllerWrapper:
         _w_ps  = config.w_posture
         _wq    = config.w_qddot;    _wc   = config.w_com
         _wl    = config.w_lwheel;   _wrr  = config.w_rwheel;  _wb = config.w_base
-        _mu    = config.mu               # 0.5 in C++
+        _mu    = config.mu
+        # Posture task joint selection (None = all leg joints except the wheels).
+        _pj = getattr(config, "posture_joint_ids", None)
+        if _pj is None:
+            _posture_mask = None
+        else:
+            _posture_mask = jnp.zeros(nj).at[jnp.array(list(_pj))].set(1.0)
+        self._posture_mask = _posture_mask
 
         _Kpr = config.Kp_reg;  _Kdr = config.Kd_reg
 
@@ -146,9 +175,72 @@ class BatchedMPCControllerWrapper:
                 _w_ps,
                 _wq, _wc, _wl, _wrr, _wb,
                 _mu,
-                qpos, qvel, desired
+                qpos, qvel, desired,
+                posture_mask=_posture_mask,
             )
 
+        def whole_body_control_diag(qpos, qvel, desired):
+            return mpc_utils.whole_body_interface_wheeled_legged_qp_diag(
+                _mjx, config.mass, config.grav, config.d,
+                _cid, _bid, _bbid,
+                _wr, _st, _nc,
+                _Kpm, _Kdm, _Kpw, _Kdw, _Kpr, _Kdr,
+                _w_ps,
+                _wq, _wc, _wl, _wrr, _wb,
+                _mu,
+                qpos, qvel, desired,
+                posture_mask=_posture_mask,
+            )
+
+        # MPC diagnostics (harness only): cost before/after the FDDP step,
+        # multiple-shooting defects, step acceptance and the physical
+        # consistency (moment balance, CoM lean) of the returned plan.
+        _cost_full = self.cost
+        _dyn_full = partial(self.dynamics, parameter=None)
+        _N = config.N
+        _d_half = jnp.array([0.0, config.d / 2.0, 0.0])
+
+        def mpc_diag(reference, W, x0, X_prev, U_prev, X, U):
+            cost_fn = partial(_cost_full, W, reference)
+            ts = jnp.arange(_N + 1)
+            pad = lambda U_: jnp.concatenate([U_, jnp.zeros((1, U_.shape[1]))], axis=0)
+            cost_before = jnp.sum(jax.vmap(cost_fn)(X_prev, pad(U_prev), ts))
+            cost_after = jnp.sum(jax.vmap(cost_fn)(X, pad(U), ts))
+            defects = jnp.vstack([
+                x0 - X[0],
+                jax.vmap(lambda t: _dyn_full(X[t], U[t], t) - X[t + 1])(jnp.arange(_N)),
+            ])
+            accepted = jnp.any(jnp.abs(U - U_prev) > 0.0)
+
+            def plan_consistency(x, u):
+                pcom, c, theta = x[0:3], x[6:9], x[10]
+                fl, fr = u[3:6], u[6:9]
+                ct, st = jnp.cos(theta), jnp.sin(theta)
+                R = jnp.array([[ct, -st, 0.0], [st, ct, 0.0], [0.0, 0.0, 1.0]])
+                pl = c + R @ _d_half
+                pr = c - R @ _d_half
+                h_moment = jnp.cross(pl - pcom, fl) + jnp.cross(pr - pcom, fr)
+                lean_body = R.T @ (pcom - c)      # CoM offset from the base point, body frame
+                f_tot_body = R.T @ (fl + fr)      # total GRF, body frame [fwd, lat, up]
+                return h_moment, lean_body, f_tot_body
+
+            h_moment, lean_body, f_tot_body = jax.vmap(plan_consistency)(X[:-1], U)
+            return dict(
+                cost_before=cost_before,
+                cost_after=cost_after,
+                defect_norm=jnp.linalg.norm(defects),
+                defect0_norm=jnp.linalg.norm(defects[0]),
+                accepted=accepted,
+                h_moment_max=jnp.max(jnp.abs(h_moment)),
+                h_moment_0=h_moment[0],
+                lean_body_0=lean_body[0],
+                lean_body_max=jnp.max(jnp.abs(lean_body[:, :2]), axis=0),
+                f_tot_body_0=f_tot_body[0],
+                stability_N=X[-1, 0:2] - X[-1, 6:8],
+            )
+
+        self._mpc_diag = jax.jit(jax.vmap(mpc_diag))
+        self._whole_body_interface_diag = jax.jit(jax.vmap(whole_body_control_diag))
         self._solve = jax.jit(jax.vmap(work))
         self._ref_gen = jax.jit(jax.vmap(reference_generator))
         self._build_desired_jit = jax.jit(
@@ -195,8 +287,7 @@ class BatchedMPCControllerWrapper:
         # Generate reference trajectory and additional MPC parameters.
         
         x_ref, u_ref = self._ref_gen(x0, cmd)
-        reference_full = jnp.concatenate([x_ref, u_ref], axis=-1)
-        reference = reference_full[:, ::self.ref_substeps, :]
+        reference = jnp.concatenate([x_ref, u_ref], axis=-1)   # (n_env, N+1, nx+nu)
         
         parameter = None
 
@@ -214,7 +305,8 @@ class BatchedMPCControllerWrapper:
         new_alpha = U[:,0,2]
         new_grf = U[:,0,3:]
         
-        # Warm-start for the next call: shift trajectories forward.
+        # Warm-start for the next call: shift the trajectories forward by one
+        # MPC update period (self.shift MPC nodes, not simulation steps).
         s = self.shift
         new_X0  = jnp.concatenate([X[:, s:, :], jnp.tile(X[:, -1:, :], (1, s, 1))], axis=1)
         new_U0  = jnp.concatenate([U[:, s:, :], jnp.tile(U[:, -1:, :], (1, s, 1))], axis=1)
@@ -230,6 +322,31 @@ class BatchedMPCControllerWrapper:
         )
 
         return new_state, reference
+
+    def run_diag(self, state: MPCState, x0, cmd):
+        """Same as ``run`` but also returns a diagnostics dict (harness only)."""
+        new_state, reference = self.run(state, x0, cmd)
+        diag = self._mpc_diag(
+            reference,
+            jnp.tile(self.config.W, (self.n_env, 1, 1)),
+            x0,
+            state.X0_shifted,
+            state.U0_shifted,
+            new_state.X_prediction,
+            new_state.U_prediction,
+        )
+        return new_state, reference, diag
+
+    def whole_body_run_diag(self, state: MPCState, x0, qpos, qvel,
+                            pl_world, pr_world, dpl_world, dpr_world,
+                            action_nn=None, use_nn=False):
+        """Same as ``whole_body_run`` but also returns the WBC QP diagnostics dict."""
+        desired = self._build_desired_jit(
+            x0, qpos, state, pl_world, pr_world, dpl_world, dpr_world,
+            action_nn=action_nn, use_nn=use_nn,
+        )
+        tau_cmd, qddot, fl, fr, diag = self._whole_body_interface_diag(qpos, qvel, desired)
+        return state, tau_cmd, qddot, fl, fr, desired, diag
 
     def _build_desired_impl(
         self,
@@ -345,7 +462,7 @@ class BatchedMPCControllerWrapper:
         # ── acc_com_ = 1/m * (fcl + fcr) + g_vec ─────────────────────────
         # ── vel_com_ = vcom_curr + dt_ * acc_com_ ────────────────────────
         # ── pos_com_ = pcom_curr + dt_ * vcom_curr ───────────────────────
-        dt = 1.0 / self.config.whole_body_frequency
+        dt = self.wbc_lookahead_dt
         acc_com_ = (fcl + fcr) / self.config.mass + g_vec[None, :]
         if use_nn:
             weights_acc = jnp.array([0.5, 0.5, 0.5])
