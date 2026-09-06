@@ -45,7 +45,7 @@ def _srbd_state(qpos, qvel):
     )
 
 
-def main(headless=False, steps=500, scene="flat"):
+def main(headless=False, steps=500, scene="flat", metrics=None, cmd=None):
     #model = mujoco.MjModel.from_xml_path(
     #    dir_path + f"/../data/aliengo/scene_{scene}.xml"
     #)
@@ -72,6 +72,12 @@ def main(headless=False, steps=500, scene="flat"):
     print(f"consts.FEET_GEOMS:    {consts.FEET_GEOMS}")
     print(f"playground geom_ids:  {playground_feet_ids}")
     command_handle = sim_utils.KeyboardVelocityCommand(vx=0.0, vy=0.0, wz=0.0)
+    cmd_fn = cmd if callable(cmd) else (lambda k: cmd)
+    if cmd is not None:
+        command_handle.vx, command_handle.vy, command_handle.wz = cmd_fn(0)
+    touch_adr = [model.sensor_adr[model.sensor(f"{n}_floor_found").id]
+                 for n in config.contact_frame]
+    log = []
     mpc = mpc_wrapper_srbd.BatchedMPCControllerWrapper(config, n_env=1)
 
     _reset_to_initial_state(model, data)
@@ -102,6 +108,8 @@ def main(headless=False, steps=500, scene="flat"):
     def step_controller(mpc_state, grf, J):
         nonlocal counter
 
+        if cmd is not None:
+            command_handle.vx, command_handle.vy, command_handle.wz = cmd_fn(counter)
         qpos = data.qpos.copy()
         qvel = data.qvel.copy()
 
@@ -114,16 +122,12 @@ def main(headless=False, steps=500, scene="flat"):
             foot_arr = np.array(foot).reshape(-1, 3)
             foot_z = foot_arr[:, 2]
             # Setup (dopo aver creato model)
-            touch_sensor_adr = [model.sensor_adr[model.sensor(name).id] 
-                                for name in ["FL_touch", "FR_touch", "RL_touch", "RR_touch"]]
-
-            # Nel loop
-            contact_threshold = jnp.array([data.sensordata[adr] > 0 for adr in touch_sensor_adr], dtype=jnp.float32)
-            print(f"foot_z:             {foot_z}")
-            print(f"contact (forze):    {np.array(contact)}")
-            print(f"contact (soglia):   {contact_threshold}")
-            print(f"match:              {np.allclose(contact, contact_threshold)}")
-            print("---")
+            # The *_touch sensors sit on sites 23 mm above the foot collision
+            # spheres, so the contact point falls outside their sensing volume
+            # and they read zero forever. The *_floor_found contact sensors are
+            # attached to the collision geoms themselves and do report contact.
+            contact = jnp.array([data.sensordata[adr] > 0 for adr in touch_adr],
+                                dtype=jnp.float32)
 
             x0 = _srbd_state(qpos, qvel)
 
@@ -176,13 +180,22 @@ def main(headless=False, steps=500, scene="flat"):
         mujoco.mj_step(model, data)
         counter += 1
 
+        if metrics is not None:
+            from lite3_srbd import _sample
+            log.append(_sample(model, data, mpc_state, tau_ctrl, touch_adr, command_handle))
+
 
         return mpc_state, tau_cmd, grf, J
 
     if headless:
         for _ in range(steps):
             mpc_state, tau_cmd, grf, J = step_controller(mpc_state, grf, J)
-        return mpc_state
+        if metrics is not None and log:
+            keys = list(log[0].keys())
+            arr = np.array([[r[k] for k in keys] for r in log])
+            np.savetxt(metrics, arr, delimiter=",", header=",".join(keys), comments="")
+            print(f"  metrics -> {metrics}  ({len(log)} rows)")
+        return log
 
     with mujoco.viewer.launch_passive(
         model,
@@ -207,9 +220,14 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--scene", type=str, default="flat")
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--metrics", type=str, default=None)
+    parser.add_argument("--cmd", nargs=3, type=float, default=None,
+                        metavar=("VX", "VY", "WZ"))
     args = parser.parse_args()
     main(
         headless=args.headless,
         steps=args.steps,
         scene=args.scene,
+        metrics=args.metrics,
+        cmd=args.cmd,
     )
