@@ -1430,6 +1430,8 @@ def main():
         "aliengo" : "AliengoJoystickE2EFlatTerrain",
         "tita": "TitaJoystickFlatTerrain",
         "titae2e": "TitaJoystickE2EFlatTerrain",
+        "litee2e": "LiteE2EJoystickFlatTerrain",
+        "lite": "LiteJoystickFlatTerrain",
     }
     env_name = _NAME_SHORTCUTS.get(args.name.lower(), args.name)
     env, eval_env, wrap_fn = make_envs(env_name=env_name)
