@@ -36,6 +36,18 @@ import sys
 import time
 from timeit import default_timer as timer
 
+# This tester shares one GPU between JAX and TWO OpenGL contexts (the offscreen
+# mujoco.Renderer used for the video and the passive viewer window). JAX's
+# default preallocation grabs 75% of VRAM (6.3 GB of 8 GB on this box), and
+# XLA allocates compiled-executable *constants* straight from the driver rather
+# than from that pool -- so once MuJoCo's GL contexts have eaten what is left,
+# even a 192 KB constant fails with
+#   XlaRuntimeError: INTERNAL: Failed to allocate N bytes for new constant
+# Halving the pool leaves room for GL + the constants. Must be set before the
+# JAX backend is created (i.e. before the first device use), hence up here.
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.5")
+os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
+
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -43,8 +55,6 @@ jax.config.update("jax_enable_x64", True)
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.abspath(os.path.join(dir_path, "..")))
 CKPT_DIR = "."
-
-os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 
 import jax.numpy as jnp
 import mujoco
@@ -95,6 +105,18 @@ HEIGHT_TARGET_STEP = 0.1
 
 KEY_PAGE_UP = 266
 KEY_PAGE_DOWN = 267
+
+# Lateral (vy) keys, used only on envs whose command is [vx, vy, wz]
+# (quadrupeds such as Lite3).
+#
+# NOT letters: MuJoCo's own viewer UI reserves every key A-Z for its
+# visualization/rendering flags (mjVISSTRING/mjRNDSTRING -- 'A' is Auto Connect,
+# 'D' is Static Body), so a letter binding is swallowed before reaching this
+# callback. Home/End and PageUp/PageDown are free, and PageUp/PageDown are known
+# to arrive here because TITA already drives its height target with them.
+KEY_HOME = 268
+KEY_END = 269
+LATERAL_STEP = 0.1
 _RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}$")
 
 
@@ -210,21 +232,23 @@ def build_policy(env, params):
 def keyboard_target_command(command_handle, cmd_dim: int) -> np.ndarray:
     """Read the keyboard and map it onto the env's command layout.
 
-    KeyboardVelocityCommand.mpc_wheeled_input() starts with [vx, vy, wz].
-    TITA's command is [forward_vel, yaw_rate] = [vx, wz] (cmd_dim == 2);
-    a quadruped uses [vx, vy, wz] (cmd_dim == 3).
+    Read vx/vy/wz straight off the handle. Do NOT route this through
+    mpc_wheeled_input(), which returns the wheeled-MPC layout
+    [vx, vz, wz, com_z]: its second entry is the *vertical* velocity, so a
+    quadruped would silently receive vz where it expects vy.
+
+    TITA's command is [forward_vel, yaw_rate] = [vx, wz] (cmd_dim == 2) and has
+    no lateral velocity. A quadruped (Lite3, Go1, Aliengo) uses
+    [vx, vy, wz] (cmd_dim == 3).
     """
-    kbd = np.asarray(
-        command_handle.mpc_wheeled_input(0.0), dtype=np.float32
-    ).reshape(-1)
-    if kbd.size < 3:
-        raise ValueError(
-            "KeyboardVelocityCommand.mpc_wheeled_input() returned < 3 values."
-        )
+    vx = float(command_handle.vx)
+    vy = float(command_handle.vy)
+    wz = float(command_handle.wz)
+
     if cmd_dim == 2:
-        return np.array([kbd[0], kbd[2]], dtype=np.float32)  # [vx, wz]
+        return np.array([vx, wz], dtype=np.float32)
     if cmd_dim == 3:
-        return kbd[:3].astype(np.float32)                    # [vx, vy, wz]
+        return np.array([vx, vy, wz], dtype=np.float32)
     raise ValueError(
         f"Unsupported command dimension: {cmd_dim} (expected 2 or 3)."
     )
@@ -261,7 +285,14 @@ def set_target_command(state, keyboard_cmd: np.ndarray, cmd_dim: int):
     })
 
 def set_base_height_target(state, height_target: float, height_min: float, height_max: float):
-    """Set the interactive CoM-height target."""
+    """Set the interactive CoM-height target.
+
+    Envs without a base-height command (any quadruped joystick env: Lite3, Go1,
+    Aliengo) have no "base_height_target" in info, so this is a no-op there.
+    """
+    if "base_height_target" not in state.info:
+        return state
+
     target = jnp.full_like(
         state.info["base_height_target"],
         jnp.clip(height_target, height_min, height_max),
@@ -297,8 +328,12 @@ def build_hud(
     actual_vec,
     actual_height,
     target_height,
-    command_handle
+    command_handle,
+    lateral_step=None,
+    lateral_limits=None,
 ):
+    """actual_height/target_height may be None on envs without a height command.
+    lateral_step/lateral_limits are set only when the env commands vy."""
     n = command_vec.shape[-1]
 
     labels = {
@@ -316,29 +351,43 @@ def build_hud(
     fwd_min, fwd_max = command_handle.forward_limits
     yaw_min, yaw_max = command_handle.yaw_limits
 
-    help_left = (
-        "Key"
-        "\nUp/Down"
-        "\nLeft/Right"
-        "\nSpace"
-        "\nPageUp/Down"
-    )
+    has_lateral = lateral_step is not None and lateral_limits is not None
+    has_height_row = actual_height is not None and target_height is not None
 
-    help_right = (
-        "Command     Step      Min / Max"
-        f"\nforward     {fwd_step:.2f}      {fwd_min:+.1f} / {fwd_max:+.1f}"
-        f"\nyaw         {yaw_step:.2f}      {yaw_min:+.1f} / {yaw_max:+.1f}"
-        "\nstop        --        --"
-        f"\nheight      {HEIGHT_TARGET_STEP:.2f}      --"
+    key_rows = ["Up/Down"]
+    cmd_rows = [
+        f"forward     {fwd_step:.2f}      {fwd_min:+.1f} / {fwd_max:+.1f}"
+    ]
+    if has_lateral:
+        lat_min, lat_max = lateral_limits
+        key_rows.append("Home/End or PgUp/PgDn")
+        cmd_rows.append(
+            f"lateral     {lateral_step:.2f}      {lat_min:+.1f} / {lat_max:+.1f}"
+        )
+    key_rows.append("Left/Right")
+    cmd_rows.append(
+        f"yaw         {yaw_step:.2f}      {yaw_min:+.1f} / {yaw_max:+.1f}"
     )
+    key_rows.append("Space")
+    cmd_rows.append("stop        --        --")
+    if has_height_row:
+        key_rows.append("PageUp/Down")
+        cmd_rows.append(f"height      {HEIGHT_TARGET_STEP:.2f}      --")
+
+    help_left = "\n".join(["Key", *key_rows])
+    help_right = "\n".join(["Command     Step      Min / Max", *cmd_rows])
     # ----------------------------------------------------------
     # RIGHT: tracking values
     # ----------------------------------------------------------
+    # The height row only exists on envs with a base-height command (TITA).
+    has_height = has_height_row
+
     title_lines = [
         "",
         *labels,
-        "height",
     ]
+    if has_height:
+        title_lines.append("height")
 
     value_lines = [
         " Actual   Command   Target",
@@ -353,11 +402,12 @@ def build_hud(
             f"{float(target):+7.2f}"
         )
 
-    value_lines.append(
-        f"{float(actual_height):+7.2f}  "
-        f"{float(target_height):+7.2f}  "
-        f"{float(target_height):+7.2f}"
-    )
+    if has_height:
+        value_lines.append(
+            f"{float(actual_height):+7.2f}  "
+            f"{float(target_height):+7.2f}  "
+            f"{float(target_height):+7.2f}"
+        )
 
     return [
         (
@@ -452,6 +502,29 @@ def main(
     height_target = HEIGHT_TARGET_INIT
     cmd_dim = int(state.info["command"].shape[-1])
 
+    # Env capabilities. TITA carries a base-height command and the DFCIP/WBC
+    # logging buffers; the quadruped joystick envs (Lite3, Go1, Aliengo) carry
+    # neither, so every block that needs them is guarded on these flags.
+    has_height_cmd = "base_height_target" in state.info
+    has_tita_logging = "tita_state" in state.info
+
+    # Lite3/quadrupeds command [vx, vy, wz]; TITA commands [vx, wz] and has no
+    # lateral velocity at all. Bind vy only where the env actually has it, and
+    # take its range from the env's own command_config so the keyboard cannot
+    # ask for a vy the policy was never trained on.
+    _cmd_amp = np.asarray(env._config.command_config.a, dtype=np.float32)
+    has_lateral_cmd = cmd_dim == 3
+    lateral_limits = (
+        (-float(_cmd_amp[1]), float(_cmd_amp[1])) if has_lateral_cmd else None
+    )
+    _h = getattr(env._config.command_config, "h", (0.0, 0.0))
+    height_min, height_max = float(_h[0]), float(_h[1])
+    print(
+        f"  [env] cmd_dim={cmd_dim} | base-height command: "
+        f"{'yes' if has_height_cmd else 'no'} | DFCIP logging: "
+        f"{'yes' if has_tita_logging else 'no'}"
+    )
+
     command_handle = sim_utils.KeyboardVelocityCommand(
         vx=0.0,
         vy=0.0,
@@ -465,13 +538,32 @@ def main(
     def key_callback(keycode):
         nonlocal height_target
 
-        if keycode == KEY_PAGE_UP:
+        # Height target (TITA only): PageUp/PageDown keep their meaning there.
+        if has_height_cmd and keycode == KEY_PAGE_UP:
             height_target += HEIGHT_TARGET_STEP
             return
 
-        if keycode == KEY_PAGE_DOWN:
+        if has_height_cmd and keycode == KEY_PAGE_DOWN:
             height_target -= HEIGHT_TARGET_STEP
             return
+
+        # Lateral velocity (quadrupeds only). Handled here and not in sim.py,
+        # which the TITA examples share: KeyboardVelocityCommand binds only vx
+        # and wz, and its _clip() does not cover vy. On these envs PageUp/Down
+        # are free (no height command), so they double as lateral keys.
+        if has_lateral_cmd:
+            if keycode in (KEY_HOME, KEY_PAGE_UP):
+                step = LATERAL_STEP
+            elif keycode in (KEY_END, KEY_PAGE_DOWN):
+                step = -LATERAL_STEP
+            else:
+                step = None
+
+            if step is not None:
+                command_handle.vy = float(
+                    np.clip(command_handle.vy + step, *lateral_limits)
+                )
+                return
 
         command_handle.key_callback(keycode)
 
@@ -485,10 +577,7 @@ def main(
     })
     state = set_target_command(state, keyboard_cmd, cmd_dim)
     state = set_base_height_target(
-        state,
-        height_target,
-        height_min=env._config.command_config.h[0],
-        height_max=env._config.command_config.h[1],
+        state, height_target, height_min=height_min, height_max=height_max
     )
 
     state = state.replace(
@@ -498,6 +587,21 @@ def main(
             _zero_actions,
         )
     )
+    # Compile the policy and the env step HERE, while the GPU still has free
+    # memory outside JAX's pool: both executables allocate their constants
+    # (policy weights, MJX model arrays) directly from the driver, and the
+    # OpenGL contexts created just below (offscreen renderer + viewer window)
+    # take that same memory. Compiling first also removes the multi-second
+    # hitch the first interactive step would otherwise show.
+    #
+    # A throwaway key is used on purpose: `rng` must stay on the exact stream
+    # train_srbd.py --eval uses, so the warm-up may not consume from it.
+    if not zero:
+        jax.block_until_ready(
+            jit_infer(take_env0(state.obs), jax.random.PRNGKey(0))
+        )
+    jax.block_until_ready(batched_step(state, _zero_actions))
+
     # Native MjModel/MjData used ONLY as a visualization mirror.
     viewer_model = env.mj_model
     viewer_data = mujoco.MjData(viewer_model)
@@ -539,10 +643,7 @@ def main(
         # resampler off. command is left untouched (env smooths it in step()).
         state = set_target_command(state, keyboard_cmd, cmd_dim)
         state = set_base_height_target(
-            state,
-            height_target,
-            height_min=env._config.command_config.h[0],
-            height_max=env._config.command_config.h[1],
+            state, height_target, height_min=height_min, height_max=height_max
         )
 
         state = state.replace(
@@ -582,26 +683,33 @@ def main(
 
         info = state.info
 
-        command = np.asarray(info["command"][0])
+        # SimLogger consumes TITA's DFCIP/WBC buffers. Quadruped joystick envs
+        # (Lite3, Go1, Aliengo) do not publish them, so skip the logging there;
+        # the viewer, the video and the rollout itself are unaffected.
+        if has_tita_logging:
+            command = np.asarray(info["command"][0])
 
-        logger_cmd = np.array([
-            command[0],                                      # vx
-            0.0,                                             # vz
-            command[1],                                      # omega
-            float(np.asarray(info["base_height_target"][0])), # height
-        ])
+            # TITA command is [vx, wz]; a quadruped's is [vx, vy, wz].
+            omega = command[1] if cmd_dim == 2 else command[2]
 
-        sim_logger.append(
-            t=int(np.asarray(info["step"][0])),
-            model=viewer_model,
-            data=viewer_data,
-            tita_state=np.asarray(info["tita_state"][0]),
-            x0=np.asarray(info["dfcip_state"][0]),
-            cmd=logger_cmd,
-            ext_force=np.asarray(info["robot"]["ext_force"][0]),
-            fl=None,
-            fr=None,
-)
+            logger_cmd = np.array([
+                command[0],                                      # vx
+                0.0,                                             # vz
+                omega,                                           # omega
+                float(np.asarray(info["base_height_target"][0])), # height
+            ])
+
+            sim_logger.append(
+                t=int(np.asarray(info["step"][0])),
+                model=viewer_model,
+                data=viewer_data,
+                tita_state=np.asarray(info["tita_state"][0]),
+                x0=np.asarray(info["dfcip_state"][0]),
+                cmd=logger_cmd,
+                ext_force=np.asarray(info["robot"]["ext_force"][0]),
+                fl=None,
+                fr=None,
+            )
 
         return bool(state.done[0])
 
@@ -615,15 +723,20 @@ def main(
             _renderer.close()
         except Exception:
             pass
-        try:
-            plot_all(
-                sim_logger,
-                save_path=joystick_eval_dir,
-                show=False
+        if has_tita_logging:
+            try:
+                plot_all(
+                    sim_logger,
+                    save_path=joystick_eval_dir,
+                    show=False
+                )
+            except Exception as e:
+                print(f"[finalize] error on generating all plots: {e}")
+        else:
+            print(
+                "[finalize] DFCIP plots skipped: this env publishes no "
+                "tita_state/dfcip_state (video and rollout are unaffected)."
             )
-        except Exception as e:
-            print(f"[finalize] error on generating all plots")
-            pass
         try:
             for slow, name in (
                 (1.0, "policy_simulation_video.mp4"),
@@ -677,26 +790,37 @@ def main(
                 if i % 2 == 0:
                     _record_frame()
 
-                local_linvel = np.asarray(
-                    state.info["robot"]["local_linvel"][0]
-                )
+                # TITA republishes these in info["robot"]; elsewhere read them
+                # straight off the env's sensors, which every locomotion env has.
+                if "robot" in state.info:
+                    local_linvel = np.asarray(
+                        state.info["robot"]["local_linvel"][0]
+                    )
+                    gyro = np.asarray(state.info["robot"]["gyro"][0])
+                else:
+                    data0 = jax.tree_util.tree_map(lambda x: x[0], state.data)
+                    local_linvel = np.asarray(env.get_local_linvel(data0))
+                    gyro = np.asarray(env.get_gyro(data0))
 
-                gyro = np.asarray(
-                    state.info["robot"]["gyro"][0]
-                )
+                # One "actual" entry per command entry, so the HUD lines up:
+                # [vx, wz] for TITA, [vx, vy, wz] for a quadruped.
+                if cmd_dim == 2:
+                    actual_vec = np.array([local_linvel[0], gyro[2]])
+                else:
+                    actual_vec = np.array(
+                        [local_linvel[0], local_linvel[1], gyro[2]]
+                    )
 
-                actual_vec = np.array([
-                    local_linvel[0],
-                    gyro[2],
-                ])
-
-                actual_height = float(
-                    np.asarray(state.info["robot"]["com_height"][0])
-                )
-
-                target_height = float(
-                    np.asarray(state.info["base_height_target"][0])
-                )
+                if has_height_cmd:
+                    actual_height = float(
+                        np.asarray(state.info["robot"]["com_height"][0])
+                    )
+                    target_height = float(
+                        np.asarray(state.info["base_height_target"][0])
+                    )
+                else:
+                    actual_height = None
+                    target_height = None
 
                 viewer.set_texts(build_hud(
                     command_vec=np.asarray(state.info["command"][0]),
@@ -704,7 +828,9 @@ def main(
                     actual_vec=actual_vec,
                     actual_height=actual_height,
                     target_height=target_height,
-                    command_handle=command_handle
+                    command_handle=command_handle,
+                    lateral_step=LATERAL_STEP if has_lateral_cmd else None,
+                    lateral_limits=lateral_limits,
                 ))
 
                 com = np.asarray(viewer_data.subtree_com[_base_body_id]).copy()
@@ -752,6 +878,8 @@ if __name__ == "__main__":
         "aliengo": "AliengoJoystickE2EFlatTerrain",
         "tita": "TitaJoystickFlatTerrain",
         "titae2e": "TitaJoystickE2EFlatTerrain",
+        "lite3": "Lite3JoystickFlatTerrain",
+        "litee2e": "Lite3JoystickE2EFlatTerrain",
     }
     env_name = _NAME_SHORTCUTS.get(args.name.lower(), args.name)
 
