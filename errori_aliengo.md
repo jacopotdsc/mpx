@@ -71,34 +71,49 @@ rewards of every Aliengo RL environment. That is not a small change.
 
 ---
 
-## 2. NOT FIXED — the WBC runs on a different model than the simulator
+## 2. WITHDRAWN — the two Aliengo models are the same robot
 
-**Severity: potentially significant. Left alone deliberately.**
+**An earlier revision of this report claimed that `config_srbd.py` pointed the
+whole-body controller at a different robot than the one being simulated. That
+claim was wrong and is retracted here.**
 
-`config_srbd.py` sets `model_path = mpx/data/aliengo/aliengo.xml`, and
-`BatchedMPCControllerWrapper` builds the whole-body controller's kinematics from
-that file. `srbd_quad.py` meanwhile simulates the Playground Aliengo scene. They
-are **not the same robot**:
+The claim came from comparing foot positions at two *different* joint
+configurations: `mpx/data/aliengo/aliengo.xml` evaluated at `config.q0 =
+[0.2, 0.8, -1.8]` (hip abducted by 0.2 rad) against the Playground Aliengo at
+its `home` keyframe `[0, 0.9, -1.8]` (hip at zero). The abduction alone moves
+the foot laterally, which is where the apparent "+-0.194 vs +-0.134" came from.
 
-| | `mpx/data/aliengo/aliengo.xml` | Playground Aliengo |
-|---|---|---|
-| mass | 24.638 kg | 24.638 kg |
-| hip spacing (foot y at nominal pose) | ±0.194 m | ±0.134 m |
-| foot x, front / hind | +0.271 / −0.209 | +0.211 / −0.269 |
-| nominal `q0` | `[0.2, 0.8, −1.8]` | `[0, 0.9, −1.8]` |
+Evaluated at the **same** pose the two models are identical:
 
-So the Jacobians, foot positions and `p_legs0` used by the controller describe a
-geometry 45% wider at the hips than the one being simulated, with the front/hind
-asymmetry reversed. `config.p_legs0` matches the mpx model exactly
-(`[0.27092872, 0.193, 0]` against a measured `[0.27093, 0.19378, 0.0434]`), so
-the configuration is self-consistent — it is simply consistent with the wrong
-model.
+```
+same qpos = [0,0,0.35, 1,0,0,0] + [0, 0.9, -1.8] x 4
 
-Not corrected: changing `model_path` to the Playground scene would silently
-change the behaviour of the Aliengo controller and of the Aliengo residual-RL
-environment, which is the opposite of a small fix. For **Lite3** the new
-`config_srbd_lite3.py` points at the same XML the simulator steps, so the
-problem does not arise there.
+mpx/data     mass 24.6380   FL [0.2399, 0.1340, 0.0392]   RL [-0.2399, 0.1340, 0.0392]
+playground   mass 24.6380   FL [0.2399, 0.1340, 0.0392]   RL [-0.2399, 0.1340, 0.0392]
+
+body_pos:  FL_hip [0.2399, 0.051, 0]   FL_thigh [0, 0.083, 0]   FL_calf [0, 0, -0.25]
+           identical in both files
+```
+
+Confirmed by ablation: pointing `config.model_path` at the Playground scene and
+re-running three scenarios reproduces the baseline **to the last reported
+digit** (vx 0.263, h 0.379, GRF +0.7%, tau 26.2, roll rms 0.0120). No mismatch
+exists.
+
+What *does* change behaviour is the nominal pose. Replacing `q0`, `p0` and
+`p_legs0` with the Playground keyframe values degrades tracking:
+
+| variant | vx (cmd 0.3) | stand vx drift | tau max | roll rms |
+|---|---|---|---|---|
+| baseline (`q0` with 0.2 rad abduction) | **0.263** | +0.017 | 26.2 | 0.0120 |
+| Playground keyframe pose | 0.210 | −0.040 | 24.6 | 0.0134 |
+
+So the abducted nominal stance in `config_srbd.py` is a deliberate and better
+choice, not an inconsistency. Nothing to fix.
+
+Note for Lite3: `config_lite3.py` uses the `home` keyframe with zero hip
+abduction. Lite3 validates well as it is, but a slightly abducted nominal stance
+is worth trying if its tracking needs improving.
 
 ---
 
@@ -129,9 +144,20 @@ declared value is neither the composite nor the trunk. Inflating the rotational
 inertia of an SRBD model is a known way to make the MPC more conservative in
 pitch and yaw, so this looks deliberate rather than mistaken.
 
-Not corrected: it is a tuning parameter of a controller that works, and changing
-it would alter Aliengo's behaviour. Lite3 uses its physically derived composite
-inertia instead, and validates.
+Measured by ablation: replacing the declared inertia with the composite value
+and re-running three scenarios gives a marginally *better* result, not a worse
+one.
+
+| variant | vx (cmd 0.3) | tau max | roll rms | wz (cmd 0.5) |
+|---|---|---|---|---|
+| declared (inflated) | 0.263 | 26.2 | 0.0120 | 0.429 |
+| composite | **0.265** | **24.7** | **0.0114** | 0.427 |
+
+The differences are small and within run-to-run variation of a limit-cycle gait,
+so this is not evidence that the declared value is wrong -- but it is also not
+evidence that the inflation buys anything. Left as it is: it is a tuning
+parameter of a controller that works, and there is no measurement asking for a
+change. Lite3 uses its physically derived composite inertia and validates.
 
 ---
 
@@ -170,7 +196,7 @@ Neither change touches the control law.
 | # | issue | severity | action |
 |---|---|---|---|
 | 1 | touch sensors never fire | diagnostic | **fixed in the script**, model untouched, behaviour unchanged |
-| 2 | WBC model ≠ simulated model | potentially significant | documented, not touched |
+| 2 | ~~WBC model ≠ simulated model~~ | **claim withdrawn** | the two models are identical; measured, no action needed |
 | 3 | inflated SRBD inertia | tuning choice | documented, not touched |
 | 4 | per-step debug prints | cosmetic | **removed** |
 | 5 | tracking undershoot, height offset, yaw overshoot, torque peak at transitions | inherent | documented |

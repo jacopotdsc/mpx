@@ -41,19 +41,19 @@ It is the baseline used for comparison here.
 
 | | `srbd_quad.py` (Aliengo) | `lite3_srbd.py` |
 |---|---|---|
-| config | `mpx.config.config_srbd` | `mpx.config.config_srbd_lite3` |
+| config | `mpx.config.config_srbd` | `mpx.config.config_lite3` |
 | simulated model | Playground Aliengo flat scene | Playground Lite3 flat scene |
-| WBC model (`config.model_path`) | `mpx/data/aliengo/aliengo.xml` — **a different model** | the same Lite3 scene the simulator steps |
+| WBC model (`config.model_path`) | `mpx/data/aliengo/aliengo.xml` | the same Lite3 scene the simulator steps |
 | contact sensing | `*_touch` site sensors | `*_floor_found` contact sensors |
 | per-step prints | one block per MPC step | none |
 | diagnostics | none | optional `--metrics CSV` |
 | command | keyboard only | keyboard, or `--cmd` / a callable for scripted transitions |
 
-The WBC-model difference matters. `mpx/data/aliengo/aliengo.xml` has hip spacing
-`y = ±0.194` while the Playground Aliengo has `±0.134`, so the Aliengo
-whole-body controller computes Jacobians for a geometry the simulator does not
-have. `lite3_srbd.py` points `model_path` at the very XML being stepped, which
-removes that entire class of mismatch by construction.
+`lite3_srbd.py` points `model_path` at the very XML being stepped, so the
+whole-body controller and the simulation cannot drift apart. Aliengo uses a
+separate copy of its model, but the two files were measured to be kinematically
+identical, so nothing is wrong there -- see `errori_aliengo.md` section 2, which
+retracts an earlier claim to the contrary.
 
 ## 3. Lite3 parameters and where they come from
 

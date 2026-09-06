@@ -23,7 +23,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-import mpx.config.config_srbd_lite3 as config
+import mpx.config.config_lite3 as config
 import mpx.utils.mpc_wrapper_srbd as mpc_wrapper_srbd
 import mpx.utils.sim as sim_utils
 

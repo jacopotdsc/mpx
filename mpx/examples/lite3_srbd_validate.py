@@ -136,7 +136,7 @@ def analyse(rows, cmd, mass, nominal_h, dt):
 def run(robot, out_dir):
     if robot == "lite3":
         import lite3_srbd as runner
-        import mpx.config.config_srbd_lite3 as cfg
+        import mpx.config.config_lite3 as cfg
         nominal_h = float(cfg.robot_height)
     else:
         import srbd_quad as runner
