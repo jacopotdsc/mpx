@@ -2,7 +2,8 @@
 
 Mirror of srbd_quad.py (Aliengo) with the Lite3 model and configuration.
 
-    python lite3_srbd.py                 # viewer, arrow keys drive the command
+    python lite3_srbd.py                 # viewer; arrows drive vx/wz,
+                                         # Home/End (or PgUp/PgDn) drive vy
     python lite3_srbd.py --headless      # no viewer
     python lite3_srbd.py --headless --metrics out.csv --cmd 0.3 0 0
 """
@@ -28,6 +29,18 @@ import mpx.utils.mpc_wrapper_srbd as mpc_wrapper_srbd
 import mpx.utils.sim as sim_utils
 
 from mujoco_playground._src.locomotion.lite3 import lite3_constants as consts
+
+# Lateral (vy) keys. Not letters: MuJoCo's viewer reserves every key A-Z for its
+# own visualization flags (mjVISSTRING/mjRNDSTRING), so a letter binding never
+# reaches the callback. Home/End and PageUp/PageDown are free.
+KEY_PAGE_UP, KEY_PAGE_DOWN = 266, 267
+KEY_HOME, KEY_END = 268, 269
+FORWARD_STEP = 0.1
+FORWARD_LIMIT = 3.0
+LATERAL_STEP = 0.1
+LATERAL_LIMIT = 2.0
+YAW_STEP = 0.1
+YAW_LIMIT = 2.5
 
 jax.config.update("jax_compilation_cache_dir", "./jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
@@ -64,7 +77,15 @@ def main(headless=False, steps=500, metrics=None, cmd=None):
     touch_adr = [model.sensor_adr[model.sensor(f"{f}_floor_found").id]
                  for f in config.contact_frame]
 
-    command_handle = sim_utils.KeyboardVelocityCommand(vx=0.0, vy=0.0, wz=0.0)
+    command_handle = sim_utils.KeyboardVelocityCommand(
+        vx=0.0,
+        vy=0.0,
+        wz=0.0,
+        forward_step=FORWARD_STEP,
+        yaw_step=YAW_STEP,
+        forward_limits=(-FORWARD_LIMIT, FORWARD_LIMIT),
+        yaw_limits=(-YAW_LIMIT, YAW_LIMIT),
+    )
     # `cmd` is either a fixed (vx, vy, wz) or a callable step -> (vx, vy, wz),
     # the latter to script command transitions in headless validation runs.
     cmd_fn = cmd if callable(cmd) else (lambda k: cmd)
@@ -125,18 +146,47 @@ def main(headless=False, steps=500, metrics=None, cmd=None):
             log.append(_sample(model, data, mpc_state, tau, touch_adr, command_handle))
         return mpc_state
 
+    def key_callback(keycode):
+        """Arrow keys drive vx/wz through the shared handle; Home/End and
+        PageUp/PageDown drive vy, which the handle neither binds nor clips."""
+        if keycode in (KEY_HOME, KEY_PAGE_UP):
+            command_handle.vy = float(
+                np.clip(command_handle.vy + LATERAL_STEP, -LATERAL_LIMIT, LATERAL_LIMIT))
+        elif keycode in (KEY_END, KEY_PAGE_DOWN):
+            command_handle.vy = float(
+                np.clip(command_handle.vy - LATERAL_STEP, -LATERAL_LIMIT, LATERAL_LIMIT))
+        else:
+            command_handle.key_callback(keycode)
+
+    def overlay_text():
+        """Two aligned columns: the key that drives each command, and the
+        commanded value next to the one the robot is actually achieving.
+        Linear velocities are in the base frame, wz is the yaw rate."""
+        R = data.xmat[1].reshape(3, 3)
+        v = R.T @ data.qvel[:3]
+        return (
+            "Key\n"
+            "Up/Down\n"
+            "Home/End or PgUp/PgDn\n"
+            "Left/Right\n"
+            "Space",
+            f"        cmd   actual\n"
+            f"vx    {command_handle.vx:+6.2f}   {v[0]:+6.2f}\n"
+            f"vy    {command_handle.vy:+6.2f}   {v[1]:+6.2f}\n"
+            f"wz    {command_handle.wz:+6.2f}   {data.qvel[5]:+6.2f}\n"
+            f"stop  (vy limit +-{LATERAL_LIMIT:.1f})",
+        )
+
     if headless:
         for _ in range(steps):
             mpc_state = step_controller(mpc_state)
     else:
         with mujoco.viewer.launch_passive(
-            model, data, key_callback=command_handle.key_callback
+            model, data, key_callback=key_callback
         ) as viewer:
             viewer.sync()
             while viewer.is_running():
-                overlay = command_handle.consume_overlay_text()
-                if overlay is not None:
-                    viewer.set_texts((None, None, *overlay))
+                viewer.set_texts((None, None, *overlay_text()))
                 tic = timer()
                 mpc_state = step_controller(mpc_state)
                 toc = timer()
