@@ -1406,6 +1406,9 @@ def main():
                              "trailing value sets the target base height (envs that support it, "
                              "e.g. Tita); if omitted, the env's own init height is used, "
                              "e.g. --cmd 0.5 0.0 0.35")
+    parser.add_argument("--num-envs", type=int, default=None,
+                        help="override num_envs (the MPC envs need fewer: the "
+                             "solver's memory scales with the batch)")
     parser.add_argument(
         "--ckpt-dir",
         type=str,
@@ -1418,6 +1421,9 @@ def main():
     global ALGO, ALGO_PARAMS
     ALGO = args.algo
     ALGO_PARAMS = SAC_PARAMS if args.algo == "sac" else PPO_PARAMS
+    if args.num_envs is not None:
+        ALGO_PARAMS["num_envs"] = args.num_envs
+        print(f"  [INFO] num_envs overridden to {args.num_envs}")
 
     # Auto-set headless if DISPLAY is missing
     if not args.train and not args.headless and (os.environ.get("DISPLAY") is None or os.environ.get("DISPLAY") == ""):

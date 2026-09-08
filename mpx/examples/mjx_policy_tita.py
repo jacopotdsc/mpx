@@ -878,6 +878,7 @@ if __name__ == "__main__":
         "aliengo": "AliengoJoystickE2EFlatTerrain",
         "tita": "TitaJoystickFlatTerrain",
         "titae2e": "TitaJoystickE2EFlatTerrain",
+        "lite": "Lite3JoystickFlatTerrain",
         "lite3": "Lite3JoystickFlatTerrain",
         "litee2e": "Lite3JoystickE2EFlatTerrain",
     }
