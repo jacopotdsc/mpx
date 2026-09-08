@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from functools import partial
 from flax import struct     
 import mpx.utils.mpc_utils as mpc_utils
+import mpx.utils.wbc_model_based as wbc_mb
 import mpx.utils.models as mpc_dyn_model
 import mpx.utils.objectives as mpc_objectives
 import mujoco 
@@ -136,7 +137,11 @@ class BatchedMPCControllerWrapper:
         nj = nv - 6
         self._nj = nj
         self._n_joints_    = n_joints_
-        self._desired_size = mpc_utils._REF_JOINTS + 3 * n_joints_
+        # ``desired`` keeps the mpc_utils.pack_reference layout and appends the
+        # two MPC contact forces (fcl, fcr) at the end: every existing offset is
+        # unchanged, the QP WBC ignores the tail and the model-based WBC feeds it
+        # forward (see mpx.utils.wbc_model_based).
+        self._desired_size = wbc_mb.desired_size(n_joints_)
         # Use a lambda so the warm-start args (X0_prev, U0_prev, V0_prev) are
         # correctly placed at positions 8-10, while all static config args are
         # closed over.  A bare partial would silently fill the warm-start slots
@@ -166,31 +171,169 @@ class BatchedMPCControllerWrapper:
         _Kpr = config.Kp_reg;  _Kdr = config.Kd_reg
 
 
-        def whole_body_control(qpos, qvel, desired):
-            return mpc_utils.whole_body_interface_wheeled_legged_qp(
-                _mjx, config.mass, config.grav, config.d,
-                _cid, _bid, _bbid,
-                _wr, _st, _nc,
-                _Kpm, _Kdm, _Kpw, _Kdw, _Kpr, _Kdr,   # ← ora 6 gains
-                _w_ps,
-                _wq, _wc, _wl, _wrr, _wb,
-                _mu,
-                qpos, qvel, desired,
-                posture_mask=_posture_mask,
+        # ══════════════════════════════════════════════════════════════════
+        #  WHOLE-BODY CONTROLLER — selected by config.wbc_type
+        #
+        #  Every mode exposes the same two closures, so the rest of the wrapper
+        #  (whole_body_run / whole_body_run_diag) and every caller are unaware
+        #  of which one is active:
+        #
+        #    whole_body_control(qpos, qvel, desired)      -> tau, qddot, fl, fr
+        #    whole_body_control_diag(qpos, qvel, desired) -> ..., diag
+        #
+        #  "qp"          full task hierarchy solved as an inequality constrained
+        #                QP (qpax): friction cones, joint limits, floating-base
+        #                dynamics and wheel rolling all enforced.
+        #  "model_based" the same tasks solved in closed form by a constrained
+        #                Jacobian pseudo-inverse (one linear solve, no
+        #                inequalities). See mpx/utils/wbc_model_based.py.
+        #  "wheeled"     the quadruped SRBD controller transposed to two wheels
+        #                (mpc_utils.whole_body_interface_wheeled): the MPC
+        #                contact forces are projected on the joints through the
+        #                contact Jacobian, with a task-space PD on the swing
+        #                legs. Only the wheel task exists here -- no CoM, base
+        #                or posture task -- so it is the leanest of the three.
+        # ══════════════════════════════════════════════════════════════════
+        self.wbc_type = str(getattr(config, "wbc_type", "qp"))
+        if self.wbc_type not in ("qp", "model_based", "wheeled"):
+            raise ValueError(
+                "config.wbc_type must be 'qp', 'model_based' or 'wheeled', "
+                f"got {self.wbc_type!r}"
             )
 
-        def whole_body_control_diag(qpos, qvel, desired):
-            return mpc_utils.whole_body_interface_wheeled_legged_qp_diag(
-                _mjx, config.mass, config.grav, config.d,
-                _cid, _bid, _bbid,
-                _wr, _st, _nc,
-                _Kpm, _Kdm, _Kpw, _Kdw, _Kpr, _Kdr,
-                _w_ps,
-                _wq, _wc, _wl, _wrr, _wb,
-                _mu,
-                qpos, qvel, desired,
-                posture_mask=_posture_mask,
-            )
+        if self.wbc_type in ("qp", "model_based"):
+            # ── task-space controllers: they consume the whole `desired` vector
+            if self.wbc_type == "qp":
+                _wbc_fn = mpc_utils.whole_body_interface_wheeled_legged_qp
+                _wbc_fn_diag = mpc_utils.whole_body_interface_wheeled_legged_qp_diag
+                _wbc_kwargs = {}
+                print("[WBC] QP whole-body controller (qpax)")
+            else:
+                _mb_roll = bool(getattr(config, "wbc_mb_enforce_rolling", True))
+                _mb_src = str(getattr(config, "wbc_mb_force_source", "dynamics"))
+                _mb_damp = float(getattr(config, "wbc_mb_damping", 1e-6))
+                _mb_basedyn = bool(getattr(config, "wbc_mb_enforce_base_dynamics", True))
+                _wbc_fn = wbc_mb.whole_body_interface_wheeled_legged_model_based
+                _wbc_fn_diag = wbc_mb.whole_body_interface_wheeled_legged_model_based_diag
+                _wbc_kwargs = dict(
+                    enforce_rolling=_mb_roll,
+                    force_source=_mb_src,
+                    enforce_base_dynamics=_mb_basedyn,
+                    damping=_mb_damp,
+                )
+                print(f"[WBC] model-based whole-body controller (Jacobian inversion)"
+                      f" | rolling constraint {'on' if _mb_roll else 'off'}"
+                      f" | contact forces from {_mb_src}"
+                      + (f" (base dynamics {'enforced' if _mb_basedyn else 'free'})"
+                         if _mb_src == "mpc" else "")
+                      + f" | damping {_mb_damp}")
+
+            def whole_body_control(qpos, qvel, desired):
+                return _wbc_fn(
+                    _mjx, config.mass, config.grav, config.d,
+                    _cid, _bid, _bbid,
+                    _wr, _st, _nc,
+                    _Kpm, _Kdm, _Kpw, _Kdw, _Kpr, _Kdr,   # ← ora 6 gains
+                    _w_ps,
+                    _wq, _wc, _wl, _wrr, _wb,
+                    _mu,
+                    qpos, qvel, desired,
+                    posture_mask=_posture_mask,
+                    **_wbc_kwargs,
+                )
+
+            def whole_body_control_diag(qpos, qvel, desired):
+                return _wbc_fn_diag(
+                    _mjx, config.mass, config.grav, config.d,
+                    _cid, _bid, _bbid,
+                    _wr, _st, _nc,
+                    _Kpm, _Kdm, _Kpw, _Kdw, _Kpr, _Kdr,
+                    _w_ps,
+                    _wq, _wc, _wl, _wrr, _wb,
+                    _mu,
+                    qpos, qvel, desired,
+                    posture_mask=_posture_mask,
+                    **_wbc_kwargs,
+                )
+
+        else:
+            # ── quadruped-style controller: it only needs the wheel references
+            # and the MPC contact forces, which are extracted from `desired`
+            # here so that the reference builder stays common to every mode.
+            _Kp_wheeled = config.Kp     # (3*n_contact) square, see config_dfcip
+            _Kd_wheeled = config.Kd
+            _fl_off, _fr_off = wbc_mb.contact_force_offsets(nj)
+            _mjmodel = model
+            _nv = nv
+            print("[WBC] quadruped-style wheeled whole-body controller "
+                  "(contact Jacobian projection of the MPC forces)")
+
+            def _split_desired(desired):
+                # Same arguments mpc_wrapper_srbd feeds to whole_body_interface,
+                # read off the common `desired` vector:
+                #   foot_ref     <- wheel centre position references (the WBC
+                #                   compares them against geom_xpos of the wheel
+                #                   collision geoms, so both are wheel centres)
+                #   foot_ref_dot <- wheel centre velocity references
+                #   grf          <- MPC contact forces [fcl; fcr] = state.sol.grf
+                #   contact      <- both wheels are permanently in stance
+                foot_ref = jnp.concatenate([
+                    desired[mpc_utils._REF_LW_POS:mpc_utils._REF_LW_POS + 3],
+                    desired[mpc_utils._REF_RW_POS:mpc_utils._REF_RW_POS + 3],
+                ])
+                foot_ref_dot = jnp.concatenate([
+                    desired[mpc_utils._REF_LW_VEL:mpc_utils._REF_LW_VEL + 3],
+                    desired[mpc_utils._REF_RW_VEL:mpc_utils._REF_RW_VEL + 3],
+                ])
+                grf = jnp.concatenate([
+                    desired[_fl_off:_fl_off + 3],
+                    desired[_fr_off:_fr_off + 3],
+                ])
+                # both wheels are permanently in contact
+                contact = jnp.ones(2, dtype=desired.dtype)
+                return grf, foot_ref, foot_ref_dot, contact
+
+            def whole_body_control(qpos, qvel, desired):
+                grf, foot_ref, foot_ref_dot, contact = _split_desired(desired)
+                tau, _ = mpc_utils.whole_body_interface_wheeled(
+                    _mjmodel, _mjx, _cid, _bid,
+                    config.whole_body_frequency,   # as mpc_wrapper_srbd does
+                    _Kp_wheeled, _Kd_wheeled,
+                    qpos, qvel, grf, foot_ref, foot_ref_dot, contact,
+                )
+                # This controller never forms a joint acceleration: report zeros
+                # so the return signature matches the task-space controllers
+                # (the outer PD "plan" mode is therefore not usable here).
+                qddot = jnp.zeros(_nv)
+                return tau, qddot, grf[:3], grf[3:]
+
+            def whole_body_control_diag(qpos, qvel, desired):
+                tau, qddot, fl, fr = whole_body_control(qpos, qvel, desired)
+                # Only the quantities this controller actually computes are
+                # filled in; the task residuals and the constraint margins do
+                # not exist here (no task hierarchy, no constraints) and are
+                # reported as zeros so the validation harness keeps working.
+                z3 = jnp.zeros(3)
+                diag = dict(
+                    converged=jnp.array(True), iters=jnp.array(0),
+                    res_com=z3, res_lwheel=z3, res_rwheel=z3, res_base=z3,
+                    a_com_total=z3, a_lwheel_total=z3, a_rwheel_total=z3,
+                    a_base_total=z3,
+                    err_com=z3, err_com_vel=z3, err_lwheel=z3, err_rwheel=z3,
+                    err_base=z3,
+                    eq_res_norm=jnp.array(0.0),
+                    ineq_slack_min_joint=jnp.array(0.0),
+                    # flat-ground approximation: the world frame is the contact
+                    # frame, so the forces double as their local components
+                    fric_margin_l=jnp.array([_mu * fl[2] - jnp.abs(fl[0]),
+                                             _mu * fl[2] - jnp.abs(fl[1]),
+                                             fl[2] - 5.0]),
+                    fric_margin_r=jnp.array([_mu * fr[2] - jnp.abs(fr[0]),
+                                             _mu * fr[2] - jnp.abs(fr[1]),
+                                             fr[2] - 5.0]),
+                    fl_local=fl, fr_local=fr,
+                )
+                return tau, qddot, fl, fr, diag
 
         # MPC diagnostics (harness only): cost before/after the FDDP step,
         # multiple-shooting defects, step acceptance and the physical
@@ -578,6 +721,13 @@ class BatchedMPCControllerWrapper:
         desired = desired.at[:, mpc_utils._REF_JOINTS:mpc_utils._REF_JOINTS + self._nj].set(qjnt_ref)
         desired = desired.at[:, mpc_utils._REF_JOINTS + self._nj:mpc_utils._REF_JOINTS + 2*self._nj].set(qjntdot_ref)
         desired = desired.at[:, mpc_utils._REF_JOINTS + 2*self._nj:mpc_utils._REF_JOINTS + 3*self._nj].set(qjntddot_ref)
+
+        # MPC contact forces appended after the joint block. Ignored by the QP
+        # WBC, fed forward as the contact wrench by the model-based one
+        # (config.wbc_type = "model_based", force_source = "mpc").
+        _fl_off, _fr_off = wbc_mb.contact_force_offsets(self._nj)
+        desired = desired.at[:, _fl_off:_fl_off + 3].set(contact_force_left_)
+        desired = desired.at[:, _fr_off:_fr_off + 3].set(contact_force_right_)
         
         return desired
     

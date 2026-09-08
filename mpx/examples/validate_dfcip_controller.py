@@ -451,6 +451,7 @@ def main():
     ap.add_argument("--no-outer-pd", action="store_true", help="apply the WBC torque only (no outer joint PD)")
     ap.add_argument("--outer-pd-mode", default="legacy", choices=["legacy", "plan"], help="outer PD target: legacy (one sim step ahead of the current state) or plan (WBC plan integrated over the hold interval)")
     ap.add_argument("--stale-state", action="store_true", help="legacy read: gather the state after mj_step without a forward pass (derived quantities one simulation step old)")
+    ap.add_argument("--wbc", default=None, choices=["qp", "model_based", "wheeled"], help="whole-body controller: 'qp' (inequality constrained QP), 'model_based' (Jacobian inversion) or 'wheeled' (quadruped-style contact Jacobian projection); shorthand for --set wbc_type=...")
     ap.add_argument("--wbc-every", type=int, default=None, help="override the WBC period in simulation steps (legacy mjx_tita cadence = MPC period)")
     ap.add_argument("--scene", default="flat")
     ap.add_argument("--out", default=os.path.join(dir_path, "validation_results.json"))
@@ -464,6 +465,8 @@ def main():
     for item in args.set:
         k, v = item.split("=", 1)
         overrides[k.strip()] = parse_value(v.strip())
+    if args.wbc is not None:
+        overrides["wbc_type"] = args.wbc
     cfg = make_config(overrides)
     ctx = Context(cfg, scene=args.scene)
     if args.wbc_every is not None:
@@ -472,6 +475,7 @@ def main():
     print(f"[timing] sim {T['sim_f']} Hz (dt {T['dt_sim']:.4f}) | MPC {T['mpc_f']} Hz every {T['mpc_period_steps']} sim steps"
           f" | WBC {T['wbc_f']} Hz every {T['wbc_period_steps']} sim steps (dt_wbc {T['dt_wbc']:.4f})"
           f" | dt_mpc {T['dt_mpc']} N {T['N']} horizon {T['horizon']:.3f} s | shift {ctx.mpc.shift} node(s)"
+          f" | WBC {getattr(ctx.mpc, 'wbc_type', 'qp')}"
           f" | fddp iterations {ctx.mpc.mpc_iterations} | WBC lookahead {ctx.mpc.wbc_lookahead_dt} s | outer PD {'off' if args.no_outer_pd else args.outer_pd_mode} | state read {'stale (after mj_step)' if args.stale_state else 'fresh (mj_step1/mj_step2)'}")
     if overrides:
         print(f"[config] overrides: {overrides}")

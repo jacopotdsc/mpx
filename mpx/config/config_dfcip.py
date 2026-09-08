@@ -97,6 +97,38 @@ Kp = jnp.diag(jnp.tile(jnp.array([500,500,500]),n_contact))
 Kd = jnp.diag(jnp.tile(jnp.array([20,20,20]),n_contact))
 
 # Whole-body controller
+# ── which WBC closes the loop on the MPC plan ─────────────────────────────
+#   "qp"          : mpc_utils.whole_body_interface_wheeled_legged_qp -- the
+#                   task hierarchy solved as an inequality constrained QP
+#                   (qpax), enforcing friction cones and joint limits.
+#   "model_based" : mpx.utils.wbc_model_based -- the same tasks and the same
+#                   inverse-dynamics torque map, but qddot comes from a single
+#                   linear solve (constrained Jacobian pseudo-inverse), like
+#                   the quadruped WBC used with the SRBD model. Cheaper and
+#                   always finite, but the inequalities are only measured.
+#   "wheeled"     : mpc_utils.whole_body_interface_wheeled -- the quadruped
+#                   SRBD controller transposed to two wheels: the MPC contact
+#                   forces projected on the joints through the contact
+#                   Jacobian. Only the wheel task, no CoM / base / posture.
+#
+# Default: "model_based". It matches the QP's tracking to three decimals on the
+# six commands of validate_dfcip_controller.py and costs ~5x less per call
+# (0.29 ms vs 1.59 ms on CPU); "qp" stays available for the cases where the
+# friction cones / joint limits have to be enforced rather than just measured.
+wbc_type = "qp"
+# Options used only when wbc_type == "model_based":
+#   enforce the wheel rolling equality through the KKT system (recommended:
+#   without it the solution can violate the non-holonomic rolling constraint),
+wbc_mb_enforce_rolling = True
+#   where the contact forces come from: "dynamics" (recover them from the six
+#   unactuated rows given qddot, i.e. the equality the QP enforces) or "mpc"
+#   (feed the MPC GRF forward, the literal quadruped choice -- it does not hold
+#   here, the robot falls at vx>=0.6 because qddot and the MPC forces together
+#   violate the floating-base rows; see mpx/utils/wbc_model_based.py),
+wbc_mb_force_source = "dynamics"
+#   damping added to the task Hessian to keep the inverse well conditioned.
+wbc_mb_damping = 1e-6
+
 base_body_name  = 'base_link'
 wheel_radius    = 0.0925
 Kp_motion = 5e1 

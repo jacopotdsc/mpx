@@ -755,6 +755,58 @@ def whole_body_interface(model, mjx_model, contact_id, body_id,sim_frequency,Kp,
 
     return tau , J
 
+def whole_body_interface_wheeled(model, mjx_model, contact_id, body_id,sim_frequency,Kp,Kd,qpos,qvel,grf,foot_ref,foot_ref_dot,contact):
+    """Same as ``whole_body_interface`` (quadruped), with 2 contacts instead of 4."""
+
+    mjx_data = mjx.make_data(model)
+    # Update the position and velocity in the data object
+    mjx_data = mjx_data.replace(qpos=qpos, qvel=qvel)
+    # Perform forward kinematics and dynamics computations
+    mjx_data = mjx.fwd_position(mjx_model, mjx_data)
+    mjx_data = mjx.fwd_velocity(mjx_model, mjx_data)
+
+    # Extract the mass matrix and bias forces
+    M = mjx_data.qM
+    D = mjx_data.qfrc_bias
+
+    # Get the positions of the contact points on the legs
+    L_leg = mjx_data.geom_xpos[contact_id[0]]
+    R_leg = mjx_data.geom_xpos[contact_id[1]]
+
+    # Compute the Jacobians for each leg
+    # Return geometric and rotational jacobian ( joint space -> cartesian space)
+    # Each of them has shape (14, 3)
+    J_L, _ = mjx.jac(mjx_model, mjx_data, L_leg, body_id[0])
+    J_R, _ = mjx.jac(mjx_model, mjx_data, R_leg, body_id[1])
+
+    # Concatenate the Jacobians into a single matrix
+    J = jnp.concatenate([J_L, J_R], axis=1)
+    # Concatenate the positions of the legs into a single vector
+    current_leg = jnp.concatenate([L_leg, R_leg], axis=0)
+    current_leg_dot = J.T @ mjx_data.qvel
+
+    '''
+    v_task = J @ qvel -> a_task = J @ qacc + J_dot @ qvel
+    qacc = J_pinv @ a_task - J_dot @ qvel -> for small movement, J_dot @ qvel can be negletted
+    J_L actually is the mapping from joint space to task space
+    so when using J_pinv we have to use the jacobian from task to join space with J_L^T
+    '''
+    # definition of a_task
+    cartesian_space_action = Kp@(foot_ref-current_leg) + Kd@(foot_ref_dot-current_leg_dot)
+
+    # M @ qacc + n = tau + J.T @ grf -> tau = M @ qacc + n - J.T @ grf
+    tau_fb_lin = D[6:] + (M @ jnp.linalg.pinv(J.T) @ (cartesian_space_action))[6:]
+    tau_mpc = -(J@grf)[6:]
+    tau_PD = (J @ cartesian_space_action)[6:]
+    # one entry per actuated joint: 4 joints per leg (the quadruped writes 3 per
+    # leg because there n_joints = 3*n_contact; here n_joints = 8, 3*n_contact = 6)
+    contact_mask = jnp.array([contact[0],contact[0],contact[0],contact[0],contact[1],contact[1],contact[1],contact[1]])
+
+    # tau in contact use only
+    tau = tau_mpc*contact_mask + (1-contact_mask)*(tau_PD + tau_fb_lin)
+
+    return tau , J
+
 @partial(jax.jit, static_argnums=(0))
 def whole_body_interface_qp(
     model,
