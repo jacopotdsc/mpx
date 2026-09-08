@@ -259,9 +259,10 @@ class BatchedMPCControllerWrapper:
         
     def init_state(self) -> MPCState:
         n, cfg = self.n_env, self.config
-        a = jnp.tile(cfg.u_ref[0], (n, 1))
-        ac_z = jnp.tile(cfg.u_ref[1], (n, 1))
-        alpha = jnp.tile(cfg.u_ref[2], (n, 1))
+        # Same shapes as the state returned by run(): a/ac_z/alpha (n_env,), grf (n_env, 6).
+        a = jnp.full((n,), cfg.u_ref[0])
+        ac_z = jnp.full((n,), cfg.u_ref[1])
+        alpha = jnp.full((n,), cfg.u_ref[2])
         grf = jnp.tile(cfg.u_ref[3:], (n, 1))
 
         return MPCState(
@@ -304,6 +305,11 @@ class BatchedMPCControllerWrapper:
         new_ac_z = U[:,0,1]
         new_alpha = U[:,0,2]
         new_grf = U[:,0,3:]
+        # The multiple-shooting defects returned by the line search can be
+        # non-finite when every trial step was rejected (they belong to the
+        # rejected alpha=1 rollout). They are diagnostic only (fddp_mpc
+        # recomputes the defects from x0, X, U), so keep them finite.
+        D = jnp.nan_to_num(D, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Warm-start for the next call: shift the trajectories forward by one
         # MPC update period (self.shift MPC nodes, not simulation steps).

@@ -77,6 +77,36 @@ import mujoco
 import mujoco.viewer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ── Import precedence ────────────────────────────────────────────────────────
+# `mpx` and `mujoco_playground` are ALSO installed editable in this conda env
+# from other checkouts (repo_rl/tita_rl/test/mpx and site-packages). A plain
+# import would silently run those copies. Put this repository first on
+# sys.path so the code in THIS working tree is the code that runs, and print
+# the resolved locations so it can be verified at every launch.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+for _p in (os.path.join(_REPO_ROOT, "mujoco_playground"), os.path.join(_REPO_ROOT, "mpx")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+
+def _print_and_check_import_paths():
+    import mpx as _mpx
+    import mujoco_playground as _mp
+    from mujoco_playground._src.locomotion.tita import joystick as _js
+    import mpx.config.config_dfcip as _cfg
+    print("[imports] mpx               ->", os.path.dirname(_mpx.__file__))
+    print("[imports] mujoco_playground ->", os.path.dirname(_mp.__file__))
+    print("[imports] tita/joystick.py  ->", _js.__file__)
+    print("[imports] config_dfcip.py   ->", _cfg.__file__)
+    for name, path in (("mpx", _mpx.__file__), ("mujoco_playground", _mp.__file__), ("joystick", _js.__file__)):
+        if not os.path.abspath(path).startswith(_REPO_ROOT):
+            raise ImportError(f"{name} resolved to '{path}', outside this repository ({_REPO_ROOT}); "
+                              "another checkout would be executed")
+
+
+_print_and_check_import_paths()
+
 from plot_eval import (
     plot_command_tracking,
     plot_rollout_rewards,
@@ -110,9 +140,15 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
 DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match checkpoint
-ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for safe exploration)
-ZERO_INIT_LOAD = True # if True, init policy output layer to zero (for safe exploration)
-INIT_STD = 0.03
+# Residual policy initialisation (residual_policy_init.py). With tanh_normal
+# the output layer encodes [loc | scale_raw] and std = softplus(scale_raw)+1e-3:
+# a plain zero output layer gives loc = 0 but std = 0.69 (random actions from
+# step one), and make_ppo_networks(init_noise_std=...) is ignored for
+# tanh_normal. We therefore set the output kernel to zero (mean exactly 0 for
+# every observation -> the untrained residual leaves the MPC/WBC untouched)
+# and the scale bias so that the initial exploration std is RESIDUAL_INIT_STD.
+RESIDUAL_ZERO_MEAN_INIT = True
+RESIDUAL_INIT_STD = 0.15
 
 NUM_TIMESTEPS = 20_000_000
 NUM_EVALS = 10
@@ -132,7 +168,11 @@ PPO_PARAMS = dict(
       num_updates_per_batch=4,
       discounting=0.99,
       learning_rate=3e-4,
-      entropy_cost=1e-2,
+      # Residual policy: the exploration std starts small (RESIDUAL_INIT_STD);
+      # the previous 1e-2 entropy bonus pushes the tanh_normal std back toward
+      # ~0.7 within a few updates, i.e. random residual torques. 2e-3 keeps the
+      # bonus but lets the small initial std persist (measured in the smoke run).
+      entropy_cost=2e-3,
       num_envs=NUM_ENVS,
       batch_size=256,
       max_grad_norm=1.0,
@@ -149,6 +189,19 @@ PPO_PARAMS = dict(
 
 
 print(f"PPO_PARAMS: \n{PPO_PARAMS}")
+
+# Temporary overrides for `--smoke`: a short run to verify compilation,
+# rollout, backward pass, checkpointing, evaluation and numerical health.
+# Never changes the full-training defaults above. Brax requires
+# (batch_size * num_minibatches) % num_envs == 0.
+SMOKE_PPO_OVERRIDES = dict(
+    num_timesteps=400_000,
+    num_envs=256,
+    batch_size=128,
+    num_minibatches=8,
+    num_evals=4,
+    num_resets_per_eval=1,
+)
 
 SAC_PARAMS = dict(
     num_timesteps          = NUM_TIMESTEPS,
@@ -176,14 +229,15 @@ print(f"SAC_PARAMS: \n{SAC_PARAMS}")
 
 def make_envs(
     env_name: str = "Go1JoystickFlatTerrain",
+    config_overrides: dict | None = None,
 ):
     """Return (env, eval_env, wrap_fn) for a MuJoCo Playground env."""
 
     from mujoco_playground import registry
     from mujoco_playground._src.wrapper import wrap_for_brax_training as pg_wrap
 
-    env      = registry.load(env_name)
-    eval_env = registry.load(env_name)
+    env      = registry.load(env_name, config_overrides=config_overrides)
+    eval_env = registry.load(env_name, config_overrides=config_overrides)
 
     if ALGO == "sac":
         class SACStateWrapper(Wrapper):
@@ -791,15 +845,6 @@ def run_viewer_rollout(
                 action = jnp.broadcast_to(action0, (EVAL_BATCH, eval_env.action_size))
             else:
                 action = zero_action
-                if "use_only_mpc" in state.info:
-                    state = state.replace(info={
-                        **state.info,
-                        "use_only_mpc": jnp.full(
-                            (EVAL_BATCH,),
-                            True,
-                            dtype=jnp.bool_,
-                        ),
-                    })
 
             if fixed_command is not None:
                 _cmd = jnp.broadcast_to(jnp.asarray(fixed_command), (EVAL_BATCH, cmd_dim))
@@ -857,17 +902,6 @@ def run_viewer_rollout(
                     action = jnp.broadcast_to(action0, (EVAL_BATCH, eval_env.action_size))
                 else:
                     action = zero_action
-
-                    if "use_only_mpc" in state.info:
-                        state = state.replace(info={
-                            **state.info,
-                            "use_only_mpc": jnp.full(
-                                (EVAL_BATCH,),
-                                True,
-                                dtype=jnp.bool_,
-                            ),
-                        })
-
 
                 if fixed_command is not None:
                     _cmd = jnp.broadcast_to(jnp.asarray(fixed_command), (EVAL_BATCH, cmd_dim))
@@ -1014,7 +1048,9 @@ def run_viewer_rollout(
 
 
 def _build_fresh_networks(env, zero_init_output_layer: bool = False):
-    """Return a ppo_networks with random hidden layers and zero-init output layer."""
+    """Return the PPO/SAC networks. `zero_init_output_layer` is kept for the
+    SAC path only; for PPO the residual initialisation (zero mean head,
+    explicit std) is applied to the parameters by make_residual_fresh_params."""
     if DISTRIBUTION_TYPE == "tanh_normal":
         param_size = 2 * env.action_size
     elif DISTRIBUTION_TYPE == "normal":
@@ -1070,7 +1106,7 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
             distribution_type=DISTRIBUTION_TYPE,
             activation=linen.elu,
             policy_network_kernel_init_fn=(lambda init_kwargs: _policy_kernel_init_factory(**init_kwargs)),
-            init_noise_std=INIT_STD
+            init_noise_std=RESIDUAL_INIT_STD
         )
 
     self_test = False
@@ -1197,6 +1233,37 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
     return networks
 
 
+def make_residual_fresh_params(env, networks, seed: int = 0, with_value: bool = True):
+    """(normalizer, policy, value) with the residual initialisation applied to
+    the policy: output kernel zero, loc bias zero, scale bias such that the
+    tanh_normal std equals RESIDUAL_INIT_STD. Also prints the measured output
+    of the fresh policy on a reset observation."""
+    from residual_policy_init import residual_init_policy_params, describe_policy_output
+    key = jax.random.PRNGKey(seed)
+    k_pol, k_val = jax.random.split(key)
+    policy_params = networks.policy_network.init(k_pol)
+    policy_params = residual_init_policy_params(
+        policy_params, env.action_size, RESIDUAL_INIT_STD, zero_mean=RESIDUAL_ZERO_MEAN_INIT)
+    obs_size = env.observation_size
+    if isinstance(obs_size, dict):
+        obs_proto = {k: specs.Array((int(np.prod(v)),) if not isinstance(v, int) else (v,), jnp.float32)
+                     for k, v in obs_size.items()}
+    else:
+        obs_proto = specs.Array((obs_size,), jnp.float32)
+    normalizer_params = running_statistics.init_state(obs_proto)
+    try:
+        st = jax.jit(env.reset)(jax.random.PRNGKey(0))
+        d = describe_policy_output(networks, (normalizer_params, policy_params), st.obs, env.action_size)
+        print(f"  [residual init] deterministic action on reset obs: {np.round(d['deterministic_action'], 4)}")
+        print(f"  [residual init] pre-tanh std: {np.round(d['pre_tanh_std'], 4)} | sampled action std: {np.round(d['sampled_std'], 4)}")
+    except Exception as exc:  # measurement only
+        print(f"  [residual init] policy output measurement skipped: {exc}")
+    if not with_value:
+        return (normalizer_params, policy_params)
+    value_params = networks.value_network.init(k_val)
+    return (normalizer_params, policy_params, value_params)
+
+
 def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
               resume_dir: str | None = None, resume_suffix: str = "best",
               env_name: str = "Go1JoystickFlatTerrain", algo: str = "ppo"):
@@ -1252,18 +1319,21 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
 
 
     restore_params = None
-    built_networks = _build_fresh_networks(env, zero_init_output_layer=ZERO_INIT_OUTPUT_LAYER)
+    built_networks = _build_fresh_networks(env)
     selected_network_factory = lambda *args, **kwargs: built_networks
 
     if resume_dir:
         restore_params = load_params(resume_dir, suffix=resume_suffix)
         if restore_params is None:
             print(f"  [WARN] --load requested but no checkpoint found in '{resume_dir}'.")
-            print("  Starting training from random initialization.")
         else:
             print(f"  Initializing training from checkpoint in '{resume_dir}'.")
-    else:
-        print("  Fresh training.")
+    if restore_params is None and algo == "ppo":
+        # Fresh training: residual-initialised policy (mean 0, std RESIDUAL_INIT_STD)
+        # handed to brax through restore_params = (normalizer, policy, value).
+        restore_params = make_residual_fresh_params(env, built_networks, seed=ALGO_PARAMS["seed"])
+        print(f"  Fresh training with residual init (zero mean head: {RESIDUAL_ZERO_MEAN_INIT}, "
+              f"init std: {RESIDUAL_INIT_STD}).")
     
     def _extract_actor_critic(restore_params):
         """Return (policy_params, value_params) from a brax restore tuple, or (None, None)."""
@@ -1398,6 +1468,11 @@ def main():
                              "suffix from the latest run.")
     parser.add_argument("--zero", action="store_true", help="Force zero actions (ignore policy network)")
     parser.add_argument("--headless", action="store_true", help="Eval rollout without opening the MuJoCo viewer")
+    parser.add_argument("--smoke", action="store_true",
+                        help="Short training run with SMOKE_PPO_OVERRIDES (compile/rollout/backward/checkpoint check); "
+                             "does not change the full-training defaults")
+    parser.add_argument("--mpc-only", action="store_true",
+                        help="Disable the residual in the env (tau_final = tau_WBC): pure MPC baseline inside the RL env")
     parser.add_argument("--random", action="store_true", help="Use a random network for evaluation")
     parser.add_argument("--cmd", nargs="+", type=float, default=None, metavar="CMD_I",
                         help="Fix joystick command for eval rollout. Number of values must match "
@@ -1432,8 +1507,20 @@ def main():
         "titae2e": "TitaJoystickE2EFlatTerrain",
     }
     env_name = _NAME_SHORTCUTS.get(args.name.lower(), args.name)
-    env, eval_env, wrap_fn = make_envs(env_name=env_name)
+    env_overrides = {"residual_config.enabled": False} if args.mpc_only else None
+    env, eval_env, wrap_fn = make_envs(env_name=env_name, config_overrides=env_overrides)
     env_base_dir = os.path.join(args.ckpt_dir, env_name)
+
+    # Timing checks visible at every launch (the env asserts the rest).
+    print(f"  [timing] env.dt={env.dt} s (policy {1/env.dt:.0f} Hz), sim_dt={env.sim_dt} s, "
+          f"n_substeps={env.n_substeps}, PPO action_repeat={ALGO_PARAMS['action_repeat']}")
+    assert ALGO_PARAMS["action_repeat"] == 1, "action_repeat must stay 1: the 5 physics substeps are inside env.step()"
+    assert abs(env.dt - 0.01) < 1e-12 and abs(env.sim_dt - 0.002) < 1e-12 and env.n_substeps == 5
+
+    if args.smoke and not args.eval:
+        for k, v in SMOKE_PPO_OVERRIDES.items():
+            print(f"  [smoke] {k}: {ALGO_PARAMS[k]} -> {v}")
+            ALGO_PARAMS[k] = v
 
 
     # ── train or eval ───────────────────────────────────────────
@@ -1441,7 +1528,7 @@ def main():
         resume_dir, resume_suffix = (
             _resolve_load(env_base_dir, args.load) if args.load else (None, "best")
         )
-        ckpt_dir = os.path.join(env_base_dir, SCRIPT_START_TIME)
+        ckpt_dir = os.path.join(env_base_dir, ("smoke_" if args.smoke else "") + SCRIPT_START_TIME)
         run_train(env, eval_env, wrap_fn, ckpt_dir,
                   resume_dir=resume_dir, resume_suffix=resume_suffix,
                   env_name=env_name, algo=ALGO)
@@ -1454,32 +1541,6 @@ def main():
 
     fixed_cmd = np.array(args.cmd) if args.cmd is not None else None
 
-    def _make_fresh_params(env, networks, seed=0, tag=""):
-
-        # --- weights ---
-        policy_params = networks.policy_network.init(jax.random.PRNGKey(seed))
-
-        obs_size = env.observation_size
-        if isinstance(obs_size, dict):
-            obs_proto = {
-                k: specs.Array((int(np.prod(v)),) if not isinstance(v, int) else (v,), jnp.float32)
-                for k, v in obs_size.items()
-            }
-        else:
-            obs_proto = specs.Array((obs_size,), jnp.float32)
-
-        # --- normalizer state ---
-        normalizer_params = running_statistics.init_state(obs_proto)
-
-        # --- diagnostics ---
-        print(f"  [fresh_params{(' ' + tag) if tag else ''}] seed={seed}")
-        print(f"    obs_size type      : {type(obs_size).__name__} -> {obs_size}")
-        n_leaves = len(jax.tree_util.tree_leaves(policy_params))
-        total = int(sum(np.prod(x.shape) for x in jax.tree_util.tree_leaves(policy_params)))
-        print(f"    policy params      : {n_leaves} leaves, {total} scalars")
-        print(f"    normalizer         : {'dict' if isinstance(obs_proto, dict) else obs_proto.shape} (empty: mean 0 / var 1 -> obs NOT normalized)")
-
-        return (normalizer_params, policy_params)
 
 
     run_dir, load_suffix = _resolve_load(
@@ -1493,22 +1554,17 @@ def main():
     if args.random or params_inference_fn is None:
 
         if params_inference_fn is None:
-            print(f"  [NET-INIT] No checkpoint found in '{ckpt_dir}' — using random network.")
+            print(f"  [NET-INIT] No checkpoint found in '{ckpt_dir}' — using a fresh residual-initialised network.")
         elif args.random:
-            print("  [NET-INIT] --random flag: using random network.")
-        else:
-            print("  [NET-INIT] Using random network: no flag detected.")
+            print("  [NET-INIT] --random flag: using a fresh residual-initialised network.")
 
         networks = _build_fresh_networks(eval_env)
-        normalizer_params, policy_params = _make_fresh_params(eval_env, networks, seed=0, tag="random")
-        params_inference_fn = (normalizer_params, policy_params)  
+        params_inference_fn = make_residual_fresh_params(eval_env, networks, seed=0, with_value=False)
 
     elif args.zero:
-        print("  [NET-INIT] --zero flag: using fresh network with zero output layer.")
-        networks = _build_fresh_networks(eval_env, zero_init_output_layer=True)
-        normalizer_params, policy_params = _make_fresh_params(eval_env, networks, seed=0, tag="zero")
-        params_inference_fn = (normalizer_params, policy_params)
-
+        print("  [NET-INIT] --zero flag: zero actions every step (tau_final = tau_WBC + lambda * PD toward default pose).")
+        networks = _build_fresh_networks(eval_env)
+        params_inference_fn = make_residual_fresh_params(eval_env, networks, seed=0, with_value=False)
         zero_command = True
     else:
         print(f"  [NET-INIT] Checkpoint will be loaded from '{ckpt_dir}'")
