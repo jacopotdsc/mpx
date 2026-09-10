@@ -16,6 +16,32 @@ import os
 import jax
 
 jax.config.update("jax_enable_x64", True)
+
+# Compatibility shim: brax 0.14.2 calls jax.device_put_replicated (train.py:756),
+# which jax 0.10.2 removed (along with device_put_sharded). Restore it with the
+# correct semantics: replicate the pytree across `devices`, adding a leading
+# device axis so pmap can map over it.
+if not hasattr(jax, "device_put_replicated"):
+    import jax.numpy as _jnp
+
+    def _device_put_replicated(x, devices):
+        n = len(devices)
+        try:
+            from jax.sharding import PositionalSharding
+            sharding = PositionalSharding(devices)
+
+            def _rep(leaf):
+                leaf = _jnp.asarray(leaf)
+                stacked = _jnp.broadcast_to(leaf, (n,) + leaf.shape)
+                return jax.device_put(stacked, sharding.reshape((n,) + (1,) * leaf.ndim))
+        except Exception:
+            def _rep(leaf):
+                leaf = _jnp.asarray(leaf)
+                return _jnp.broadcast_to(leaf, (n,) + leaf.shape)
+        return jax.tree_util.tree_map(_rep, x)
+
+    jax.device_put_replicated = _device_put_replicated
+
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 CACHE_DIR = os.path.expanduser("~/.jax_cache")
 jax.config.update("jax_compilation_cache_dir", CACHE_DIR)
@@ -110,8 +136,8 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
 DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match checkpoint
-ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for safe exploration)
-ZERO_INIT_LOAD = True # if True, init policy output layer to zero (for safe exploration)
+ZERO_INIT_OUTPUT_LAYER = True # residual policy must start near zero (near-zero residual at init)
+ZERO_INIT_LOAD = False # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
 NUM_TIMESTEPS = 20_000_000
@@ -132,7 +158,10 @@ PPO_PARAMS = dict(
       num_updates_per_batch=4,
       discounting=0.99,
       learning_rate=3e-4,
-      entropy_cost=1e-2,
+      # Lower entropy so the residual policy can shrink its exploration toward a
+      # small residual as it learns (the zero-init std is softplus(0)=0.69; a
+      # high entropy cost would pin it there, keeping the residual large).
+      entropy_cost=1e-3,
       num_envs=NUM_ENVS,
       batch_size=256,
       max_grad_norm=1.0,
@@ -181,6 +210,10 @@ def make_envs(
 
     from mujoco_playground import registry
     from mujoco_playground._src.wrapper import wrap_for_brax_training as pg_wrap
+
+    import mujoco_playground
+    print(f"  [INFO] mujoco_playground loaded from: {mujoco_playground.__file__}")
+    print(f"  [INFO] mujoco_playground._src.wrapper loaded from: {pg_wrap.__module__} -> {sys.modules[pg_wrap.__module__].__file__}")
 
     env      = registry.load(env_name)
     eval_env = registry.load(env_name)
@@ -477,6 +510,27 @@ def load_params(ckpt_dir: str, suffix: str = "best"):
         return None
     with open(pkl_path, "rb") as f:
         return pickle.load(f)
+
+
+def build_eval_inference_fn(env, load_arg, env_name="TitaJoystickFlatTerrain",
+                            ckpt_root=None):
+    """Return a deterministic inference_fn(obs, key) -> (action, extras) built
+    from a saved checkpoint. Reuses the training network construction and the
+    (normalizer_params, policy_params) pickle. Used by the residual_eval sweeps."""
+    if ckpt_root is None:
+        ckpt_root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "checkpoints")
+    env_base_dir = os.path.join(ckpt_root, env_name)
+    run_dir, load_suffix = _resolve_load(env_base_dir, load_arg if load_arg else "best")
+    ckpt_dir = run_dir if run_dir else env_base_dir
+    params = load_params(ckpt_dir, suffix=load_suffix)
+    if params is None:
+        raise FileNotFoundError(f"No checkpoint under {ckpt_dir}")
+    networks = _build_fresh_networks(env)
+    make_inf = ppo_networks.make_inference_fn(networks)
+    print(f"  [build_eval_inference_fn] loaded {ckpt_dir} suffix={load_suffix}")
+    return make_inf(params, deterministic=True)
+
 
 _RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}$")  # matches SCRIPT_START_TIME's "%Y%m%d_%H%M%S"
 
@@ -1054,7 +1108,14 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
         networks = ppo_networks.make_ppo_networks(
             observation_size=env.observation_size,
             action_size=env.action_size,
-            preprocess_observations_fn=running_statistics.normalize,
+            # Clip the NORMALIZED observation to +-10. Without this a near-constant
+            # obs component (e.g. a contact force at ~const during normal walking,
+            # so tiny running std) that JUMPS at a divergence produces
+            # (jump)/(tiny_std) = a huge normalized value -> NaN in the networks.
+            # brax's own locomotion configs set max_abs_value; it was omitted here
+            # and was the cause of the training NaNs in the violent step regime.
+            preprocess_observations_fn=functools.partial(
+                running_statistics.normalize, max_abs_value=10.0),
             distribution_type=DISTRIBUTION_TYPE,
             **ALGO_PARAMS["network_factory"],
             #activation=linen.elu,
@@ -1066,7 +1127,14 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
             observation_size=env.observation_size,
             action_size=env.action_size,
             hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-            preprocess_observations_fn=running_statistics.normalize,
+            # Clip the NORMALIZED observation to +-10. Without this a near-constant
+            # obs component (e.g. a contact force at ~const during normal walking,
+            # so tiny running std) that JUMPS at a divergence produces
+            # (jump)/(tiny_std) = a huge normalized value -> NaN in the networks.
+            # brax's own locomotion configs set max_abs_value; it was omitted here
+            # and was the cause of the training NaNs in the violent step regime.
+            preprocess_observations_fn=functools.partial(
+                running_statistics.normalize, max_abs_value=10.0),
             distribution_type=DISTRIBUTION_TYPE,
             activation=linen.elu,
             policy_network_kernel_init_fn=(lambda init_kwargs: _policy_kernel_init_factory(**init_kwargs)),
@@ -1412,12 +1480,33 @@ def main():
         default="checkpoints",
         help="Checkpoint root directory (checkpoints are stored in <root>/<env_name>)",
     )
+    parser.add_argument("--timesteps", type=int, default=None,
+                        help="Override num_timesteps (e.g. 1_000_000 for a smoke run)")
+    parser.add_argument("--num-envs", type=int, default=None,
+                        help="Override num_envs (e.g. 256 for a fast smoke run)")
+    parser.add_argument("--num-evals", type=int, default=None,
+                        help="Override num_evals")
+    parser.add_argument("--seed", type=int, default=None, help="Override RNG seed")
 
     args = parser.parse_args()
 
     global ALGO, ALGO_PARAMS
     ALGO = args.algo
     ALGO_PARAMS = SAC_PARAMS if args.algo == "sac" else PPO_PARAMS
+
+    # Runtime overrides for smoke vs full training (mutate the params dict used
+    # by make_train_fn). Keep everything else identical across runs.
+    if args.timesteps is not None:
+        ALGO_PARAMS["num_timesteps"] = args.timesteps
+    if args.num_envs is not None:
+        ALGO_PARAMS["num_envs"] = args.num_envs
+    if args.num_evals is not None:
+        ALGO_PARAMS["num_evals"] = args.num_evals
+    if args.seed is not None:
+        ALGO_PARAMS["seed"] = args.seed
+    print(f"  [config] num_timesteps={ALGO_PARAMS['num_timesteps']} "
+          f"num_envs={ALGO_PARAMS['num_envs']} num_evals={ALGO_PARAMS['num_evals']} "
+          f"seed={ALGO_PARAMS['seed']}")
 
     # Auto-set headless if DISPLAY is missing
     if not args.train and not args.headless and (os.environ.get("DISPLAY") is None or os.environ.get("DISPLAY") == ""):
