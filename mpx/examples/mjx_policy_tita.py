@@ -29,6 +29,7 @@ From train_srbd.py this file reuses:
 """
 
 import argparse
+import functools
 import os
 import pickle
 import re
@@ -60,10 +61,12 @@ import jax.numpy as jnp
 import mujoco
 import mujoco.viewer
 import numpy as np
+from etils import epath
 
 from brax.training.acme import running_statistics
 from brax.training.agents.ppo import networks as ppo_networks
 from mujoco_playground import registry
+from mujoco_playground._src import locomotion
 
 import mpx.utils.sim as sim_utils
 from plot_rollout_info import _save_sim_video
@@ -118,6 +121,127 @@ KEY_HOME = 268
 KEY_END = 269
 LATERAL_STEP = 0.1
 _RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}$")
+
+# --scene: which terrain XML to load. The environment class stays the one
+# --name selects (the joystick env with all its rewards/obs/commands); only the
+# scene XML handed to its constructor changes. Every robot ships the same four
+# scenes under <robot>/xmls/, so these aliases work for TITA and the quadrupeds
+# alike. Anything else passed to --scene is treated as a file name inside that
+# same xmls/ directory, or as an explicit path to an XML.
+DEFAULT_SCENE = "flat"
+SCENE_ALIASES = {
+    "flat": "scene_flat.xml",
+    "rough": "scene_rough.xml",
+    "stairs": "scene_stairs.xml",
+    "perlin": "scene_perlin.xml",
+}
+
+
+# -----------------------------------------------------------------------------
+# Scene selection (--scene).
+# -----------------------------------------------------------------------------
+
+def _env_consts_module(env_name: str):
+    """The *_constants module of the env class registered under env_name.
+
+    Every locomotion env in the registry builds its model as
+    `xml_path=consts.task_to_xml(task)`, and imports that constants module as
+    `consts` in its own module -- so this is what we have to look at (and, in
+    load_env_with_scene, temporarily redirect) to change the scene.
+    """
+    try:
+        ctor = locomotion._envs[env_name]  # pylint: disable=protected-access
+    except KeyError as exc:
+        raise ValueError(
+            f"Env '{env_name}' is not a locomotion env, so --scene cannot "
+            f"select its terrain XML."
+        ) from exc
+
+    cls = ctor.func if isinstance(ctor, functools.partial) else ctor
+    module = sys.modules[cls.__module__]
+    consts = getattr(module, "consts", None)
+    if consts is None or not hasattr(consts, "ROOT_PATH"):
+        raise ValueError(
+            f"Env '{env_name}' ({cls.__module__}) exposes no 'consts' module "
+            f"with a ROOT_PATH; --scene is not supported for it."
+        )
+    return consts
+
+
+def _resolve_scene_xml(consts, scene: str) -> str:
+    """Map --scene onto an actual XML file. Returns a posix path."""
+    xml_dir = consts.ROOT_PATH / "xmls"
+
+    # An explicit path wins over the aliases.
+    if os.sep in scene or scene.startswith("."):
+        path = os.path.abspath(os.path.expanduser(scene))
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Scene XML not found: {path}")
+        return path
+
+    file_name = SCENE_ALIASES.get(scene.lower(), scene)
+    if not file_name.endswith(".xml"):
+        file_name += ".xml"
+
+    path = xml_dir / file_name
+    if not path.exists():
+        available = sorted(
+            p.name for p in xml_dir.iterdir() if p.name.startswith("scene_")
+        )
+        raise FileNotFoundError(
+            f"Scene XML not found: {path.as_posix()}\n"
+            f"  aliases : {sorted(SCENE_ALIASES)}\n"
+            f"  in {xml_dir.as_posix()}: {available}"
+        )
+    return path.as_posix()
+
+
+def _env_has_config_key(env_name: str, key: str) -> bool:
+    """Whether this env's default config declares `key`.
+
+    registry.load rejects an override for a key the config does not have, and
+    only the residual envs declare enable_residual -- so ask before overriding.
+    """
+    try:
+        return key in registry.get_default_config(env_name)
+    except Exception:
+        return False
+
+
+def load_env_with_scene(env_name: str, scene: str, config_overrides: dict):
+    """registry.load(env_name), but with the terrain XML forced to --scene.
+
+    The env is built exactly as registry.load builds it -- same class, same
+    task, same config -- so rewards, observations, command layout and the
+    checkpoint's obs/action sizes are untouched. Only the XML string its
+    constructor reads is redirected, by temporarily swapping the constants
+    module's task_to_xml (which is the single place every locomotion env looks
+    up its scene). The original is restored right after construction, so
+    nothing else in the process sees the patch.
+    """
+    consts = _env_consts_module(env_name)
+    xml_path = _resolve_scene_xml(consts, scene)
+
+    original_task_to_xml = consts.task_to_xml
+    consts.task_to_xml = lambda task_name: epath.Path(xml_path)
+    try:
+        env = registry.load(env_name, config_overrides=config_overrides)
+    except NotImplementedError as exc:
+        # MJX ships no collision kernel for some geom pairs. TITA's wheels are
+        # cylinders, and (cylinder, box) / (hfield, cylinder) are among the
+        # missing ones -- so every non-flat TITA scene fails here, exactly as
+        # registry.load("TitaJoystickRoughTerrain") does. Nothing to do with
+        # --scene itself; the quadrupeds (capsule/sphere feet) load all four.
+        raise NotImplementedError(
+            f"{exc}\n"
+            f"  Scene '{scene}' ({xml_path}) cannot run in MJX with this "
+            f"robot: the pair above has no MJX collision kernel."
+        ) from exc
+    finally:
+        consts.task_to_xml = original_task_to_xml
+
+    print(f"  [scene] --scene {scene} -> {xml_path}")
+    return env
 
 
 # -----------------------------------------------------------------------------
@@ -435,12 +559,20 @@ def main(
     steps: int = EPISODE_LENGTH,
     debug_cmd: bool = False,
     zero: bool = False,
+    scene: str = DEFAULT_SCENE,
+    baseline: bool = False,
 ):
     global CKPT_DIR
 
+    # Both flags drive the env with a zero action; the difference is the
+    # network. --zero loads it and then ignores it, --baseline never builds it.
+    zero_action_only = zero or baseline
+
     print("=" * 60)
-    print(f"  Interactive policy test — {env_name}")
-    if zero:
+    print(f"  Interactive policy test — {env_name} (scene: {scene})")
+    if baseline:
+        print("  [NET-INIT] --baseline flag: MPC + WBC only, no policy network loaded.")
+    elif zero:
         print("  [NET-INIT] --zero flag: forcing zero actions (ignoring policy network).")
     print("=" * 60)
 
@@ -448,27 +580,48 @@ def main(
     # very large episode_length so the interactive test never ends on a time
     # limit. Physical termination (state.done) still works. This override is
     # local to this tester; training/eval defaults are untouched.
-    env = registry.load(
-        env_name,
-        config_overrides={"episode_length": EPISODE_LENGTH},
-    )
+    #
+    # --scene only swaps the terrain XML the very same env class loads; with
+    # the default (flat) this is exactly registry.load(env_name).
+    config_overrides = {"episode_length": EPISODE_LENGTH}
+    if baseline and _env_has_config_key(env_name, "enable_residual"):
+        # The residual branch is a PD around the nominal stance, so it keeps
+        # applying torque even at action = 0. Turning it off at the env is what
+        # actually leaves the MPC + whole-body controller alone.
+        config_overrides["enable_residual"] = False
+        print("  [NET-INIT] env config: enable_residual=False (tau_rl x 0.0).")
+    elif baseline:
+        print(
+            f"  [WARN] {env_name} has no 'enable_residual' config key: the "
+            f"action is zeroed, but whatever its low-level controller does at "
+            f"action=0 still runs."
+        )
+    env = load_env_with_scene(env_name, scene, config_overrides=config_overrides)
     sim_logger = SimLogger()
 
-    # --load: same checkpoint layout/resolution as train_srbd.py.
     env_base_dir = os.path.join(ckpt_root, env_name)
-    run_dir, load_suffix = _resolve_load(env_base_dir, load_arg)
+    if baseline:
+        # Nothing to load: no network, so no checkpoint is needed and the run
+        # works on a tree that has none. Outputs go directly under the env
+        # directory rather than inside some checkpoint's run folder, which the
+        # baseline has nothing to do with.
+        run_dir, load_suffix = env_base_dir, None
+    else:
+        # --load: same checkpoint layout/resolution as train_srbd.py.
+        run_dir, load_suffix = _resolve_load(env_base_dir, load_arg)
 
     CKPT_DIR = run_dir
-    run_tag = time.strftime("run_%Y%m%d_%H%M%S")
+    run_tag = time.strftime("run_%Y%m%d_%H%M%S") + ("_baseline" if baseline else "")
     joystick_eval_dir = os.path.join(CKPT_DIR, "joystick_evaluation", run_tag)
     os.makedirs(joystick_eval_dir, exist_ok=True)
 
-    params = load_params(CKPT_DIR, suffix=load_suffix)
-
     print(f"  [INFO] Joystick evaluation directory: {joystick_eval_dir}")
 
-    policy_fn = build_policy(env, params)
-    jit_infer = jax.jit(policy_fn)
+    if baseline:
+        jit_infer = None
+    else:
+        params = load_params(CKPT_DIR, suffix=load_suffix)
+        jit_infer = jax.jit(build_policy(env, params))
 
     # Same vmapped reset/step used by train_srbd.py --eval.
     batched_reset = jax.jit(jax.vmap(env.reset))
@@ -596,7 +749,7 @@ def main(
     #
     # A throwaway key is used on purpose: `rng` must stay on the exact stream
     # train_srbd.py --eval uses, so the warm-up may not consume from it.
-    if not zero:
+    if jit_infer is not None and not zero:
         jax.block_until_ready(
             jit_infer(take_env0(state.obs), jax.random.PRNGKey(0))
         )
@@ -658,9 +811,10 @@ def main(
         tc_before = np.asarray(state.info["target_command"][0])
         steps_before = int(np.asarray(state.info["steps_until_next_cmd"]).reshape(-1)[0])
 
-        if zero:
-            # --zero: ignore the policy network entirely, matching
-            # train_srbd.py --zero (action = zero_action every step).
+        if zero_action_only:
+            # --zero ignores the policy network (matching train_srbd.py --zero);
+            # --baseline never loaded one. Either way the env is driven with a
+            # zero action every step.
             action = _zero_actions
         else:
             obs0 = take_env0(state.obs)
@@ -859,11 +1013,28 @@ if __name__ == "__main__":
         "--load", nargs="?", const="best", default="best", metavar="RUN_OR_SUFFIX"
     )
     parser.add_argument("--ckpt-dir", type=str, default="checkpoints")
+    parser.add_argument(
+        "--scene",
+        type=str,
+        default=DEFAULT_SCENE,
+        metavar="SCENE",
+        help="Terrain XML to load with the SAME joystick env selected by "
+             f"--name. Aliases: {', '.join(sorted(SCENE_ALIASES))} "
+             f"(default: {DEFAULT_SCENE}). Also accepts a file name inside "
+             "the robot's xmls/ directory, or a path to an XML.",
+    )
     parser.add_argument("--steps", type=int, default=EPISODE_LENGTH)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
         "--zero", action="store_true",
         help="Force zero actions (ignore policy network), like train_srbd.py --zero.",
+    )
+    parser.add_argument(
+        "--baseline", action="store_true",
+        help="MPC + WBC only: no checkpoint is loaded and no policy network is "
+             "built, and on envs that support it the residual branch is "
+             "switched off at the env (enable_residual=False). Unlike --zero, "
+             "this needs no checkpoint on disk.",
     )
     parser.add_argument(
         "--debug-cmd",
@@ -896,4 +1067,6 @@ if __name__ == "__main__":
         steps=args.steps,
         debug_cmd=args.debug_cmd,
         zero=args.zero,
+        baseline=args.baseline,
+        scene=args.scene,
     )

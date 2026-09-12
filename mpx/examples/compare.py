@@ -12,8 +12,14 @@ video per controller:
     <run>/end_to_end/rewards/...             # unless --no-e2e
     <run>/compare_rewards/<test>/<reward>_comparison.png
 
+The whole sequence is repeated on every scene in DEFAULT_SCENES, so <test> above
+reads "<command>__<scene>", e.g. "vx_1p5__flat_terrain". The scenes are run one
+at a time (all the tests of one, then the next), because switching reloads the
+MuJoCo model.
+
 The command layout (which components exist and in which order) is read from the
-selected env's command_config.names, so it is never hardcoded here.
+selected env's command_config.names, so it is never hardcoded here; an env that
+does not publish those names gets a numbered v1 ... vn layout instead.
 
 Examples:
     python compare.py
@@ -31,6 +37,8 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -80,44 +88,224 @@ _MEASURED_SOURCE = {
     "wz": ("gyro", 2, "rad/s"),
 }
 
+# Positional fallback for a command component whose name is not in
+# _MEASURED_SOURCE: the [vx, vy, vz, wx, wy, wz] layout, read by index.
+_MEASURED_BY_INDEX = list(_MEASURED_SOURCE.values())
+
+
+def _command_names(config, fallback_length: int) -> list[str]:
+    """Names of the command components, in the order the env uses them.
+
+    Envs normally publish them in command_config.names. When that field (or the
+    whole command_config) is missing, fall back to a numbered layout v1 ... vn,
+    so the CSV columns, plot labels and video HUD still have one label per
+    component. The length then comes from command_config.a (one amplitude per
+    component) and, failing that, from the width of the declared tests."""
+    command_config = getattr(config, "command_config", None)
+    if command_config is None:
+        return [f"v{i + 1}" for i in range(fallback_length)]
+
+    names = command_config.get("names", None)
+    if names:
+        return list(names)
+
+    length = len(command_config.get("a", ())) or fallback_length
+    return [f"v{i + 1}" for i in range(length)]
+
+
+def _measured_source(name: str, index: int) -> tuple[str, int, str]:
+    """Sensor, channel and unit a command component is compared against.
+
+    A named component is looked up in _MEASURED_SOURCE; an unnamed one (the
+    v1 ... vn fallback) is read positionally from the [vx, vy, vz, wx, wy, wz]
+    layout, which is what the numbered order implies."""
+    if name in _MEASURED_SOURCE:
+        return _MEASURED_SOURCE[name]
+    if index >= len(_MEASURED_BY_INDEX):
+        raise ValueError(
+            f"Command component '{name}' (index {index}) has no known measured "
+            f"source: name it in command_config.names, or add it to "
+            f"_MEASURED_SOURCE."
+        )
+    return _MEASURED_BY_INDEX[index]
+
+# Scenes the whole test sequence is repeated over, as the env's `task` names.
+# Add or remove entries to change the terrains every test is run on; each one
+# multiplies the run time, and the length of the videos, by roughly one pass.
+DEFAULT_SCENES = ("flat_terrain", "rough_terrain", "perlin_terrain")
+
 # Fixed command sequence to run, per environment. Each entry is a
-# (name, command) pair; the command vector must match the env's command_config
-# layout (order and length of command_config.names).
+# (name, command) pair, optionally extended to (name, command, scene).
+#
+# - A 1D command runs a single 5-second block (one episode).
+# - A 2D command (several rows) runs as ONE episode that lasts
+#   5 * n_rows seconds: the command target switches to the next row every
+#   TEST_DURATION_SECONDS, WITHOUT resetting the robot in between. This is the
+#   way to probe a real command change (e.g. going from a velocity down to 0).
+# Each command row must match the env's command_config layout (order and length
+# of command_config.names).
+# - The optional third element is the scene, i.e. the env's `task` name
+#   ("flat_terrain", "rough_terrain", "perlin_terrain", ...). The env is built
+#   with the scene its registry name implies, so a test asking for a different
+#   one reloads the MuJoCo model in place before its episode starts (this also
+#   re-jits reset/step and rebuilds the renderer). Omit it, or use None, to keep
+#   whatever scene the env name implies.
+#   It takes either a single scene name or a list of them (DEFAULT_SCENES): with
+#   a list the test is repeated once per scene, and each repetition is named
+#   "<test>__<scene>" so their outputs stay apart. See _normalize_tests.
 TESTS = {
     "Lite3JoystickFlatTerrain": (
-        ("vx_1p5", np.array([1.5, 0.0, 0.0], dtype=np.float32)),
-        ("vy_0p4", np.array([0.0, 0.4, 0.0], dtype=np.float32)),
-        ("wz_0p6", np.array([0.0, 0.0, 0.6], dtype=np.float32)),
-        ("vx_1p0_vy_0p4", np.array([1.0, 0.4, 0.0], dtype=np.float32)),
-        ("vx_1p0_wz_0p6", np.array([1.0, 0.0, 0.6], dtype=np.float32)),
-        ("vy_0p4_wz_0p6", np.array([0.0, 0.4, 0.6], dtype=np.float32)),
-        ("vx_0p5_then_0", np.array([[0.5, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)),
+        ("vx_1p5", np.array([1.5, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p0", np.array([1.0, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vy_0p4", np.array([0.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("wz_0p6", np.array([0.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p0_vy_0p4", np.array([1.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p0_wz_0p6", np.array([1.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vy_0p4_wz_0p6", np.array([0.0, 0.4, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_0p5_then_0", np.array([[0.5, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
     ),
     "TitaJoystickFlatTerrain": (
-        ("vx_1p5", np.array([1.5, 0.0], dtype=np.float32)),
-        ("wz_0p6", np.array([0.0, 0.6], dtype=np.float32)),
-        ("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32)),
-        ("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32)),
-        ("vx_2p0_then_0", np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32)),
-        ("vx_2p0_wz_0p4_then_0", np.array([[2.0, 0.4], [0.0, 0.0]], dtype=np.float32)),
-        ("vx_3p0_then_0", np.array([[3.0, 0.0], [0.0, 0.0]], dtype=np.float32)),
-        ("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32)),
+        ("vx_1p5", np.array([1.5, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("wz_0p6", np.array([0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0_then_0", np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0_wz_0p4_then_0", np.array([[2.0, 0.4], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_3p0_then_0", np.array([[3.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
     )
 }
 
-def _expand_tests(tests: tuple) -> tuple:
-    """Expand any entry whose command is an array of arrays into one entry per
-    row, so a single test issues several commands in sequence (one command
-    change every TEST_DURATION_SECONDS). The run then lasts 5 * total_blocks s."""
-    expanded = []
-    for name, command in tests:
-        command = np.asarray(command, dtype=np.float32)
-        if command.ndim == 1:
-            expanded.append((name, command))
-        else:
-            for i, sub in enumerate(command):
-                expanded.append((f"{name}_{i}", np.asarray(sub, dtype=np.float32)))
-    return tuple(expanded)
+
+def _test_block_counts(tests: tuple) -> list[int]:
+    """Number of 5-second blocks each test spans (rows of its command array).
+
+    A 1D command is a single block; a 2D command is one block per row."""
+    return [
+        np.atleast_2d(np.asarray(command, dtype=np.float32)).shape[0]
+        for _, command, *_ in tests
+    ]
+
+
+def _build_blocks(tests: tuple) -> list[tuple[np.ndarray, bool, int]]:
+    """Flatten the test list into a per-5-second-block schedule.
+
+    A test whose command is a 1D array is a single block. A test whose command
+    is a 2D array (several rows) contributes one block per row, and all of those
+    blocks belong to the SAME episode: the command target changes every
+    TEST_DURATION_SECONDS but the robot is NOT reset between them. Only the first
+    block of each test starts a new episode (i.e. triggers a reset).
+
+    Returns a list of (command_row, starts_new_test, test_index) tuples."""
+    blocks: list[tuple[np.ndarray, bool, int]] = []
+    for test_index, (_, command, *_) in enumerate(tests):
+        rows = np.atleast_2d(np.asarray(command, dtype=np.float32))
+        for row_index in range(rows.shape[0]):
+            blocks.append((rows[row_index], row_index == 0, test_index))
+    return blocks
+
+
+def _unwrap_env(env):
+    """Strip the training wrappers (e.g. SAC) to reach the concrete env."""
+    base_env = env
+    while hasattr(base_env, "env"):
+        base_env = base_env.env
+    return base_env
+
+
+def _default_scene(env_name: str) -> str:
+    """Scene (task name) a registry env name implies, e.g.
+
+    "TitaJoystickFlatTerrain"  -> "flat_terrain"
+    "Lite3JoystickE2ERoughTerrain" -> "rough_terrain"
+    """
+    suffix = env_name.split("Joystick")[-1].replace("E2E", "")
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", suffix).lower()
+
+
+def _scene_tuple(scene, default_scene: str) -> tuple[str, ...]:
+    """The scenes one TESTS entry declares, as a tuple.
+
+    Accepts a single scene name, a list/tuple of them, or None (and a missing
+    third element, which the caller passes as None) to mean the scene the env
+    name implies."""
+    if scene is None:
+        return (default_scene,)
+    if isinstance(scene, str):
+        return (scene,)
+    scenes = tuple(scene)
+    if not scenes:
+        raise ValueError(
+            "A test's scene list is empty: name at least one scene, or drop the "
+            "element to use the one the env name implies."
+        )
+    duplicates = {s for s in scenes if scenes.count(s) > 1}
+    if duplicates:
+        raise ValueError(
+            f"A test's scene list repeats {sorted(duplicates)}: each scene may "
+            f"appear once, otherwise the repeats would overwrite each other."
+        )
+    return scenes
+
+
+def _normalize_tests(tests: tuple, default_scene: str) -> tuple:
+    """Expand every TESTS entry into one (name, command, scene) test per scene.
+
+    An entry naming several scenes (DEFAULT_SCENES) is run once on each of them,
+    as a separate episode named "<test>__<scene>". The suffix is what keeps the
+    repetitions apart: test names are the file names of every CSV, plot and
+    reward folder this script writes, so without it each scene would overwrite
+    the previous one's results.
+
+    The expansion is grouped by scene rather than by test. Switching scene
+    reloads the MuJoCo model and re-jits reset/step (see ensure_scene), so
+    running all the tests of one scene before moving to the next keeps that to a
+    single reload per scene instead of one per test."""
+    declared = [
+        (
+            test[0],
+            test[1],
+            _scene_tuple(test[2] if len(test) > 2 else None, default_scene),
+        )
+        for test in tests
+    ]
+
+    # Scene order = order of first appearance across the entries, so the run
+    # follows the order DEFAULT_SCENES is written in.
+    ordered_scenes = list(
+        dict.fromkeys(scene for _, _, scenes in declared for scene in scenes)
+    )
+
+    return tuple(
+        (f"{name}__{scene}", command, scene)
+        for scene in ordered_scenes
+        for name, command, scenes in declared
+        if scene in scenes
+    )
+
+
+def load_scene(env, scene: str) -> bool:
+    """Reload the env's MuJoCo model for `scene` (the env's `task` name).
+
+    The env is re-initialised in place (same object, so the training wrappers
+    around it stay valid), which reloads the XML and re-runs _post_init().
+    Returns True when the model actually changed, so the caller knows it has to
+    rebuild everything that captured the old model (jitted fns, renderer)."""
+    base_env = _unwrap_env(env)
+    if getattr(base_env, "_compare_scene", None) == scene:
+        return False
+
+    print(f"[scene] reloading the env model for scene '{scene}'")
+    type(base_env).__init__(base_env, task=scene, config=base_env._config)
+    base_env._compare_scene = scene
+    return True
+
+
+def mark_scene(env, scene: str) -> None:
+    """Record the scene an env was built with, without reloading anything."""
+    _unwrap_env(env)._compare_scene = scene
+
 
 def copy_joystick_source(env, run_dir: Path) -> None:
     """Copy the env's joystick.py into run_dir (the timestamped run folder that
@@ -126,9 +314,7 @@ def copy_joystick_source(env, run_dir: Path) -> None:
     import shutil
 
     # Unwrap training wrappers (e.g. SAC) to reach the concrete env class.
-    base_env = env
-    while hasattr(base_env, "env"):
-        base_env = base_env.env
+    base_env = _unwrap_env(env)
 
     source = Path(inspect.getfile(type(base_env))).resolve()
     if source.name != "joystick.py":
@@ -197,7 +383,7 @@ def create_comparison_video(
     source_fps: dict[str, float],
     output_path: Path,
     fps: float,
-    tests: tuple,
+    total_blocks: int,
 ) -> None:
     """Create normal-speed and x2 slow 2x2 time-synchronized videos."""
     layout = {
@@ -229,7 +415,7 @@ def create_comparison_video(
     )
 
     tile_width, tile_height = 640, 480
-    duration_seconds = TEST_DURATION_SECONDS * len(tests)
+    duration_seconds = TEST_DURATION_SECONDS * total_blocks
     output_frame_count = int(round(duration_seconds * fps))
     try:
         for output_frame_index in range(output_frame_count):
@@ -333,7 +519,7 @@ def set_fixed_command(state, command: jax.Array, baseline: bool):
     batch_command = command[None, :]
     info = {
         **state.info,
-        "command": batch_command,
+        #"command": jnp.zeros_like(batch_command),
         "target_command": batch_command,
     }
     if "steps_until_next_cmd" in info:
@@ -360,6 +546,7 @@ def save_tracking_plot(
     output_path: Path,
     test_title: str,
     time_values: np.ndarray,
+    target_commands: np.ndarray,
     commands: np.ndarray,
     measured: np.ndarray,
     reset_flags: np.ndarray,
@@ -373,8 +560,16 @@ def save_tracking_plot(
     frozen_mask = np.asarray(frozen_flags, dtype=bool)
     for index, (axis, (label, unit)) in enumerate(zip(axes, component_labels)):
         axis.step(
-            time_values, commands[:, index], where="post", color="black",
-            linestyle="--", linewidth=1.5, label="command",
+            time_values, target_commands[:, index], where="post", color="black",
+            linestyle="--", linewidth=1.5, label="target",
+        )
+        axis.plot(
+            time_values,
+            commands[:, index],
+            color="gray",
+            linestyle="--",
+            linewidth=1.5,
+            label="command",
         )
         axis.plot(
             time_values,
@@ -411,23 +606,31 @@ def save_csv(
     reset_flags: np.ndarray,
     frozen_flags: np.ndarray,
     component_names: list[str],
+    q_values: np.ndarray,
+    dq_values: np.ndarray,
 ) -> None:
+    """The full state closes every row: the whole qpos as q0 ... q(nq-1),
+    then the whole qvel as dq0 ... dq(nv-1), floating base included."""
     header = (
         ["time_s"]
         + [f"cmd_{name}" for name in component_names]
         + list(component_names)
         + ["reset", "frozen"]
+        + [f"q{index}" for index in range(q_values.shape[1])]
+        + [f"dq{index}" for index in range(dq_values.shape[1])]
     )
     with output_path.open("w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(header)
-        for time_s, command, velocity, reset, frozen in zip(
-            time_values, commands, measured, reset_flags, frozen_flags
+        for time_s, command, velocity, reset, frozen, q, dq in zip(
+            time_values, commands, measured, reset_flags, frozen_flags,
+            q_values, dq_values,
         ):
             writer.writerow(
                 (
                     time_s, *command.tolist(), *velocity.tolist(),
                     int(reset), int(frozen),
+                    *q.tolist(), *dq.tolist(),
                 )
             )
 
@@ -665,6 +868,8 @@ def run_sequence(
     seed: int,
     tests: tuple,
     component_names: list[str],
+    get_runtime,
+    on_scene_end=None,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -673,23 +878,76 @@ def run_sequence(
     np.ndarray,
     np.ndarray,
     list[str],
+    np.ndarray,
+    np.ndarray,
 ]:
+    """Run the whole test sequence for one controller.
+
+    `on_scene_end`, when given, is called as
+    on_scene_end(scene, test_indices, results) every time the last test of a
+    scene finishes -- so a scene's CSVs and plots are on disk before the next
+    one starts loading, and an interrupted run keeps whatever it had already
+    completed. `results` is the same 9-tuple this function returns, holding the
+    series recorded so far; the test indices are absolute, so the caller slices
+    it with the same offsets it would use at the end."""
+    # Flatten the tests into 5-second blocks. Consecutive rows of a 2D command
+    # share a single episode: the command target changes between them but the
+    # robot is NOT reset. A reset happens only when the next block starts a new
+    # test (its starts_new_test flag is True).
+    blocks = _build_blocks(tests)
+    num_blocks = len(blocks)
+
+    renderer = None
+    render_data = None
+    get_obs_fn = None
+
+    def ensure_scene(test_index: int) -> None:
+        """Load the scene the given test declares, if it is not loaded already.
+
+        A scene swap replaces the env's MuJoCo model, so everything that
+        captured the previous one -- the jitted runtime and the renderer -- is
+        rebuilt against the new model."""
+        nonlocal reset_fn, step_fn, velocity_fn, get_obs_fn, renderer, render_data
+        scene = tests[test_index][2]
+        changed = load_scene(env, scene)
+        if changed or get_obs_fn is None:
+            reset_fn, step_fn, velocity_fn, get_obs_fn = get_runtime(env, scene)
+        if changed or renderer is None:
+            if renderer is not None:
+                renderer.close()
+            # Off-screen rendering works without a viewer and therefore also in
+            # headless runs (train_srbd configures EGL when DISPLAY is missing).
+            renderer = mujoco.Renderer(env.mj_model, height=480, width=640)
+            render_data = mujoco.MjData(env.mj_model)
+
+    ensure_scene(blocks[0][2])
+
     reset_index = 0
     state = reset_fn(jax.random.PRNGKey(seed + reset_index)[None, :])
-    first_command = jnp.asarray(tests[0][1])
+    state = state.replace(
+        info={
+            **state.info,
+            "command": jnp.zeros_like(state.info["command"]),
+        }
+    )
+    first_command = jnp.asarray(blocks[0][0])
     state = set_fixed_command(state, first_command, baseline=not residual)
 
     # Rebuild the observation after replacing the command at reset.
     zero_action = jnp.zeros((1, env.action_size), dtype=jnp.float32)
-    get_obs_fn = jax.jit(jax.vmap(env._get_obs))
     state = state.replace(obs=get_obs_fn(state.data, state.info, zero_action))
 
     steps_per_command = max(1, int(round(TEST_DURATION_SECONDS / float(env.dt))))
-    num_steps = steps_per_command * len(tests)
+    num_steps = steps_per_command * num_blocks
     measured = []
+    target_commands = []
     commands = []
     reset_flags = []
     frozen_flags = []
+    # Full state of the robot at every step: the whole qpos and qvel, floating
+    # base included. They close every row of the tracking CSV.
+    q_values = []
+    dq_values = []
     # Use the same source as train_srbd.py --eval: that evaluator flattens
     # state.info and plots the fields below reward_terms/. These values are
     # already multiplied by reward_config.scales inside the environment.
@@ -698,10 +956,6 @@ def run_sequence(
     reward_values = []
     rng = jax.random.PRNGKey(seed + 10_000)
 
-    # Off-screen rendering works without a viewer and therefore also in
-    # headless runs (train_srbd configures EGL when DISPLAY is unavailable).
-    renderer = mujoco.Renderer(env.mj_model, height=480, width=640)
-    render_data = mujoco.MjData(env.mj_model)
     camera = mujoco.MjvCamera()
     mujoco.mjv_defaultCamera(camera)
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
@@ -712,22 +966,88 @@ def run_sequence(
     frozen = False
     last_velocity = None
     last_frame = None
+    last_q = None
+    last_dq = None
+
+    # Wall-clock report at every test boundary: how long the test just finished
+    # took, and the time of day it ended.
+    test_start_time = time.monotonic()
+
+    def print_test_time(test_index: int) -> None:
+        nonlocal test_start_time
+        now = time.monotonic()
+        minutes, seconds = divmod(int(now - test_start_time), 60)
+        test_start_time = now
+        print(
+            f"  [{controller_name}] test {tests[test_index][0]} "
+            f"| elapsed {minutes:02d}:{seconds:02d} | "
+            f"time {datetime.now().strftime('%H:%M:%S')}"
+        )
+
+    def collect() -> tuple:
+        """The series recorded so far, in the shape this function returns."""
+        measured_array = np.asarray(measured, dtype=np.float64)
+        return (
+            np.arange(1, len(measured_array) + 1, dtype=np.float64)
+            * float(env.dt),
+            np.asarray(target_commands, dtype=np.float64),
+            np.asarray(commands, dtype=np.float64),
+            measured_array,
+            np.asarray(reset_flags, dtype=bool),
+            np.asarray(frozen_flags, dtype=bool),
+            np.asarray(reward_values, dtype=np.float64),
+            reward_names,
+            np.asarray(q_values, dtype=np.float64),
+            np.asarray(dq_values, dtype=np.float64),
+        )
+
+    # First test of the scene currently running: the tests from here up to the
+    # one that just ended are what a scene boundary hands to on_scene_end.
+    scene_first_test = 0
+
+    def flush_scene(last_test_index: int) -> None:
+        """Report the scene ending at `last_test_index` as finished."""
+        nonlocal scene_first_test
+        if on_scene_end is not None:
+            on_scene_end(
+                tests[last_test_index][2],
+                list(range(scene_first_test, last_test_index + 1)),
+                collect(),
+            )
+        scene_first_test = last_test_index + 1
 
     for step_index in range(num_steps):
-        command_index = min(step_index // steps_per_command, len(tests) - 1)
-        command_jax = jnp.asarray(tests[command_index][1])
-        command_block_finished = (
+        block_index = min(step_index // steps_per_command, num_blocks - 1)
+        command_row = blocks[block_index][0]
+        command_jax = jnp.asarray(command_row)
+        block_finished = (
             (step_index + 1) % steps_per_command == 0
             and step_index + 1 < num_steps
         )
+        # A finished block either switches the command inside the same test
+        # (no reset) or moves on to the next test (reset). Only the latter is a
+        # genuine reset; the former is a pure command change on a live episode.
+        next_block_is_new_test = block_finished and blocks[block_index + 1][1]
 
         if frozen:
             # After an early termination, preserve the final state visually
-            # and numerically until this command's five-second block ends.
+            # and numerically until the current episode ends with a reset.
             measured.append(last_velocity.copy())
-            current_command = np.asarray(tests[command_index][1])
-            commands.append(current_command)
-            reset_flags.append(command_block_finished)
+            q_values.append(last_q.copy())
+            dq_values.append(last_dq.copy())
+            current_target_command = np.asarray(
+                command_row,
+                dtype=np.float64,
+            )
+
+            current_command = np.asarray(
+                jax.device_get(state.info["command"][0]),
+                dtype=np.float64,
+            )
+
+            target_commands.append(current_target_command.copy())
+            commands.append(current_command.copy())
+            reset_flags.append(block_finished)
             frozen_flags.append(True)
             reward_values.append(np.full(len(reward_names), np.nan))
             for writer in video_writers:
@@ -763,13 +1083,30 @@ def run_sequence(
                 jax.device_get(velocity_fn(state.data)[0])
             )
             measured.append(last_velocity.copy())
-            current_command = np.asarray(tests[command_index][1])
-            commands.append(current_command)
+            current_target_command = np.asarray(
+                jax.device_get(state.info["target_command"][0])
+            )
+
+            current_command = np.asarray(
+                jax.device_get(state.info["command"][0])
+            )
+
+            target_commands.append(current_target_command.copy())
+            commands.append(current_command.copy())
 
             terminated = bool(np.asarray(jax.device_get(state.done[0])))
 
-            render_data.qpos[:] = np.asarray(jax.device_get(state.data.qpos[0]))
-            render_data.qvel[:] = np.asarray(jax.device_get(state.data.qvel[0]))
+            last_q = np.asarray(
+                jax.device_get(state.data.qpos[0]), dtype=np.float64
+            )
+            last_dq = np.asarray(
+                jax.device_get(state.data.qvel[0]), dtype=np.float64
+            )
+            q_values.append(last_q.copy())
+            dq_values.append(last_dq.copy())
+
+            render_data.qpos[:] = last_q
+            render_data.qvel[:] = last_dq
             mujoco.mj_forward(env.mj_model, render_data)
             base_position = render_data.qpos[:3]
             camera.lookat[:] = 0.9 * camera.lookat + 0.1 * base_position
@@ -786,41 +1123,50 @@ def run_sequence(
                 writer.append_data(last_frame)
 
             # Do not reset here. Freeze this terminal state until the regular
-            # reset at the end of the current five-second command block.
+            # reset at the end of the current episode (i.e. the next test).
             frozen = terminated
-            reset_flags.append(command_block_finished)
+            reset_flags.append(block_finished)
             frozen_flags.append(False)
 
-        if command_block_finished:
+        if block_finished and next_block_is_new_test:
+            # Boundary between two different tests: start a fresh episode.
+            finished_test = blocks[block_index][2]
+            next_test = blocks[block_index + 1][2]
+            print_test_time(finished_test)
+            # When the next test also changes scene, the scene just ended: save
+            # its results before the reload, which is the slow part.
+            if tests[next_test][2] != tests[finished_test][2]:
+                flush_scene(finished_test)
+            ensure_scene(next_test)
             reset_index += 1
             state = reset_fn(jax.random.PRNGKey(seed + reset_index)[None, :])
-            next_command_index = min(
-                (step_index + 1) // steps_per_command, len(tests) - 1
+            state = state.replace(
+                info={
+                    **state.info,
+                    "command": jnp.zeros_like(state.info["command"]),
+                }
             )
-            next_command = jnp.asarray(tests[next_command_index][1])
+            next_command = jnp.asarray(blocks[block_index + 1][0])
             state = set_fixed_command(state, next_command, baseline=not residual)
             state = state.replace(obs=get_obs_fn(state.data, state.info, zero_action))
             frozen = False
             last_velocity = None
             last_frame = None
+            last_q = None
+            last_dq = None
+        # else, if block_finished within the same test: only the command target
+        # changes (applied at the top of the next step); the robot state and any
+        # frozen/terminated status are preserved -- no reset.
+
+    # Last test of the sequence: no boundary follows it, so report it here.
+    print_test_time(blocks[-1][2])
 
     renderer.close()
 
-    measured_array = np.asarray(measured, dtype=np.float64)
-    commands_array = np.asarray(commands, dtype=np.float64)
-    reset_flags_array = np.asarray(reset_flags, dtype=bool)
-    frozen_flags_array = np.asarray(frozen_flags, dtype=bool)
-    rewards_array = np.asarray(reward_values, dtype=np.float64)
-    time_values = np.arange(1, len(measured_array) + 1, dtype=np.float64) * float(env.dt)
-    return (
-        time_values,
-        commands_array,
-        measured_array,
-        reset_flags_array,
-        frozen_flags_array,
-        rewards_array,
-        reward_names,
-    )
+    # The scene of the last test never hits a boundary either: close it here.
+    flush_scene(len(tests) - 1)
+
+    return collect()
 
 
 def main() -> None:
@@ -838,15 +1184,30 @@ def main() -> None:
             f"No test sequence defined for '{env_name}'. "
             f"Add an entry to TESTS (available: {sorted(TESTS)})."
         )
-    tests = _expand_tests(TESTS[env_name])
+    # Keep the tests as declared: a 2D command stays one test (one episode with
+    # in-episode command changes), it is NOT split into independent tests.
+    # Entries without an explicit scene inherit the one the env name implies.
+    tests = _normalize_tests(TESTS[env_name], _default_scene(env_name))
+    block_counts = _test_block_counts(tests)
+    total_blocks = sum(block_counts)
 
     _, env, _ = train_srbd.make_envs(env_name=env_name)
+    # registry.load already built the env with the scene its name implies, so
+    # record it: a test asking for that same scene must not trigger a reload.
+    mark_scene(env, _default_scene(env_name))
 
     # Command layout comes from the env itself: order and names of the command
-    # components are read from command_config.names, and each name's measured
-    # source / unit from _MEASURED_SOURCE.
-    component_names = list(env._config.command_config.names)
-    component_units = [_MEASURED_SOURCE[name][2] for name in component_names]
+    # components are read from command_config.names (numbered v1 ... vn when the
+    # env does not publish them), and each name's measured source / unit from
+    # _MEASURED_SOURCE.
+    component_names = _command_names(
+        env._config, np.atleast_2d(tests[0][1]).shape[1]
+    )
+    component_sources = [
+        _measured_source(name, index)
+        for index, name in enumerate(component_names)
+    ]
+    component_units = [unit for _, _, unit in component_sources]
     component_labels = list(zip(component_names, component_units))
 
     env_base_dir = os.path.join(args.ckpt_dir, env_name)
@@ -874,15 +1235,25 @@ def main() -> None:
             linear = local_velocity(data)
             angular = gyro(data)
             columns = []
-            for name in component_names:
-                source, index, _ = _MEASURED_SOURCE[name]
+            for source, index, _ in component_sources:
                 series = linear if source == "linvel" else angular
                 columns.append(series[:, index])
             return jnp.stack(columns, axis=-1)
 
-        return reset, step, velocity
+        return reset, step, velocity, jax.jit(jax.vmap(eval_env._get_obs))
 
-    reset_fn, step_fn, velocity_fn = build_runtime(env)
+    # One jitted runtime per (env, scene): a scene reload swaps the MuJoCo model
+    # that the jitted functions captured, so each scene needs its own set. The
+    # cache keeps a scene that is visited again from recompiling.
+    runtime_cache: dict[tuple[int, str], tuple] = {}
+
+    def get_runtime(eval_env, scene: str):
+        key = (id(eval_env), scene)
+        if key not in runtime_cache:
+            runtime_cache[key] = build_runtime(eval_env)
+        return runtime_cache[key]
+
+    reset_fn, step_fn, velocity_fn, _ = get_runtime(env, _default_scene(env_name))
 
     comparison_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     comparison_dir = (
@@ -897,6 +1268,7 @@ def main() -> None:
 
     if not args.no_e2e:
         _, e2e_env, _ = train_srbd.make_envs(env_name=e2e_env_name)
+        mark_scene(e2e_env, _default_scene(e2e_env_name))
         e2e_base_dir = os.path.join(args.ckpt_dir, e2e_env_name)
         e2e_run_dir, e2e_suffix = train_srbd._resolve_load(
             e2e_base_dir, args.load_e2e
@@ -916,7 +1288,9 @@ def main() -> None:
         e2e_policy_fn = jax.jit(
             e2e_make_inference_fn(e2e_params, deterministic=True)
         )
-        e2e_reset_fn, e2e_step_fn, e2e_velocity_fn = build_runtime(e2e_env)
+        e2e_reset_fn, e2e_step_fn, e2e_velocity_fn, _ = get_runtime(
+            e2e_env, _default_scene(e2e_env_name)
+        )
         controller_modes.append(
             (
                 "end_to_end",
@@ -935,9 +1309,17 @@ def main() -> None:
     controller_video_fps = {}
 
     print(f"Environment: {env_name}")
+    scene_order = list(dict.fromkeys(scene for _, _, scene in tests))
+    print(
+        f"Scenes: {scene_order} "
+        f"({len(tests)} tests, {total_blocks} x {TEST_DURATION_SECONDS:g} s "
+        f"= {TEST_DURATION_SECONDS * total_blocks:g} s per controller)"
+    )
     print(f"Command components: {component_names}")
     print(f"Residual checkpoint: {run_dir}")
     print(f"Output directory: {comparison_dir}")
+    print(f"Start time: {datetime.now().strftime('%H:%M:%S')}")
+    last_mode_time = time.monotonic()
     for (
         mode_name,
         mode_env,
@@ -969,18 +1351,103 @@ def main() -> None:
             quality=8,
             macro_block_size=None,
         )
-        total_seconds = int(round(TEST_DURATION_SECONDS * len(tests)))
+        total_seconds = int(round(TEST_DURATION_SECONDS * total_blocks))
         print(
             f"[{mode_name}] Starting the continuous {total_seconds}-second sequence"
         )
+
+        rewards_dir = mode_dir / "rewards"
+        rewards_dir.mkdir(parents=True, exist_ok=True)
+        steps_per_command = max(
+            1, int(round(TEST_DURATION_SECONDS / float(mode_env.dt)))
+        )
+        # Cumulative block offsets so each test is sliced by its own length
+        # (a 2D-command test spans several blocks / 5-second segments).
+        block_offsets = np.concatenate(([0], np.cumsum(block_counts)))
+
+        def save_finished_scene(scene: str, test_indices, results) -> None:
+            """Write the CSVs and plots of a scene as soon as it finishes.
+
+            run_sequence calls this at every scene boundary, so results land on
+            disk while the next scene is still running and an interrupted run
+            keeps the scenes it completed. `results` carries the series recorded
+            so far and the test indices are absolute, so the slicing below is
+            the same either way."""
+            (
+                time_values,
+                target_commands,
+                commands,
+                measured,
+                reset_flags,
+                frozen_flags,
+                rewards,
+                reward_names,
+                q_values,
+                dq_values,
+            ) = results
+            for test_index in test_indices:
+                test_name = tests[test_index][0]
+                start = int(block_offsets[test_index]) * steps_per_command
+                stop = min(
+                    int(block_offsets[test_index + 1]) * steps_per_command,
+                    len(time_values),
+                )
+                # Each CSV has local time starting at 0 for easier comparison; a
+                # multi-block test therefore runs from 0 to 5 * n_blocks seconds.
+                local_time = time_values[start:stop] - start * float(mode_env.dt)
+                save_csv(
+                    mode_dir / f"{test_name}.csv",
+                    local_time,
+                    commands[start:stop],
+                    measured[start:stop],
+                    reset_flags[start:stop],
+                    frozen_flags[start:stop],
+                    component_names,
+                    q_values[start:stop],
+                    dq_values[start:stop],
+                )
+                save_tracking_plot(
+                    mode_dir / f"{test_name}_tracking.png",
+                    f"{env_name} {mode_name} - {test_name}",
+                    local_time,
+                    target_commands[start:stop],
+                    commands[start:stop],
+                    measured[start:stop],
+                    reset_flags[start:stop],
+                    frozen_flags[start:stop],
+                    component_labels,
+                )
+                save_rewards_csv(
+                    rewards_dir / f"{test_name}_rewards.csv",
+                    local_time,
+                    rewards[start:stop],
+                    frozen_flags[start:stop],
+                    reward_names,
+                )
+                save_reward_plots(
+                    rewards_dir / test_name,
+                    f"{env_name} {mode_name} - {test_name}",
+                    local_time,
+                    rewards[start:stop],
+                    frozen_flags[start:stop],
+                    reward_names,
+                )
+            print(
+                f"  [{mode_name}] scene '{scene}' finished: saved "
+                f"{len(test_indices)} tests to {mode_dir}"
+            )
+
         (
             time_values,
+            target_commands,
             commands,
             measured,
             reset_flags,
             frozen_flags,
             rewards,
             reward_names,
+            q_values,
+            dq_values,
         ) = run_sequence(
             env=mode_env,
             controller_name=mode_name,
@@ -993,61 +1460,20 @@ def main() -> None:
             seed=args.seed,
             tests=tests,
             component_names=component_names,
+            get_runtime=get_runtime,
+            on_scene_end=save_finished_scene,
         )
         normal_video_writer.close()
         slow_video_writer.close()
 
-        rewards_dir = mode_dir / "rewards"
-        rewards_dir.mkdir(parents=True, exist_ok=True)
-
-        steps_per_command = max(
-            1, int(round(TEST_DURATION_SECONDS / float(mode_env.dt)))
-        )
-        for test_index, (test_name, _) in enumerate(tests):
-            start = test_index * steps_per_command
-            stop = min((test_index + 1) * steps_per_command, len(time_values))
-            # Each CSV has local time from 0 to 5 seconds for easier comparison.
-            local_time = time_values[start:stop] - test_index * TEST_DURATION_SECONDS
-            save_csv(
-                mode_dir / f"{test_name}.csv",
-                local_time,
-                commands[start:stop],
-                measured[start:stop],
-                reset_flags[start:stop],
-                frozen_flags[start:stop],
-                component_names,
-            )
-            save_tracking_plot(
-                mode_dir / f"{test_name}_tracking.png",
-                f"{env_name} {mode_name} - {test_name}",
-                local_time,
-                commands[start:stop],
-                measured[start:stop],
-                reset_flags[start:stop],
-                frozen_flags[start:stop],
-                component_labels,
-            )
-            reward_csv_path = rewards_dir / f"{test_name}_rewards.csv"
-            save_rewards_csv(
-                reward_csv_path,
-                local_time,
-                rewards[start:stop],
-                frozen_flags[start:stop],
-                reward_names,
-            )
-            save_reward_plots(
-                rewards_dir / test_name,
-                f"{env_name} {mode_name} - {test_name}",
-                local_time,
-                rewards[start:stop],
-                frozen_flags[start:stop],
-                reward_names,
-            )
-
+        # The per-test CSVs and plots are already on disk: save_finished_scene
+        # wrote each scene's as it ended. What is left is the plot of the whole
+        # sequence, which only exists once every scene has run.
         save_tracking_plot(
             mode_dir / "tracking_complete.png",
             f"{env_name} {mode_name} - complete command sequence",
             time_values,
+            target_commands,
             commands,
             measured,
             reset_flags,
@@ -1056,10 +1482,18 @@ def main() -> None:
         )
         print(
             f"  completed: {time_values[-1]:.3f} s, "
-            f"automatic resets={int(np.sum(reset_flags))}"
+            f"block boundaries={int(np.sum(reset_flags))}"
         )
         print(f"  video saved to: {video_path}")
         print(f"  slow video saved to: {slow_video_path}")
+        now = time.monotonic()
+        minutes, secs = divmod(int(now - last_mode_time), 60)
+        last_mode_time = now
+        print(
+            f"  [{mode_name}] elapsed {minutes:02d}:{secs:02d}\n"
+            f"  [{mode_name}] time {datetime.now().strftime('%H:%M:%S')}\n"
+            "-------------------------------"
+        )
 
     compare_graphics(comparison_dir, env_name, component_labels)
     compare_rewards(comparison_dir, env_name)
@@ -1072,7 +1506,7 @@ def main() -> None:
             / "controllers_comparison_2x2.mp4"
         ),
         fps=1.0 / float(env.dt),
-        tests=tests,
+        total_blocks=total_blocks,
     )
 
     print(f"Comparison completed: {comparison_dir}")
