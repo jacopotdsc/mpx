@@ -59,6 +59,7 @@ if not os.environ.get("DISPLAY"):
 import argparse
 import functools
 import inspect
+import json
 import os
 import pickle
 import re
@@ -205,8 +206,16 @@ print(f"SAC_PARAMS: \n{SAC_PARAMS}")
 
 def make_envs(
     env_name: str = "Go1JoystickFlatTerrain",
+    reward_scale_overrides: dict | None = None,
 ):
-    """Return (env, eval_env, wrap_fn) for a MuJoCo Playground env."""
+    """Return (env, eval_env, wrap_fn) for a MuJoCo Playground env.
+
+    reward_scale_overrides: optional {term_name: value} dict merged into
+    config.reward_config.scales via registry.load's config_overrides. Used
+    by the analysis_training reward-effects study to vary only the reward
+    coefficients while every other config field (command, PPO, network,
+    episode length, ...) stays exactly as the env's default_config().
+    """
 
     from mujoco_playground import registry
     from mujoco_playground._src.wrapper import wrap_for_brax_training as pg_wrap
@@ -215,8 +224,15 @@ def make_envs(
     print(f"  [INFO] mujoco_playground loaded from: {mujoco_playground.__file__}")
     print(f"  [INFO] mujoco_playground._src.wrapper loaded from: {pg_wrap.__module__} -> {sys.modules[pg_wrap.__module__].__file__}")
 
-    env      = registry.load(env_name)
-    eval_env = registry.load(env_name)
+    config_overrides = None
+    if reward_scale_overrides:
+        config_overrides = {
+            f"reward_config.scales.{k}": v for k, v in reward_scale_overrides.items()
+        }
+        print(f"  [INFO] reward_config.scales overrides: {reward_scale_overrides}")
+
+    env      = registry.load(env_name, config_overrides=config_overrides)
+    eval_env = registry.load(env_name, config_overrides=config_overrides)
 
     if ALGO == "sac":
         class SACStateWrapper(Wrapper):
@@ -1487,6 +1503,12 @@ def main():
     parser.add_argument("--num-evals", type=int, default=None,
                         help="Override num_evals")
     parser.add_argument("--seed", type=int, default=None, help="Override RNG seed")
+    parser.add_argument(
+        "--reward-override", type=str, default=None, metavar="JSON_PATH",
+        help="Path to a JSON file of {reward_term: scale} overrides merged into "
+             "config.reward_config.scales. Only the listed terms are changed; "
+             "everything else in the env config stays at its default. Used by "
+             "analysis_training's reward-effects study.")
 
     args = parser.parse_args()
 
@@ -1521,7 +1543,11 @@ def main():
         "titae2e": "TitaJoystickE2EFlatTerrain",
     }
     env_name = _NAME_SHORTCUTS.get(args.name.lower(), args.name)
-    env, eval_env, wrap_fn = make_envs(env_name=env_name)
+    reward_scale_overrides = None
+    if args.reward_override:
+        with open(args.reward_override) as f:
+            reward_scale_overrides = json.load(f)
+    env, eval_env, wrap_fn = make_envs(env_name=env_name, reward_scale_overrides=reward_scale_overrides)
     env_base_dir = os.path.join(args.ckpt_dir, env_name)
 
 

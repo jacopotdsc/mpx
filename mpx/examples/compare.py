@@ -2,15 +2,20 @@
 
 The environment is selected with --name (default: the Lite3 joystick env). The
 script runs one continuous sequence (five seconds per fixed command) for the
-baseline, residual policy, and optional end-to-end policy. It saves tracking
-data, one CSV plus individual plots for every reward term, and one complete
-video per controller:
+baseline and residual policy, plus the end-to-end policy only when --use-e2e is
+passed. It saves tracking data, one CSV plus individual plots for every reward
+term, and one complete video per controller:
 
     <run>/baseline/rewards/<test>_rewards.csv
     <run>/baseline/rewards/<test>/<reward>.png
     <run>/residual/rewards/...
-    <run>/end_to_end/rewards/...             # unless --no-e2e
+    <run>/end_to_end/rewards/...             # only with --use-e2e
     <run>/compare_rewards/<test>/<reward>_comparison.png
+
+The whole sequence is repeated on every scene in DEFAULT_SCENES, so <test> above
+reads "<command>__<scene>", e.g. "vx_1p5__flat_terrain". The scenes are run one
+at a time (all the tests of one, then the next), because switching reloads the
+MuJoCo model.
 
 The command layout (which components exist and in which order) is read from the
 selected env's command_config.names, so it is never hardcoded here; an env that
@@ -23,8 +28,8 @@ Examples:
     python compare.py --load 20260907_101530
     python compare.py --load saved/my_run
     python compare.py --load final
-    python compare.py --load --load-e2e saved/my_e2e_run
-    python compare.py --load --no-e2e
+    python compare.py --load --use-e2e
+    python compare.py --load --use-e2e --load-e2e saved/my_e2e_run
 """
 
 from __future__ import annotations
@@ -53,6 +58,11 @@ from brax.training.agents.ppo import networks as ppo_networks
 from brax.training.agents.sac import networks as sac_networks
 
 import train_srbd
+
+
+# Wall-clock reference for every "elapsed" report: the moment this script
+# started, so the reports show total time rather than per-test time.
+SCRIPT_START_TIME = time.monotonic()
 
 
 # Short aliases for the environments this script can evaluate, mirroring the
@@ -124,6 +134,11 @@ def _measured_source(name: str, index: int) -> tuple[str, int, str]:
         )
     return _MEASURED_BY_INDEX[index]
 
+# Scenes the whole test sequence is repeated over, as the env's `task` names.
+# Add or remove entries to change the terrains every test is run on; each one
+# multiplies the run time, and the length of the videos, by roughly one pass.
+DEFAULT_SCENES = ("flat_terrain", "rough_terrain")#, "perlin_terrain")
+
 # Fixed command sequence to run, per environment. Each entry is a
 # (name, command) pair, optionally extended to (name, command, scene).
 #
@@ -139,28 +154,36 @@ def _measured_source(name: str, index: int) -> tuple[str, int, str]:
 #   with the scene its registry name implies, so a test asking for a different
 #   one reloads the MuJoCo model in place before its episode starts (this also
 #   re-jits reset/step and rebuilds the renderer). Omit it, or use None, to keep
-#   whatever scene is already loaded.
-DEFAULT_SCENE = "flat_terrain"
+#   whatever scene the env name implies.
+#   It takes either a single scene name or a list of them (DEFAULT_SCENES): with
+#   a list the test is repeated once per scene, and each repetition is named
+#   "<test>__<scene>" so their outputs stay apart. See _normalize_tests.
 TESTS = {
     "Lite3JoystickFlatTerrain": (
-        ("vx_1p5", np.array([1.5, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_1p0", np.array([1.0, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENE),
-        ("vy_0p4", np.array([0.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENE),
-        ("wz_0p6", np.array([0.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_1p0_vy_0p4", np.array([1.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_1p0_wz_0p6", np.array([1.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENE),
-        ("vy_0p4_wz_0p6", np.array([0.0, 0.4, 0.6], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_0p5_then_0", np.array([[0.5, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32), DEFAULT_SCENE),
+        ("vx_1p0", np.array([1.0, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p5", np.array([1.5, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0", np.array([2.0, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vy_0p4", np.array([0.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vy_0p6", np.array([0.0, 0.6, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vy_0p8", np.array([0.0, 0.8, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("wz_0p6", np.array([0.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p0_vy_0p4", np.array([1.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p0_wz_0p6", np.array([1.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vy_0p4_wz_0p6", np.array([0.0, 0.4, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_0p5_then_0", np.array([[0.5, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
     ),
     "TitaJoystickFlatTerrain": (
-        ("vx_1p5", np.array([1.5, 0.0], dtype=np.float32), DEFAULT_SCENE),
-        ("wz_0p6", np.array([0.0, 0.6], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_2p0_then_0", np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_2p0_wz_0p4_then_0", np.array([[2.0, 0.4], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_3p0_then_0", np.array([[3.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENE),
-        ("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENE),
+        ("vx_1p0", np.array([1.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p5", np.array([1.5, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0", np.array([2.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("wz_0p6", np.array([0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0_then_0", np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0_wz_0p4_then_0", np.array([[2.0, 0.4], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
     )
 }
 
@@ -211,14 +234,64 @@ def _default_scene(env_name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", suffix).lower()
 
 
-def _normalize_tests(tests: tuple, default_scene: str) -> tuple:
-    """Give every TESTS entry an explicit (name, command, scene) shape.
+def _scene_tuple(scene, default_scene: str) -> tuple[str, ...]:
+    """The scenes one TESTS entry declares, as a tuple.
 
-    Entries that do not name a scene keep the one the env was built with, so
-    existing two-element entries behave exactly as before."""
-    return tuple(
-        (test[0], test[1], test[2] if len(test) > 2 else default_scene)
+    Accepts a single scene name, a list/tuple of them, or None (and a missing
+    third element, which the caller passes as None) to mean the scene the env
+    name implies."""
+    if scene is None:
+        return (default_scene,)
+    if isinstance(scene, str):
+        return (scene,)
+    scenes = tuple(scene)
+    if not scenes:
+        raise ValueError(
+            "A test's scene list is empty: name at least one scene, or drop the "
+            "element to use the one the env name implies."
+        )
+    duplicates = {s for s in scenes if scenes.count(s) > 1}
+    if duplicates:
+        raise ValueError(
+            f"A test's scene list repeats {sorted(duplicates)}: each scene may "
+            f"appear once, otherwise the repeats would overwrite each other."
+        )
+    return scenes
+
+
+def _normalize_tests(tests: tuple, default_scene: str) -> tuple:
+    """Expand every TESTS entry into one (name, command, scene) test per scene.
+
+    An entry naming several scenes (DEFAULT_SCENES) is run once on each of them,
+    as a separate episode named "<test>__<scene>". The suffix is what keeps the
+    repetitions apart: test names are the file names of every CSV, plot and
+    reward folder this script writes, so without it each scene would overwrite
+    the previous one's results.
+
+    The expansion is grouped by scene rather than by test. Switching scene
+    reloads the MuJoCo model and re-jits reset/step (see ensure_scene), so
+    running all the tests of one scene before moving to the next keeps that to a
+    single reload per scene instead of one per test."""
+    declared = [
+        (
+            test[0],
+            test[1],
+            _scene_tuple(test[2] if len(test) > 2 else None, default_scene),
+        )
         for test in tests
+    ]
+
+    # Scene order = order of first appearance across the entries, so the run
+    # follows the order DEFAULT_SCENES is written in.
+    ordered_scenes = list(
+        dict.fromkeys(scene for _, _, scenes in declared for scene in scenes)
+    )
+
+    return tuple(
+        (f"{scene}__{name}", command, scene)
+        for scene in ordered_scenes
+        for name, command, scenes in declared
+        if scene in scenes
     )
 
 
@@ -322,7 +395,7 @@ def create_comparison_video(
     fps: float,
     total_blocks: int,
 ) -> None:
-    """Create normal-speed and x2 slow 2x2 time-synchronized videos."""
+    """Create normal-speed and x2 slow time-synchronized comparison videos."""
     layout = {
         "baseline": (0, 0),
         "residual": (0, 1),
@@ -333,6 +406,10 @@ def create_comparison_video(
         for name, path in video_paths.items()
         if path.exists()
     }
+
+    # Use one row for baseline/residual and two rows when E2E is present.
+    num_rows = 2 if "end_to_end" in readers else 1
+
     normal_writer = imageio.get_writer(
         output_path,
         fps=fps,
@@ -370,18 +447,26 @@ def create_comparison_video(
                     continue
 
             canvas = np.zeros(
-                (2 * tile_height, 2 * tile_width, 3), dtype=np.uint8
+                (num_rows * tile_height, 2 * tile_width, 3),
+                dtype=np.uint8,
             )
             for name, frame in current_frames.items():
                 row, column = layout[name]
                 if frame.shape[:2] != (tile_height, tile_width):
                     frame = np.asarray(
                         Image.fromarray(frame).resize(
-                            (tile_width, tile_height), Image.Resampling.BILINEAR
+                            (tile_width, tile_height),
+                            Image.Resampling.BILINEAR,
                         )
                     )
-                y0, x0 = row * tile_height, column * tile_width
-                canvas[y0:y0 + tile_height, x0:x0 + tile_width] = frame[:, :, :3]
+
+                y0 = row * tile_height
+                x0 = column * tile_width
+                canvas[
+                    y0:y0 + tile_height,
+                    x0:x0 + tile_width,
+                ] = frame[:, :, :3]
+
             normal_writer.append_data(canvas)
             slow_writer.append_data(canvas)
     finally:
@@ -392,7 +477,6 @@ def create_comparison_video(
 
     print(f"Combined comparison video saved to: {output_path}")
     print(f"Slow combined comparison video saved to: {slow_output_path}")
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -432,9 +516,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--no-e2e",
+        "--use-e2e",
         action="store_true",
-        help="Skip the end-to-end evaluation and compare only baseline/residual.",
+        help="Also evaluate the end-to-end policy. Off by default: only "
+             "baseline and residual are compared unless this flag is passed.",
     )
     parser.add_argument(
         "--ckpt-dir",
@@ -456,7 +541,7 @@ def set_fixed_command(state, command: jax.Array, baseline: bool):
     batch_command = command[None, :]
     info = {
         **state.info,
-        "command": batch_command,
+        #"command": jnp.zeros_like(batch_command),
         "target_command": batch_command,
     }
     if "steps_until_next_cmd" in info:
@@ -483,6 +568,7 @@ def save_tracking_plot(
     output_path: Path,
     test_title: str,
     time_values: np.ndarray,
+    target_commands: np.ndarray,
     commands: np.ndarray,
     measured: np.ndarray,
     reset_flags: np.ndarray,
@@ -496,8 +582,16 @@ def save_tracking_plot(
     frozen_mask = np.asarray(frozen_flags, dtype=bool)
     for index, (axis, (label, unit)) in enumerate(zip(axes, component_labels)):
         axis.step(
-            time_values, commands[:, index], where="post", color="black",
-            linestyle="--", linewidth=1.5, label="command",
+            time_values, target_commands[:, index], where="post", color="black",
+            linestyle="--", linewidth=1.5, label="target",
+        )
+        axis.plot(
+            time_values,
+            commands[:, index],
+            color="gray",
+            linestyle="--",
+            linewidth=1.5,
+            label="command",
         )
         axis.plot(
             time_values,
@@ -515,8 +609,20 @@ def save_tracking_plot(
                 label="reset / command change" if reset_index == 0 else None,
             )
         rmse = float(np.sqrt(np.mean((measured[:, index] - commands[:, index]) ** 2)))
+        # Error mean +- std over the non-frozen samples (error = measured - command).
+        # Using the error, not the raw signal, keeps this meaningful across an
+        # in-episode command change (the command is per-timestep). Same window as
+        # the RMSE and consistent with it: RMSE^2 = mean_err^2 + std_err^2
+        # (bias^2 + variance). Frozen rows (post-fall) are excluded.
+        valid = ~frozen_mask
+        err = (measured[:, index] - commands[:, index])
+        err = err[valid] if valid.any() else err
+        err_mean, err_std = float(np.mean(err)), float(np.std(err))
         axis.set_ylabel(f"{label} [{unit}]")
-        axis.set_title(f"{label} tracking - RMSE {rmse:.3f} {unit}")
+        axis.set_title(
+            f"{label} tracking - RMSE {rmse:.3f} {unit} | "
+            f"err mean {err_mean:+.3f} ± std {err_std:.3f} {unit}"
+        )
         axis.grid(True, alpha=0.3)
         axis.legend(loc="best")
     axes[-1].set_xlabel("Time [s]")
@@ -758,13 +864,22 @@ def compare_graphics(
                 command = data[command_key]
                 frozen = data["frozen"] > 0.5
                 rmse = float(np.sqrt(np.mean((velocity - command) ** 2)))
+                # Error mean +- std (error = measured - command), robust to an
+                # in-episode command change; RMSE^2 = mean_err^2 + std_err^2.
+                valid = ~frozen
+                err = velocity - command
+                err = err[valid] if np.any(valid) else err
+                err_mean, err_std = float(np.mean(err)), float(np.std(err))
 
                 axis.plot(
                     time_data,
                     np.where(frozen, np.nan, velocity),
                     color=color,
                     linewidth=1.3,
-                    label=f"{controller_name} - RMSE {rmse:.3f}",
+                    label=(
+                        f"{controller_name} - RMSE {rmse:.3f} | "
+                        f"err mean {err_mean:+.3f} ± std {err_std:.3f}"
+                    ),
                 )
             axis.set_ylabel(ylabel)
             axis.grid(True, alpha=0.3)
@@ -797,6 +912,7 @@ def run_sequence(
     tests: tuple,
     component_names: list[str],
     get_runtime,
+    on_scene_end=None,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -808,6 +924,15 @@ def run_sequence(
     np.ndarray,
     np.ndarray,
 ]:
+    """Run the whole test sequence for one controller.
+
+    `on_scene_end`, when given, is called as
+    on_scene_end(scene, test_indices, results) every time the last test of a
+    scene finishes -- so a scene's CSVs and plots are on disk before the next
+    one starts loading, and an interrupted run keeps whatever it had already
+    completed. `results` is the same 9-tuple this function returns, holding the
+    series recorded so far; the test indices are absolute, so the caller slices
+    it with the same offsets it would use at the end."""
     # Flatten the tests into 5-second blocks. Consecutive rows of a 2D command
     # share a single episode: the command target changes between them but the
     # robot is NOT reset. A reset happens only when the next block starts a new
@@ -842,6 +967,12 @@ def run_sequence(
 
     reset_index = 0
     state = reset_fn(jax.random.PRNGKey(seed + reset_index)[None, :])
+    state = state.replace(
+        info={
+            **state.info,
+            "command": jnp.zeros_like(state.info["command"]),
+        }
+    )
     first_command = jnp.asarray(blocks[0][0])
     state = set_fixed_command(state, first_command, baseline=not residual)
 
@@ -852,6 +983,7 @@ def run_sequence(
     steps_per_command = max(1, int(round(TEST_DURATION_SECONDS / float(env.dt))))
     num_steps = steps_per_command * num_blocks
     measured = []
+    target_commands = []
     commands = []
     reset_flags = []
     frozen_flags = []
@@ -870,7 +1002,13 @@ def run_sequence(
     camera = mujoco.MjvCamera()
     mujoco.mjv_defaultCamera(camera)
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-    camera.distance = 4.0
+    # Stand-off from the tracked robot (metres, world units). Was 4 m, which sat
+    # too close on every scene and cropped the (larger) Tita out of frame. 6.5 m
+    # gives every robot some breathing room. NB: a fixed metre value is used on
+    # purpose -- model.stat.extent is unreliable here because the rough/perlin
+    # scenes set a terrain-sized <statistic extent> (4-5 m), which would push the
+    # camera out to 30 m and shrink the robot to a dot.
+    camera.distance = 6.5
     camera.elevation = -15.0
     camera.azimuth = 135.0
 
@@ -880,20 +1018,48 @@ def run_sequence(
     last_q = None
     last_dq = None
 
-    # Wall-clock report at every test boundary: how long the test just finished
-    # took, and the time of day it ended.
-    test_start_time = time.monotonic()
-
+    # Wall-clock report at every test boundary: how long the run has taken in
+    # total so far, and the time of day the test ended.
     def print_test_time(test_index: int) -> None:
-        nonlocal test_start_time
         now = time.monotonic()
-        minutes, seconds = divmod(int(now - test_start_time), 60)
-        test_start_time = now
+        minutes, seconds = divmod(int(now - SCRIPT_START_TIME), 60)
         print(
             f"  [{controller_name}] test {tests[test_index][0]} "
             f"| elapsed {minutes:02d}:{seconds:02d} | "
             f"time {datetime.now().strftime('%H:%M:%S')}"
         )
+
+    def collect() -> tuple:
+        """The series recorded so far, in the shape this function returns."""
+        measured_array = np.asarray(measured, dtype=np.float64)
+        return (
+            np.arange(1, len(measured_array) + 1, dtype=np.float64)
+            * float(env.dt),
+            np.asarray(target_commands, dtype=np.float64),
+            np.asarray(commands, dtype=np.float64),
+            measured_array,
+            np.asarray(reset_flags, dtype=bool),
+            np.asarray(frozen_flags, dtype=bool),
+            np.asarray(reward_values, dtype=np.float64),
+            reward_names,
+            np.asarray(q_values, dtype=np.float64),
+            np.asarray(dq_values, dtype=np.float64),
+        )
+
+    # First test of the scene currently running: the tests from here up to the
+    # one that just ended are what a scene boundary hands to on_scene_end.
+    scene_first_test = 0
+
+    def flush_scene(last_test_index: int) -> None:
+        """Report the scene ending at `last_test_index` as finished."""
+        nonlocal scene_first_test
+        if on_scene_end is not None:
+            on_scene_end(
+                tests[last_test_index][2],
+                list(range(scene_first_test, last_test_index + 1)),
+                collect(),
+            )
+        scene_first_test = last_test_index + 1
 
     for step_index in range(num_steps):
         block_index = min(step_index // steps_per_command, num_blocks - 1)
@@ -914,8 +1080,18 @@ def run_sequence(
             measured.append(last_velocity.copy())
             q_values.append(last_q.copy())
             dq_values.append(last_dq.copy())
-            current_command = np.asarray(command_row)
-            commands.append(current_command)
+            current_target_command = np.asarray(
+                command_row,
+                dtype=np.float64,
+            )
+
+            current_command = np.asarray(
+                jax.device_get(state.info["command"][0]),
+                dtype=np.float64,
+            )
+
+            target_commands.append(current_target_command.copy())
+            commands.append(current_command.copy())
             reset_flags.append(block_finished)
             frozen_flags.append(True)
             reward_values.append(np.full(len(reward_names), np.nan))
@@ -952,8 +1128,16 @@ def run_sequence(
                 jax.device_get(velocity_fn(state.data)[0])
             )
             measured.append(last_velocity.copy())
-            current_command = np.asarray(command_row)
-            commands.append(current_command)
+            current_target_command = np.asarray(
+                jax.device_get(state.info["target_command"][0])
+            )
+
+            current_command = np.asarray(
+                jax.device_get(state.info["command"][0])
+            )
+
+            target_commands.append(current_target_command.copy())
+            commands.append(current_command.copy())
 
             terminated = bool(np.asarray(jax.device_get(state.done[0])))
 
@@ -991,10 +1175,22 @@ def run_sequence(
 
         if block_finished and next_block_is_new_test:
             # Boundary between two different tests: start a fresh episode.
-            print_test_time(blocks[block_index][2])
-            ensure_scene(blocks[block_index + 1][2])
+            finished_test = blocks[block_index][2]
+            next_test = blocks[block_index + 1][2]
+            print_test_time(finished_test)
+            # When the next test also changes scene, the scene just ended: save
+            # its results before the reload, which is the slow part.
+            if tests[next_test][2] != tests[finished_test][2]:
+                flush_scene(finished_test)
+            ensure_scene(next_test)
             reset_index += 1
             state = reset_fn(jax.random.PRNGKey(seed + reset_index)[None, :])
+            state = state.replace(
+                info={
+                    **state.info,
+                    "command": jnp.zeros_like(state.info["command"]),
+                }
+            )
             next_command = jnp.asarray(blocks[block_index + 1][0])
             state = set_fixed_command(state, next_command, baseline=not residual)
             state = state.replace(obs=get_obs_fn(state.data, state.info, zero_action))
@@ -1012,25 +1208,10 @@ def run_sequence(
 
     renderer.close()
 
-    measured_array = np.asarray(measured, dtype=np.float64)
-    commands_array = np.asarray(commands, dtype=np.float64)
-    reset_flags_array = np.asarray(reset_flags, dtype=bool)
-    frozen_flags_array = np.asarray(frozen_flags, dtype=bool)
-    rewards_array = np.asarray(reward_values, dtype=np.float64)
-    q_array = np.asarray(q_values, dtype=np.float64)
-    dq_array = np.asarray(dq_values, dtype=np.float64)
-    time_values = np.arange(1, len(measured_array) + 1, dtype=np.float64) * float(env.dt)
-    return (
-        time_values,
-        commands_array,
-        measured_array,
-        reset_flags_array,
-        frozen_flags_array,
-        rewards_array,
-        reward_names,
-        q_array,
-        dq_array,
-    )
+    # The scene of the last test never hits a boundary either: close it here.
+    flush_scene(len(tests) - 1)
+
+    return collect()
 
 
 def main() -> None:
@@ -1119,6 +1300,50 @@ def main() -> None:
 
     reset_fn, step_fn, velocity_fn, _ = get_runtime(env, _default_scene(env_name))
 
+    # The MPC baseline needs the residual branch OFF, not just a zero action.
+    # In a residual env a ZERO action is NOT the plain MPC: at action 0 the
+    # low-level controller still adds tau_rl = residual_gain*(Kp*(default_pose-q)
+    # - Kd*qvel), a PD holding the joints at the nominal stance, on top of
+    # tau_mpc. That stance PD fights the MPC gait and, at a 1 m/s forward command,
+    # collapses tracking and tips the base over (measured on this env: vx command
+    # 1.0 -> 0.01 m/s and roll -> pi, i.e. a fall), while the same MPC with the
+    # branch disabled tracks 1.02 m/s upright -- matching the standalone
+    # lite3_srbd.py baseline. The env exposes this exact gate via
+    # config.enable_residual (-> _residual_gain 0.0); use a dedicated env so the
+    # residual/e2e modes keep their branch on. Setting it on _config too keeps it
+    # off across a scene reload (load_scene re-__init__s from _config).
+    from mujoco_playground import registry as _registry
+    try:
+        baseline_env = _registry.load(
+            env_name,
+            config_overrides={
+                "residual_config.enabled": False,
+            },
+        )
+    except (KeyError, AttributeError, ValueError, TypeError):
+        baseline_env = _registry.load(
+            env_name,
+            config_overrides={
+                "enable_residual": False,
+            },
+        )
+    mark_scene(baseline_env, _default_scene(env_name))
+    # enable_residual=False sets _residual_gain=0.0 in the env __init__ (and, being
+    # baked into _config, it survives a scene reload, which re-__init__s from
+    # _config). Assert it so a silent config change can't let the stance PD back
+    # into the "baseline". _residual_gain is captured by the jit built just below.
+    try:
+        residual_enabled = baseline_env._config.residual_config.enabled
+    except AttributeError:
+        residual_enabled = baseline_env._config.enable_residual
+
+    assert not residual_enabled, (
+        "baseline env still has the residual branch enabled"
+    )
+    baseline_reset_fn, baseline_step_fn, baseline_velocity_fn, _ = get_runtime(
+        baseline_env, _default_scene(env_name)
+    )
+
     comparison_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     comparison_dir = (
         Path(run_dir) / f"comparison_{env_name}" / comparison_timestamp
@@ -1126,11 +1351,12 @@ def main() -> None:
     comparison_dir.mkdir(parents=True, exist_ok=True)
     copy_joystick_source(env, comparison_dir)
     controller_modes = [
-        ("baseline", env, reset_fn, step_fn, velocity_fn, policy_fn, False),
+        ("baseline", baseline_env, baseline_reset_fn, baseline_step_fn,
+         baseline_velocity_fn, policy_fn, False),
         ("residual", env, reset_fn, step_fn, velocity_fn, policy_fn, True),
     ]
 
-    if not args.no_e2e:
+    if args.use_e2e:
         _, e2e_env, _ = train_srbd.make_envs(env_name=e2e_env_name)
         mark_scene(e2e_env, _default_scene(e2e_env_name))
         e2e_base_dir = os.path.join(args.ckpt_dir, e2e_env_name)
@@ -1173,6 +1399,12 @@ def main() -> None:
     controller_video_fps = {}
 
     print(f"Environment: {env_name}")
+    scene_order = list(dict.fromkeys(scene for _, _, scene in tests))
+    print(
+        f"Scenes: {scene_order} "
+        f"({len(tests)} tests, {total_blocks} x {TEST_DURATION_SECONDS:g} s "
+        f"= {TEST_DURATION_SECONDS * total_blocks:g} s per controller)"
+    )
     print(f"Command components: {component_names}")
     print(f"Residual checkpoint: {run_dir}")
     print(f"Output directory: {comparison_dir}")
@@ -1213,8 +1445,91 @@ def main() -> None:
         print(
             f"[{mode_name}] Starting the continuous {total_seconds}-second sequence"
         )
+
+        rewards_dir = mode_dir / "rewards"
+        rewards_dir.mkdir(parents=True, exist_ok=True)
+        steps_per_command = max(
+            1, int(round(TEST_DURATION_SECONDS / float(mode_env.dt)))
+        )
+        # Cumulative block offsets so each test is sliced by its own length
+        # (a 2D-command test spans several blocks / 5-second segments).
+        block_offsets = np.concatenate(([0], np.cumsum(block_counts)))
+
+        def save_finished_scene(scene: str, test_indices, results) -> None:
+            """Write the CSVs and plots of a scene as soon as it finishes.
+
+            run_sequence calls this at every scene boundary, so results land on
+            disk while the next scene is still running and an interrupted run
+            keeps the scenes it completed. `results` carries the series recorded
+            so far and the test indices are absolute, so the slicing below is
+            the same either way."""
+            (
+                time_values,
+                target_commands,
+                commands,
+                measured,
+                reset_flags,
+                frozen_flags,
+                rewards,
+                reward_names,
+                q_values,
+                dq_values,
+            ) = results
+            for test_index in test_indices:
+                test_name = tests[test_index][0]
+                start = int(block_offsets[test_index]) * steps_per_command
+                stop = min(
+                    int(block_offsets[test_index + 1]) * steps_per_command,
+                    len(time_values),
+                )
+                # Each CSV has local time starting at 0 for easier comparison; a
+                # multi-block test therefore runs from 0 to 5 * n_blocks seconds.
+                local_time = time_values[start:stop] - start * float(mode_env.dt)
+                save_csv(
+                    mode_dir / f"{test_name}.csv",
+                    local_time,
+                    commands[start:stop],
+                    measured[start:stop],
+                    reset_flags[start:stop],
+                    frozen_flags[start:stop],
+                    component_names,
+                    q_values[start:stop],
+                    dq_values[start:stop],
+                )
+                save_tracking_plot(
+                    mode_dir / f"{test_name}_tracking.png",
+                    f"{env_name} {mode_name} - {test_name}",
+                    local_time,
+                    target_commands[start:stop],
+                    commands[start:stop],
+                    measured[start:stop],
+                    reset_flags[start:stop],
+                    frozen_flags[start:stop],
+                    component_labels,
+                )
+                save_rewards_csv(
+                    rewards_dir / f"{test_name}_rewards.csv",
+                    local_time,
+                    rewards[start:stop],
+                    frozen_flags[start:stop],
+                    reward_names,
+                )
+                save_reward_plots(
+                    rewards_dir / test_name,
+                    f"{env_name} {mode_name} - {test_name}",
+                    local_time,
+                    rewards[start:stop],
+                    frozen_flags[start:stop],
+                    reward_names,
+                )
+            print(
+                f"  [{mode_name}] scene '{scene}' finished: saved "
+                f"{len(test_indices)} tests to {mode_dir}"
+            )
+
         (
             time_values,
+            target_commands,
             commands,
             measured,
             reset_flags,
@@ -1236,70 +1551,19 @@ def main() -> None:
             tests=tests,
             component_names=component_names,
             get_runtime=get_runtime,
+            on_scene_end=save_finished_scene,
         )
         normal_video_writer.close()
         slow_video_writer.close()
 
-        rewards_dir = mode_dir / "rewards"
-        rewards_dir.mkdir(parents=True, exist_ok=True)
-
-        steps_per_command = max(
-            1, int(round(TEST_DURATION_SECONDS / float(mode_env.dt)))
-        )
-        # Cumulative block offsets so each test is sliced by its own length
-        # (a 2D-command test spans several blocks / 5-second segments).
-        block_offsets = np.concatenate(([0], np.cumsum(block_counts)))
-        for test_index, (test_name, *_) in enumerate(tests):
-            start = int(block_offsets[test_index]) * steps_per_command
-            stop = min(
-                int(block_offsets[test_index + 1]) * steps_per_command,
-                len(time_values),
-            )
-            # Each CSV has local time starting at 0 for easier comparison; a
-            # multi-block test therefore runs from 0 to 5 * n_blocks seconds.
-            local_time = time_values[start:stop] - start * float(mode_env.dt)
-            save_csv(
-                mode_dir / f"{test_name}.csv",
-                local_time,
-                commands[start:stop],
-                measured[start:stop],
-                reset_flags[start:stop],
-                frozen_flags[start:stop],
-                component_names,
-                q_values[start:stop],
-                dq_values[start:stop],
-            )
-            save_tracking_plot(
-                mode_dir / f"{test_name}_tracking.png",
-                f"{env_name} {mode_name} - {test_name}",
-                local_time,
-                commands[start:stop],
-                measured[start:stop],
-                reset_flags[start:stop],
-                frozen_flags[start:stop],
-                component_labels,
-            )
-            reward_csv_path = rewards_dir / f"{test_name}_rewards.csv"
-            save_rewards_csv(
-                reward_csv_path,
-                local_time,
-                rewards[start:stop],
-                frozen_flags[start:stop],
-                reward_names,
-            )
-            save_reward_plots(
-                rewards_dir / test_name,
-                f"{env_name} {mode_name} - {test_name}",
-                local_time,
-                rewards[start:stop],
-                frozen_flags[start:stop],
-                reward_names,
-            )
-
+        # The per-test CSVs and plots are already on disk: save_finished_scene
+        # wrote each scene's as it ended. What is left is the plot of the whole
+        # sequence, which only exists once every scene has run.
         save_tracking_plot(
             mode_dir / "tracking_complete.png",
             f"{env_name} {mode_name} - complete command sequence",
             time_values,
+            target_commands,
             commands,
             measured,
             reset_flags,
