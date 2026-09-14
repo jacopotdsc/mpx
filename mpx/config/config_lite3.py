@@ -64,6 +64,27 @@ clearence_speed = 0.4
 robot_height = 0.31
 use_terrain_estimator = False
 
+# Slew-rate limit on the velocity reference (bounded reference acceleration).
+# The standalone entry point issues a step command from standstill; without a
+# bound the SRBD tries to reach the full commanded velocity within one horizon,
+# which pitches the base over and tips the robot at vx >= ~0.8 (measured). The
+# gait itself is capable of vx ~= 0.85 in steady state -- a ramped command stays
+# stable -- so the fix is to ramp the reference internally instead of stiffening
+# the gait. Configs that do not define these (Aliengo, Go1) keep the old
+# behaviour: the wrapper defaults to no limit.
+# [CLAUDE: OLD controller] tuning disabled (pre-tuning behaviour).
+# max_lin_acc = 0.8   # m/s^2 -> reaches vx = 1.0 in ~1.25 s
+# max_yaw_acc = 1.5   # rad/s^2
+
+# Feed-forward gain on the linear-velocity reference. The SRBD tracks forward
+# and lateral speed with a steady ~15% deficit (measured ~= 0.85 * commanded,
+# constant across 0.6..1.5 m/s and stable up to well past 1.2), so a raw command
+# of 1.0 lands at ~0.85 m/s. Pre-scaling the reference by ~1/0.85 makes the
+# commanded value the one actually tracked: with 1.20, commanded 1.0 -> ~1.02
+# and 1.2 -> ~1.21, both stable. Configs without the key keep gain 1.0.
+# [CLAUDE: OLD controller] tuning disabled.
+# vel_ref_gain = 1.2
+
 # Initial state: the `home` keyframe of lite3.xml.
 p0 = jnp.array([0.0, 0.0, 0.31])
 quat0 = jnp.array([1.0, 0.0, 0.0, 0.0])

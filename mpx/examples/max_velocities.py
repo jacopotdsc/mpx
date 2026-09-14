@@ -13,6 +13,17 @@ can actually track (survives the whole trial without falling / NaN and whose
 velocity converges to the command within a tolerance). The collection of those
 last-valid points per direction is the velocity envelope.
 
+Validity criterion (which command levels count):
+    * default ("tracking"): the robot must survive the level (no fall / termination
+      / NaN) AND each component's RMSE must stay within tolerance
+      (--max-tracking-error 0.30 m/s linear, --max-tracking-error-ang 0.50 rad/s);
+    * --term ("termination_only"): a level is valid based on SURVIVAL alone (no
+      fall / termination / NaN); the RMSE / convergence criterion is ignored (RMSE
+      is still computed and saved for analysis). Every CSV records which criterion
+      was used in a `validity_mode` column. With --term the whole output tree is
+      written to the sibling folder analysis_lite3/plots/srbd_term/ instead of
+      max_velocities/, so the two criteria can be compared without overwriting.
+
 The command layout (which components exist and in which order) is read from the
 selected env's command_config.names, so it is never hardcoded here: the script
 works for Lite3 (["vx", "vy", "wz"]), Tita (["vx", "wz"]) or any other layout,
@@ -35,8 +46,9 @@ Examples:
     python max_velocities.py
     python max_velocities.py --name tita
     python max_velocities.py --no-e2e
+    python max_velocities.py --term            # survival-only -> analysis_lite3/plots/srbd_term/
     python max_velocities.py --velocity-step 0.1 --settling-time 2.0 --evaluation-time 3.0
-    python max_velocities.py --plot-only path/to/max_velocities
+    python max_velocities.py --plot-only path/to/max_velocities   # or .../srbd_term
     # quick smoke test (reduced ranges):
     python max_velocities.py --name tita --no-e2e --num-directions 8 \
         --max-vx 1.0 --max-wz 1.0 --settling-time 0.5 --evaluation-time 0.5
@@ -81,20 +93,24 @@ _UNIT_FALLBACK = {
     "wx": "rad/s", "wy": "rad/s", "wz": "rad/s",
 }
 
+# NB: `increment_interval` (seconds held at each command level before the next
+# increment) lives in each test's own dict, alongside the per-component *_inc
+# steps. The ramp logic reads it from here -- it is never hardcoded in the
+# simulation loop. See run_search / _level_schedule.
 MAX_VELOCITY_TARGETS = {
     "Lite3JoystickFlatTerrain": (
-        ("vx_3p0",              np.array([3.0, 0.0, 0.0], np.float32), dict(vx_inc=0.5)),
-        ("vy_1p0",              np.array([0.0, 1.0, 0.0], np.float32), dict(vy_inc=0.1)),
-        ("wz_3p0",              np.array([0.0, 0.0, 3.0], np.float32), dict(wz_inc=0.5)),
-        ("vx_3p0_vy_1p0",       np.array([3.0, 1.0, 0.0], np.float32), dict(vx_inc=0.5, vy_inc=0.1)),
-        ("vx_3p0_wz_0p5",       np.array([3.0, 0.0, 0.5], np.float32), dict(vx_inc=0.5, wz_inc=0.1)),
-        ("vy_1p0_wz_0p5",       np.array([0.0, 1.0, 0.5], np.float32), dict(vy_inc=0.1, wz_inc=0.1)),
-        ("vx_3p0_vy_1p0_wz_0p5",np.array([3.0, 1.0, 0.5], np.float32), dict(vx_inc=0.5, vy_inc=0.1, wz_inc=0.5)),
+        ("vx_3p0",              np.array([3.0, 0.0, 0.0], np.float32), dict(vx_inc=0.5, increment_interval=1.0)),
+        ("vy_1p0",              np.array([0.0, 1.0, 0.0], np.float32), dict(vy_inc=0.1, increment_interval=1.0)),
+        ("wz_3p0",              np.array([0.0, 0.0, 3.0], np.float32), dict(wz_inc=0.5, increment_interval=1.0)),
+        ("vx_3p0_vy_1p0",       np.array([3.0, 1.0, 0.0], np.float32), dict(vx_inc=0.5, vy_inc=0.1, increment_interval=1.0)),
+        ("vx_3p0_wz_0p5",       np.array([3.0, 0.0, 0.5], np.float32), dict(vx_inc=0.5, wz_inc=0.1, increment_interval=1.0)),
+        ("vy_1p0_wz_0p5",       np.array([0.0, 1.0, 0.5], np.float32), dict(vy_inc=0.1, wz_inc=0.1, increment_interval=1.0)),
+        ("vx_3p0_vy_1p0_wz_0p5",np.array([3.0, 1.0, 0.5], np.float32), dict(vx_inc=0.5, vy_inc=0.1, wz_inc=0.5, increment_interval=1.0)),
     ),
     "TitaJoystickFlatTerrain": (
-        ("vx_3p0",        np.array([3.0, 0.0], np.float32), dict(vx_inc=0.1)),
-        ("wz_0p8",        np.array([0.0, 0.8], np.float32), dict(wz_inc=0.)),
-        ("vx_3p0_wz_0p8", np.array([3.0, 0.8], np.float32), dict(vx_inc=0.1, wz_inc=0.1)),
+        ("vx_3p0",        np.array([3.0, 0.0], np.float32), dict(vx_inc=0.1, increment_interval=1.0)),
+        ("wz_0p8",        np.array([0.0, 0.8], np.float32), dict(wz_inc=0., increment_interval=1.0)),
+        ("vx_3p0_wz_0p8", np.array([3.0, 0.8], np.float32), dict(vx_inc=0.1, wz_inc=0.1, increment_interval=1.0)),
     ),
 }
 
@@ -126,6 +142,32 @@ def _march_targets(command_names, target, increments, default_step):
     if not np.allclose(commands[-1], target):
         commands.append(target.copy())
     return commands
+
+
+def _increment_interval(increments: dict, default_interval: float) -> float:
+    """Seconds to hold each command level before the next increment, read from
+    the test's own dict (never hardcoded); falls back to `default_interval`."""
+    return float(increments.get("increment_interval", default_interval))
+
+
+def _level_schedule(command_names, target, increments, default_step, max_levels=0):
+    """Staircase of command vectors applied within a single episode:
+
+        level 0 = [0, 0, ...]  (held first, so the first command after reset is
+                                genuinely zero and the first increment happens
+                                only after one full interval)
+        level k = _march_targets step k  (one active component ramped by its own
+                                *_inc, clamped exactly at the target, sign-aware)
+
+    So a positive target ramps 0 -> +inc -> ... -> +target and a negative one
+    ramps 0 -> -inc -> ... -> -target. `max_levels > 0` caps the number of
+    increment levels (0 stays; used for quick tests)."""
+    marched = _march_targets(command_names, target, increments, default_step)
+    levels = [np.zeros(len(command_names), dtype=np.float64)]
+    levels += [np.asarray(c, dtype=np.float64) for c in marched]
+    if max_levels and max_levels > 0:
+        levels = levels[: max_levels + 1]   # keep the zero level + `max_levels` steps
+    return levels
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -203,6 +245,32 @@ def parse_args() -> argparse.Namespace:
         help="Seconds used to judge stability / convergence (after settling).",
     )
     parser.add_argument(
+        "--increment-interval", type=float, default=1.0,
+        help=(
+            "Fallback seconds held at each command level before the next "
+            "increment, used only when a test's dict does not specify its own "
+            "'increment_interval' (default: 1.0)."
+        ),
+    )
+    parser.add_argument(
+        "--max-levels", type=int, default=0,
+        help=(
+            "Cap the number of increment levels per test (0 = ramp all the way "
+            "to the target). Handy for quick verification runs."
+        ),
+    )
+    parser.add_argument(
+        "--term", action="store_true",
+        help=(
+            "Termination-only validity: a command level counts as valid iff the "
+            "robot SURVIVES it (no fall, no termination, no NaN/Inf) -- the RMSE / "
+            "convergence criterion is ignored (RMSE is still computed and saved). "
+            "Without this flag the default 'tracking' criterion applies (survives "
+            "AND RMSE within tolerance). Results are written to a separate sibling "
+            "folder analysis_lite3/plots/srbd_term/ (never touching max_velocities/)."
+        ),
+    )
+    parser.add_argument(
         "--max-tracking-error", type=float, default=0.30,
         help="Max RMSE (m/s) on linear components for a command to count valid.",
     )
@@ -265,7 +333,8 @@ def _points_header(names: list[str]) -> list[str]:
         + [f"{n}_measured_mean" for n in names]
         + [f"{n}_rmse" for n in names]
         + ["command_norm", "stable", "fell", "terminated", "converged",
-           "finite", "valid", "settling_time_s", "evaluation_time_s"]
+           "finite", "valid", "settling_time_s", "evaluation_time_s",
+           "validity_mode"]
     )
 
 
@@ -273,8 +342,21 @@ def _summary_header(names: list[str]) -> list[str]:
     return (
         ["controller", "combination", "direction_index"]
         + [f"{n}_command" for n in names]
+        + [f"{n}_measured_mean" for n in names]   # measured_mean at the last valid level
         + ["command_norm", "cap_limited", "found_valid",
-           "settling_time_s", "evaluation_time_s"]
+           "settling_time_s", "evaluation_time_s", "validity_mode"]
+    )
+
+
+def _trace_header(names: list[str]) -> list[str]:
+    """Per-step trace of the progressive command actually applied (and the
+    measured velocity) during the ramp. One row per simulation step."""
+    return (
+        ["controller", "combination", "direction_index", "level_index",
+         "step", "t_sim_s"]
+        + [f"{n}_command" for n in names]
+        + [f"{n}_measured" for n in names]
+        + ["up_z", "done", "fell"]
     )
 
 
@@ -435,11 +517,33 @@ def build_controllers(args: argparse.Namespace):
 
     reset_fn, step_fn, get_obs_fn, velocity_fn, upvector_fn = build_runtime(env)
 
+    # --- MPC baseline needs the residual branch OFF, not just a zero action. ---
+    # Mirror compare.py exactly: in a residual env a ZERO action is NOT the plain
+    # MPC. At action 0 the low-level controller still adds
+    #   tau_rl = residual_gain * (Kp*(default_pose - q) - Kd*qvel)
+    # a PD holding the joints at the nominal stance, on top of tau_mpc. With
+    # enable_residual left True (residual_gain=1.0) that stance PD fights the MPC
+    # gait and biases (and can collapse) the velocity envelope -- so the previous
+    # baseline here was MPC + stance-PD, not pure MPC. A dedicated env built with
+    # enable_residual=False sets _residual_gain=0.0, so tau_final == tau_mpc
+    # (pure SRBD/MPC). The residual/e2e controllers keep their own env (branch ON).
+    from mujoco_playground import registry as _registry
+    baseline_env = _registry.load(
+        env_name, config_overrides={"enable_residual": False}
+    )
+    assert compare._unwrap_env(baseline_env)._residual_gain == 0.0, (
+        "baseline env still has the residual branch enabled"
+    )
+    (b_reset_fn, b_step_fn, b_get_obs_fn,
+     b_velocity_fn, b_upvector_fn) = build_runtime(baseline_env)
+
     controllers = [
-        dict(name="baseline", env=env, reset_fn=reset_fn, step_fn=step_fn,
-             get_obs_fn=get_obs_fn, velocity_fn=velocity_fn, upvector_fn=upvector_fn,
+        dict(name="baseline", env=baseline_env,
+             reset_fn=b_reset_fn, step_fn=b_step_fn,
+             get_obs_fn=b_get_obs_fn, velocity_fn=b_velocity_fn,
+             upvector_fn=b_upvector_fn,
              policy_fn=policy_fn, uses_policy=False,
-             action_size=int(env.action_size), dt=float(env.dt)),
+             action_size=int(baseline_env.action_size), dt=float(baseline_env.dt)),
         dict(name="residual", env=env, reset_fn=reset_fn, step_fn=step_fn,
              get_obs_fn=get_obs_fn, velocity_fn=velocity_fn, upvector_fn=upvector_fn,
              policy_fn=policy_fn, uses_policy=True,
@@ -483,99 +587,201 @@ def build_controllers(args: argparse.Namespace):
     return controllers, component_names, component_units, comparison_dir
 
 
-def evaluate_command(controller, command_vec, *, settling_steps, eval_steps,
-                     seed, component_names, tol_per_name):
-    """Run one command from a clean, deterministic reset and judge it.
+def _run_ramp_test(controller, component_names, test_name, target, increments, *,
+                   tol_per_name, dt, default_interval, velocity_step, max_levels,
+                   seed, combo_name, direction_index, termination_only=False):
+    """Run ONE test as a single continuous episode.
 
-    Uses compare.set_fixed_command / compare.state_observation so the command
-    injection, reset, termination and fall detection match compare.py exactly.
-    Statistics (mean, RMSE, stability, convergence) use ONLY the evaluation
-    window, i.e. the steps after the settling phase.
+    Protocol (matches how the robot is actually commanded, not a step input):
+      1. reset the environment once, at the start of the test;
+      2. right after the reset set every command to zero ([0, 0, ...]) and hold
+         it for one full `increment_interval`;
+      3. then, every `increment_interval` seconds, raise ONLY the tested
+         component(s) by the configured *_inc (sign-aware), clamped exactly at
+         the target, never overshooting.
+    The interval is read from the test's own dict (never hardcoded); time is
+    measured in simulated steps (`increment_interval / dt`), not wall-clock.
+
+    Each command level is judged over the tail of its plateau (after the robot
+    has had time to respond); the ramp stops at the first level the controller
+    can no longer hold. Command injection / reset / fall detection match
+    compare.py exactly. Returns (point_rows, summary_row, trace_rows), where the
+    trace has one row per simulation step with the progressive command applied.
     """
     import jax
     import jax.numpy as jnp
 
     from compare import set_fixed_command, state_observation
 
+    num = len(component_names)
     residual = controller["uses_policy"]
-    num_components = len(component_names)
-    command_jax = jnp.asarray(command_vec, dtype=jnp.float32)
-    zero_action = jnp.zeros((1, controller["action_size"]), dtype=jnp.float32)
+    name = controller["name"]
     get_obs_fn = controller["get_obs_fn"]
+    zero_action = jnp.zeros((1, controller["action_size"]), dtype=jnp.float32)
 
-    # Deterministic reset: same seed for every point isolates the effect of the
-    # command and stops one command's failure from leaking into the next.
+    def _pin(state, cmd_jax):
+        """Pin the command for this step. `set_fixed_command` only overrides
+        `target_command`; the env's live `command` still starts at the RANDOM
+        value drawn in reset() and only relaxes toward the target at 5%/step. A
+        slew-limited controller absorbs that residual command, but the un-slewed
+        (pre-tuning) baseline is driven by it and tips over before the ramp even
+        begins — so the test never actually starts at [0,0,0]. Pinning the live
+        `command` too makes every level exactly the commanded value from the
+        first step, identically for every controller."""
+        state = set_fixed_command(state, cmd_jax, baseline=not residual)
+        info = dict(state.info)
+        info["command"] = cmd_jax[None, :]
+        return state.replace(info=info)
+
+    interval = _increment_interval(increments, default_interval)
+    interval_steps = max(1, int(round(interval / dt)))
+    # Measure over the tail of each plateau (skip ~first half as the transient
+    # right after the increment), so the mean reflects the settled response.
+    meas_start = interval_steps - max(1, interval_steps // 2)
+    levels = _level_schedule(component_names, target, increments, velocity_step,
+                             max_levels)
+    tol = np.array([tol_per_name[n] for n in component_names], dtype=np.float64)
+
+    # --- single deterministic reset for the whole test; first command is zero ---
     state = controller["reset_fn"](jax.random.PRNGKey(seed)[None, :])
-    state = set_fixed_command(state, command_jax, baseline=not residual)
+    state = _pin(state, jnp.zeros(num, dtype=jnp.float32))
     state = state.replace(obs=get_obs_fn(state.data, state.info, zero_action))
-
     rng = jax.random.PRNGKey(seed + 10_000)
-    total_steps = settling_steps + eval_steps
-    eval_measured: list[np.ndarray] = []
-    terminated = False
-    fell = False
-    finite = True
 
-    for step_index in range(total_steps):
-        state = set_fixed_command(state, command_jax, baseline=not residual)
-        state = state.replace(
-            obs=get_obs_fn(state.data, state.info, state.info["last_act"])
-        )
-        if residual:
-            rng, action_rng = jax.random.split(rng)
-            action, _ = controller["policy_fn"](state_observation(state), action_rng)
-            action = action[None, :]
+    point_rows, trace_rows = [], []
+    last_valid = np.zeros(num)
+    last_valid_measured = np.zeros(num)   # measured_mean of that same last valid level
+    found_valid = False
+    reached_target = False
+    final_status = "VALID"
+    global_step = 0
+    print(f"[{name}] {test_name}  (interval {interval:.2f}s, "
+          f"{len(levels) - 1} increment levels)")
+
+    for level_index, level_cmd in enumerate(levels):
+        level_cmd = np.asarray(level_cmd, dtype=np.float64)
+        command_jax = jnp.asarray(level_cmd, dtype=jnp.float32)
+        is_zero = float(np.linalg.norm(level_cmd)) <= 1e-12
+        eval_measured: list[np.ndarray] = []
+        terminated = fell = False
+        finite = True
+
+        for local_step in range(interval_steps):
+            state = _pin(state, command_jax)
+            state = state.replace(
+                obs=get_obs_fn(state.data, state.info, state.info["last_act"])
+            )
+            if residual:
+                rng, action_rng = jax.random.split(rng)
+                action, _ = controller["policy_fn"](state_observation(state), action_rng)
+                action = action[None, :]
+            else:
+                action = zero_action
+            state = controller["step_fn"](state, action)
+            state = _pin(state, command_jax)
+
+            done = bool(np.asarray(jax.device_get(state.done[0])))
+            up_z = float(np.asarray(jax.device_get(controller["upvector_fn"](state.data)[0])))
+            velocity = np.asarray(
+                jax.device_get(controller["velocity_fn"](state.data)[0]), dtype=np.float64
+            )
+            if not np.all(np.isfinite(velocity)):
+                finite = False
+            if up_z < 0.0:
+                fell = True
+            if done:
+                terminated = True
+
+            # Log the progressive command actually applied at this step.
+            trace_rows.append(
+                [name, combo_name, direction_index, level_index,
+                 global_step, f"{global_step * dt:.4f}"]
+                + [f"{v:.6f}" for v in level_cmd]
+                + [f"{v:.6f}" for v in velocity]
+                + [f"{up_z:.6f}", int(done), int(fell)]
+            )
+            global_step += 1
+
+            if local_step >= meas_start:
+                eval_measured.append(velocity)
+            if done or fell or (not finite):
+                break
+
+        survived = (not terminated) and (not fell) and finite
+        if eval_measured:
+            window = np.asarray(eval_measured, dtype=np.float64)
+            measured_mean = np.nanmean(window, axis=0)
+            rmse = np.sqrt(np.nanmean((window - level_cmd[None, :]) ** 2, axis=0))
         else:
-            action = zero_action
-
-        state = controller["step_fn"](state, action)
-        state = set_fixed_command(state, command_jax, baseline=not residual)
-
-        done = bool(np.asarray(jax.device_get(state.done[0])))
-        up_z = float(np.asarray(jax.device_get(controller["upvector_fn"](state.data)[0])))
-        velocity = np.asarray(
-            jax.device_get(controller["velocity_fn"](state.data)[0]), dtype=np.float64
+            measured_mean = np.full(num, np.nan)
+            rmse = np.full(num, np.nan)
+        converged = (
+            survived and bool(np.all(np.isfinite(rmse))) and bool(np.all(rmse <= tol))
+        )
+        stable = survived
+        # --term: validity is survival only (RMSE ignored but still computed/saved);
+        # default: survival AND tracking (RMSE within tolerance).
+        valid = stable if termination_only else (stable and converged)
+        validity_mode = "termination_only" if termination_only else "tracking"
+        status = "VALID" if valid else (
+            "FALL" if fell else "TERM" if terminated else
+            "NAN" if not finite else "NOCONV"
         )
 
-        if not np.all(np.isfinite(velocity)):
-            finite = False
-        if up_z < 0.0:
-            fell = True
-        if done:
-            terminated = True
-        if step_index >= settling_steps:
-            eval_measured.append(velocity)
-        if done or fell or (not finite):
+        # The zero level only settles the robot at standstill: it is not a
+        # velocity point, so it is kept in the trace but not in the points CSV.
+        if not is_zero:
+            point_rows.append(
+                [name, combo_name, direction_index]
+                + [f"{v:.6f}" for v in level_cmd]
+                + [f"{v:.6f}" for v in measured_mean]
+                + [f"{v:.6f}" for v in rmse]
+                + [f"{float(np.linalg.norm(level_cmd)):.6f}",
+                   int(stable), int(fell), int(terminated), int(converged),
+                   int(finite), int(valid),
+                   f"{interval:.3f}", f"{len(eval_measured) * dt:.3f}",
+                   validity_mode]
+            )
+            cmd_text = " ".join(f"{n}={c:+.2f}" for n, c in zip(component_names, level_cmd))
+            print(f"       t={global_step * dt:5.1f}s  cmd {cmd_text} | {status}")
+
+        if is_zero:
+            if not survived:               # a fall while merely standing aborts it
+                final_status = status
+                break
+            continue
+        if valid:
+            last_valid = level_cmd.copy()
+            last_valid_measured = np.asarray(measured_mean, dtype=np.float64).copy()
+            found_valid = True
+            reached_target = bool(np.allclose(level_cmd, target))
+        else:
+            final_status = status
+            reached_target = False
             break
 
-    survived = (not terminated) and (not fell) and finite
-    if eval_measured:
-        window = np.asarray(eval_measured, dtype=np.float64)
-        measured_mean = np.nanmean(window, axis=0)
-        command = np.asarray(command_vec, dtype=np.float64)
-        rmse = np.sqrt(np.nanmean((window - command[None, :]) ** 2, axis=0))
-    else:
-        measured_mean = np.full(num_components, np.nan)
-        rmse = np.full(num_components, np.nan)
-
-    tol = np.array([tol_per_name[name] for name in component_names], dtype=np.float64)
-    converged = (
-        survived
-        and bool(np.all(np.isfinite(rmse)))
-        and bool(np.all(rmse <= tol))
+    summary_row = (
+        [name, combo_name, direction_index]
+        + [f"{v:.6f}" for v in last_valid]
+        + [f"{v:.6f}" for v in last_valid_measured]   # measured_mean at that level
+        + [f"{float(np.linalg.norm(last_valid)):.6f}",
+           int(reached_target), int(found_valid),
+           f"{interval:.3f}", f"{interval_steps * dt:.3f}",
+           "termination_only" if termination_only else "tracking"]
     )
-    stable = survived
-    valid = stable and converged
-    return dict(
-        measured_mean=measured_mean, rmse=rmse, stable=stable, fell=fell,
-        terminated=terminated, converged=converged, finite=finite, valid=valid,
-    )
+    last_text = " ".join(f"{n}={c:+.2f}" for n, c in zip(component_names, last_valid))
+    tail = "" if final_status == "VALID" else f"   | stopped: {final_status}"
+    print(f"       last valid {last_text}{tail}\n"
+          "-------------------------------")
+    return point_rows, summary_row, trace_rows
 
 
 def run_search(controller, component_names, args):
-    """March toward each named target in MAX_VELOCITY_TARGETS, recording every
-    tested point and the last valid one per target."""
-    import time
+    """Ramp toward each target in MAX_VELOCITY_TARGETS within a single episode
+    per test (see _run_ramp_test), recording every command level, the last valid
+    one, and a per-step trace of the progressive command applied.
+
+    Returns (point_rows, summary_rows, trace_rows)."""
     import compare
 
     env_name = compare._NAME_SHORTCUTS.get(args.name.lower(), args.name)
@@ -589,11 +795,8 @@ def run_search(controller, component_names, args):
 
     tol_per_name = _tol_per_name(component_names, args)
     dt = controller["dt"]
-    settling_steps = max(1, int(round(args.settling_time / dt)))
-    eval_steps = max(1, int(round(args.evaluation_time / dt)))
 
-    point_rows, summary_rows = [], []
-    controller_name = controller["name"]
+    point_rows, summary_rows, trace_rows = [], [], []
     combo_counter: dict[str, int] = {}
 
     for test_name, target, increments in tests:
@@ -603,86 +806,19 @@ def run_search(controller, component_names, args):
         direction_index = combo_counter.get(combo_name, 0)
         combo_counter[combo_name] = direction_index + 1
 
-        commands = _march_targets(component_names, target, increments, args.velocity_step)
-        last_valid = np.zeros(len(component_names))
-        found_valid = False
-        reached_target = False
-        last_read = np.full(len(component_names), np.nan)   # <-- aggiungi
-        target_start = time.perf_counter()  
-
-        for command in commands:
-            point_start = time.perf_counter()
-            result = evaluate_command(
-                controller, command, settling_steps=settling_steps,
-                eval_steps=eval_steps, seed=args.seed,
-                component_names=component_names, tol_per_name=tol_per_name,
-            )
-            point_seconds = time.perf_counter() - point_start
-
-            point_rows.append(
-                [controller_name, combo_name, direction_index]
-                + [f"{v:.6f}" for v in command]
-                + [f"{v:.6f}" for v in result["measured_mean"]]
-                + [f"{v:.6f}" for v in result["rmse"]]
-                + [f"{float(np.linalg.norm(command)):.6f}",
-                   int(result["stable"]), int(result["fell"]),
-                   int(result["terminated"]), int(result["converged"]),
-                   int(result["finite"]), int(result["valid"]),
-                   f"{args.settling_time:.3f}", f"{args.evaluation_time:.3f}"]
-            )
-
-            cmd_text = " ".join(f"{n}={c:+.2f}" for n, c in zip(component_names, command))
-            status = "VALID" if result["valid"] else (
-                "FALL" if result["fell"] else
-                "TERM" if result["terminated"] else
-                "NAN" if not result["finite"] else "NOCONV"
-            )
-            if command is commands[0]:
-                print(f"[{controller_name}] {test_name}")
-            print(f"       cmd  {cmd_text} | {status}")
-
-            # keep the data for the final summary lines
-            last_read = result["measured_mean"]
-            final_status = status                 # <-- aggiungi
-            final_command = command 
-
-            if result["valid"]:
-                last_valid = command.copy()
-                found_valid = True
-                reached_target = bool(np.allclose(command, target))
-            else:
-                reached_target = False
-                break
-
-        target_seconds = time.perf_counter() - target_start
-        read_text = " ".join(f"{n}={m:+.2f}" for n, m in zip(component_names, last_read))
-        last_text = " ".join(f"{n}={c:+.2f}" for n, c in zip(component_names, last_valid))
-        minutes, secs = divmod(int(round(target_seconds)), 60)
-        if final_status != "VALID":
-            reached_text = " ".join(
-                f"{n}={c:+.2f}" for n, c in zip(component_names, final_command)
-            )
-            summary_line += (
-                f"   | {final_status} at {reached_text}"
-                f" after {minutes:02d}:{secs:02d}"
-            )
-        print(
-            f"       read {read_text}\n"
-            f"{summary_line}\n"
-            f"       elapsed {minutes:02d}:{secs:02d}\n"
-            f"       time {datetime.now().strftime('%H:%M:%S')}\n"
-            "-------------------------------"
+        p_rows, s_row, t_rows = _run_ramp_test(
+            controller, component_names, test_name, target, increments,
+            tol_per_name=tol_per_name, dt=dt,
+            default_interval=args.increment_interval,
+            velocity_step=args.velocity_step, max_levels=args.max_levels,
+            seed=args.seed, combo_name=combo_name, direction_index=direction_index,
+            termination_only=getattr(args, "term", False),
         )
+        point_rows.extend(p_rows)
+        summary_rows.append(s_row)
+        trace_rows.extend(t_rows)
 
-        summary_rows.append(
-            [controller_name, combo_name, direction_index]
-            + [f"{v:.6f}" for v in last_valid]
-            + [f"{float(np.linalg.norm(last_valid)):.6f}",
-               int(reached_target), int(found_valid),
-               f"{args.settling_time:.3f}", f"{args.evaluation_time:.3f}"]
-        )
-
-    return point_rows, summary_rows
+    return point_rows, summary_rows, trace_rows
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Plotting (numpy + matplotlib only, reads exclusively from CSVs)
@@ -931,6 +1067,46 @@ def _plot_histogram(folder, controller_name, names, summary, single):
     plt.close(fig)
 
 
+def plot_command_ramps(folder: Path, controller_name: str, names: list[str],
+                        trace: list[dict]) -> None:
+    """Staircase plot: for each test, the progressive command applied vs
+    simulated time (step function) with the measured velocity overlaid. Reads
+    only the per-step trace CSV, so it shows exactly what was commanded."""
+    if not trace:
+        return
+    color = CONTROLLER_COLORS.get(controller_name, "tab:blue")
+    combos: list[str] = []
+    for row in trace:
+        if row["combination"] not in combos:
+            combos.append(row["combination"])
+
+    for combo in combos:
+        rows = [r for r in trace if r["combination"] == combo]
+        if not rows:
+            continue
+        t = np.array([float(r["t_sim_s"]) for r in rows])
+        fig, axis = plt.subplots(figsize=(8, 4.5))
+        for name in names:
+            cmd = np.array([float(r[f"{name}_command"]) for r in rows])
+            meas = np.array([float(r[f"{name}_measured"]) for r in rows])
+            # Only draw components that are actually exercised in this test.
+            if np.max(np.abs(cmd)) <= 1e-9:
+                continue
+            line = axis.step(t, cmd, where="post", lw=2.0,
+                             label=f"{name} command [{_units_for(name)}]")[0]
+            axis.plot(t, meas, lw=1.0, alpha=0.6, color=line.get_color(),
+                      label=f"{name} measured")
+        axis.set_xlabel("simulated time [s]")
+        axis.set_ylabel("command / measured")
+        axis.set_title(f"{controller_name} - progressive command ramp - {combo}")
+        axis.grid(True, alpha=0.3)
+        axis.legend(loc="best", fontsize=8)
+        fig.tight_layout()
+        safe = combo.replace("+", "_")
+        fig.savefig(folder / f"command_ramp_{safe}.png", dpi=160, bbox_inches="tight")
+        plt.close(fig)
+
+
 def plot_comparison(mv_dir: Path, names: list[str],
                     controller_data: dict[str, tuple[list, list]]) -> None:
     """Overlay every controller. Reads only the per-controller CSVs already
@@ -1083,6 +1259,9 @@ def regenerate_plots(mv_dir: Path, no_e2e: bool) -> None:
     for controller, (points, summary) in controller_data.items():
         folder = mv_dir / f"{controller}_velocities"
         plot_controller_envelopes(folder, controller, names, points, summary)
+        trace_path = folder / f"{controller}_trace.csv"
+        if trace_path.exists():
+            plot_command_ramps(folder, controller, names, _read_csv_dicts(trace_path))
     plot_comparison(mv_dir, names, controller_data)
     print(f"Plots regenerated from CSVs in: {mv_dir}")
 
@@ -1103,11 +1282,26 @@ def main() -> None:
         return
 
     controllers, names, _units, comparison_dir = build_controllers(args)
-    mv_dir = comparison_dir / "max_velocities"
+
+    if args.term:
+        # --term writes to a dedicated sibling of plots/max_velocities, so the
+        # normal (tracking) results are never overwritten.
+        mv_dir = (Path(__file__).resolve().parent
+                  / "analysis_lite3" / "plots" / "srbd_term")
+        print("[validity] mode = termination_only (--term): a command level is "
+              "VALID iff the robot SURVIVES it (no fall / termination / NaN); the "
+              "RMSE / convergence criterion is IGNORED (RMSE still saved).")
+    else:
+        mv_dir = comparison_dir / "max_velocities"
+        print("[validity] mode = tracking: a command level is VALID iff it "
+              "survives AND its RMSE stays within tolerance.")
+    mv_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[output] writing results to: {mv_dir}")
 
     try:
         import compare
-        compare.copy_joystick_source(controllers[0]["env"], comparison_dir)
+        compare.copy_joystick_source(controllers[0]["env"],
+                                     mv_dir if args.term else comparison_dir)
     except Exception as error:  # non-fatal: the snapshot is a convenience only.
         print(f"[WARN] could not copy joystick source: {error}")
 
@@ -1118,15 +1312,19 @@ def main() -> None:
         folder = mv_dir / f"{controller_name}_velocities"
         folder.mkdir(parents=True, exist_ok=True)
         print(f"\n=== Searching envelope: {controller_name} ===")
-        points, summary = run_search(controller, names, args)
+        points, summary, trace = run_search(controller, names, args)
         _write_csv(folder / f"{controller_name}_points.csv",
                    _points_header(names), points)
         _write_csv(folder / f"{controller_name}_summary.csv",
                    _summary_header(names), summary)
+        _write_csv(folder / f"{controller_name}_trace.csv",
+                   _trace_header(names), trace)
         controller_data[controller_name] = (
             _read_csv_dicts(folder / f"{controller_name}_points.csv"),
             _read_csv_dicts(folder / f"{controller_name}_summary.csv"),
         )
+        plot_command_ramps(folder, controller_name, names,
+                           _read_csv_dicts(folder / f"{controller_name}_trace.csv"))
         global_summary.extend(summary)
 
     (mv_dir / "comparison").mkdir(parents=True, exist_ok=True)

@@ -19,6 +19,7 @@ class MPCState:
     foot_ref_dot : jax.Array
     grf          : jax.Array
     contact      : jax.Array
+    cmd_filt     : jax.Array   # rate-limited velocity reference (last applied command)
     X0           : jax.Array
     U0           : jax.Array
     V0           : jax.Array
@@ -34,6 +35,20 @@ class BatchedMPCControllerWrapper:
         self.config = config
         self.mpc_frequency = config.mpc_frequency
         self.shift = int(1 / (config.dt * config.mpc_frequency))
+
+        # Per-tick slew bound on the velocity reference (run() executes at
+        # mpc_frequency). Unset in a config -> jnp.inf -> the clip is a no-op,
+        # so robots without these keys behave exactly as before.
+        dt_cmd = 1.0 / config.mpc_frequency
+        self._max_dv = getattr(config, "max_lin_acc", jnp.inf) * dt_cmd
+        self._max_dw = getattr(config, "max_yaw_acc", jnp.inf) * dt_cmd
+
+        # Feed-forward gain on the linear-velocity reference. The SRBD tracks
+        # with a steady ~15% deficit (measured vx ~= 0.85 * commanded across the
+        # whole speed range), so a command of 1.0 lands at ~0.85 m/s. Pre-scaling
+        # the linear reference compensates the deficit: gain ~= 1/0.85 makes
+        # commanded 1.0 track ~1.0. Configs without the key get 1.0 (no change).
+        self._vel_gain = getattr(config, "vel_ref_gain", 1.0)
 
         model = mujoco.MjModel.from_xml_path(config.model_path)
         mjx_model = mjx.put_model(model)
@@ -68,14 +83,29 @@ class BatchedMPCControllerWrapper:
         ct = jnp.tile(cfg.timer_t.reshape(1, -1), (n, 1))
         z3 = jnp.zeros((n, 3*cfg.n_contact))
         zc = jnp.ones((n, cfg.n_contact))
-        return MPCState(contact_time=ct, liftoff=z3, foot_ref=z3, foot_ref_dot=z3, grf=z3, contact=zc, X0=self._X0_init, U0=self._U0_init, V0=self._V0_init)
+        # Command starts at rest so the first step ramps up from zero.
+        cmd0 = jnp.zeros((n, 7))
+        return MPCState(contact_time=ct, liftoff=z3, foot_ref=z3, foot_ref_dot=z3, grf=z3, contact=zc, cmd_filt=cmd0, X0=self._X0_init, U0=self._U0_init, V0=self._V0_init)
 
     def run(self, state: MPCState, x0, input, foot_pos, contact) -> MPCState:
         cfg = self.config
 
+        # Feed-forward gain (compensate the steady-state velocity deficit) on the
+        # linear command (vx, vy at indices 0,1); yaw and height pass through.
+        tgt = input.at[:, :2].set(input[:, :2] * self._vel_gain)
+
+        # Rate-limit the velocity reference: bound how much the linear command
+        # (tgt[:3]) and the yaw-rate command (tgt[5]) may change per tick. This
+        # turns a step command from standstill into an internal ramp; the other
+        # entries (height at index 6) pass through unchanged.
+        prev = state.cmd_filt
+        cmd = tgt
+        cmd = cmd.at[:, :3].set(prev[:, :3] + jnp.clip(tgt[:, :3] - prev[:, :3], -self._max_dv, self._max_dv))
+        cmd = cmd.at[:, 5].set(prev[:, 5] + jnp.clip(tgt[:, 5] - prev[:, 5], -self._max_dw, self._max_dw))
+
         new_contact, new_ct = self._timer_run(cfg.duty_factor, cfg.step_freq, state.contact_time, 1.0 / cfg.mpc_frequency)
 
-        reference, parameter, new_liftoff, new_frd = self._ref_gen(t_timer=new_ct, x=x0, foot=foot_pos, input=input, contact=contact, liftoff=state.liftoff)
+        reference, parameter, new_liftoff, new_frd = self._ref_gen(t_timer=new_ct, x=x0, foot=foot_pos, input=cmd, contact=contact, liftoff=state.liftoff)
 
         new_foot_ref = parameter[:, 0, 4:]
         new_frd      = new_frd[:, 0, :]
@@ -90,7 +120,7 @@ class BatchedMPCControllerWrapper:
         new_V0  = jnp.concatenate([V[:, s:, :], jnp.tile(V[:, -1:, :], (1, s, 1))], axis=1)
         new_grf = U[:, 0, :]
 
-        return MPCState(contact_time=new_ct, liftoff=new_liftoff, foot_ref=new_foot_ref, foot_ref_dot=new_frd, grf=new_grf, contact=new_contact, X0=new_X0, U0=new_U0, V0=new_V0)
+        return MPCState(contact_time=new_ct, liftoff=new_liftoff, foot_ref=new_foot_ref, foot_ref_dot=new_frd, grf=new_grf, contact=new_contact, cmd_filt=cmd, X0=new_X0, U0=new_U0, V0=new_V0)
 
     def whole_body_run(self, state: MPCState, qpos, qvel):
         return self._whole_body(qpos, qvel, state.grf, state.foot_ref, state.foot_ref_dot, state.contact)

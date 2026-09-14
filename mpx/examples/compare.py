@@ -2,14 +2,14 @@
 
 The environment is selected with --name (default: the Lite3 joystick env). The
 script runs one continuous sequence (five seconds per fixed command) for the
-baseline, residual policy, and optional end-to-end policy. It saves tracking
-data, one CSV plus individual plots for every reward term, and one complete
-video per controller:
+baseline and residual policy, plus the end-to-end policy only when --use-e2e is
+passed. It saves tracking data, one CSV plus individual plots for every reward
+term, and one complete video per controller:
 
     <run>/baseline/rewards/<test>_rewards.csv
     <run>/baseline/rewards/<test>/<reward>.png
     <run>/residual/rewards/...
-    <run>/end_to_end/rewards/...             # unless --no-e2e
+    <run>/end_to_end/rewards/...             # only with --use-e2e
     <run>/compare_rewards/<test>/<reward>_comparison.png
 
 The whole sequence is repeated on every scene in DEFAULT_SCENES, so <test> above
@@ -28,8 +28,8 @@ Examples:
     python compare.py --load 20260907_101530
     python compare.py --load saved/my_run
     python compare.py --load final
-    python compare.py --load --load-e2e saved/my_e2e_run
-    python compare.py --load --no-e2e
+    python compare.py --load --use-e2e
+    python compare.py --load --use-e2e --load-e2e saved/my_e2e_run
 """
 
 from __future__ import annotations
@@ -58,6 +58,11 @@ from brax.training.agents.ppo import networks as ppo_networks
 from brax.training.agents.sac import networks as sac_networks
 
 import train_srbd
+
+
+# Wall-clock reference for every "elapsed" report: the moment this script
+# started, so the reports show total time rather than per-test time.
+SCRIPT_START_TIME = time.monotonic()
 
 
 # Short aliases for the environments this script can evaluate, mirroring the
@@ -155,9 +160,12 @@ DEFAULT_SCENES = ("flat_terrain", "rough_terrain", "perlin_terrain")
 #   "<test>__<scene>" so their outputs stay apart. See _normalize_tests.
 TESTS = {
     "Lite3JoystickFlatTerrain": (
-        ("vx_1p5", np.array([1.5, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
         ("vx_1p0", np.array([1.0, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p5", np.array([1.5, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0", np.array([2.0, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
         ("vy_0p4", np.array([0.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vy_0p6", np.array([0.0, 0.6, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vy_0p8", np.array([0.0, 0.8, 0.0], dtype=np.float32), DEFAULT_SCENES),
         ("wz_0p6", np.array([0.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
         ("vx_1p0_vy_0p4", np.array([1.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENES),
         ("vx_1p0_wz_0p6", np.array([1.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
@@ -165,13 +173,15 @@ TESTS = {
         ("vx_0p5_then_0", np.array([[0.5, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
     ),
     "TitaJoystickFlatTerrain": (
+        ("vx_1p0", np.array([1.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
         ("vx_1p5", np.array([1.5, 0.0], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0", np.array([2.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
         ("wz_0p6", np.array([0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
         ("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p0_then_0", np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p0_wz_0p4_then_0", np.array([[2.0, 0.4], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_3p0_then_0", np.array([[3.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
         ("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
         ("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
     )
@@ -278,7 +288,7 @@ def _normalize_tests(tests: tuple, default_scene: str) -> tuple:
     )
 
     return tuple(
-        (f"{name}__{scene}", command, scene)
+        (f"{scene}__{name}", command, scene)
         for scene in ordered_scenes
         for name, command, scenes in declared
         if scene in scenes
@@ -385,7 +395,7 @@ def create_comparison_video(
     fps: float,
     total_blocks: int,
 ) -> None:
-    """Create normal-speed and x2 slow 2x2 time-synchronized videos."""
+    """Create normal-speed and x2 slow time-synchronized comparison videos."""
     layout = {
         "baseline": (0, 0),
         "residual": (0, 1),
@@ -396,6 +406,10 @@ def create_comparison_video(
         for name, path in video_paths.items()
         if path.exists()
     }
+
+    # Use one row for baseline/residual and two rows when E2E is present.
+    num_rows = 2 if "end_to_end" in readers else 1
+
     normal_writer = imageio.get_writer(
         output_path,
         fps=fps,
@@ -433,18 +447,26 @@ def create_comparison_video(
                     continue
 
             canvas = np.zeros(
-                (2 * tile_height, 2 * tile_width, 3), dtype=np.uint8
+                (num_rows * tile_height, 2 * tile_width, 3),
+                dtype=np.uint8,
             )
             for name, frame in current_frames.items():
                 row, column = layout[name]
                 if frame.shape[:2] != (tile_height, tile_width):
                     frame = np.asarray(
                         Image.fromarray(frame).resize(
-                            (tile_width, tile_height), Image.Resampling.BILINEAR
+                            (tile_width, tile_height),
+                            Image.Resampling.BILINEAR,
                         )
                     )
-                y0, x0 = row * tile_height, column * tile_width
-                canvas[y0:y0 + tile_height, x0:x0 + tile_width] = frame[:, :, :3]
+
+                y0 = row * tile_height
+                x0 = column * tile_width
+                canvas[
+                    y0:y0 + tile_height,
+                    x0:x0 + tile_width,
+                ] = frame[:, :, :3]
+
             normal_writer.append_data(canvas)
             slow_writer.append_data(canvas)
     finally:
@@ -455,7 +477,6 @@ def create_comparison_video(
 
     print(f"Combined comparison video saved to: {output_path}")
     print(f"Slow combined comparison video saved to: {slow_output_path}")
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -495,9 +516,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--no-e2e",
+        "--use-e2e",
         action="store_true",
-        help="Skip the end-to-end evaluation and compare only baseline/residual.",
+        help="Also evaluate the end-to-end policy. Off by default: only "
+             "baseline and residual are compared unless this flag is passed.",
     )
     parser.add_argument(
         "--ckpt-dir",
@@ -587,8 +609,20 @@ def save_tracking_plot(
                 label="reset / command change" if reset_index == 0 else None,
             )
         rmse = float(np.sqrt(np.mean((measured[:, index] - commands[:, index]) ** 2)))
+        # Error mean +- std over the non-frozen samples (error = measured - command).
+        # Using the error, not the raw signal, keeps this meaningful across an
+        # in-episode command change (the command is per-timestep). Same window as
+        # the RMSE and consistent with it: RMSE^2 = mean_err^2 + std_err^2
+        # (bias^2 + variance). Frozen rows (post-fall) are excluded.
+        valid = ~frozen_mask
+        err = (measured[:, index] - commands[:, index])
+        err = err[valid] if valid.any() else err
+        err_mean, err_std = float(np.mean(err)), float(np.std(err))
         axis.set_ylabel(f"{label} [{unit}]")
-        axis.set_title(f"{label} tracking - RMSE {rmse:.3f} {unit}")
+        axis.set_title(
+            f"{label} tracking - RMSE {rmse:.3f} {unit} | "
+            f"err mean {err_mean:+.3f} ± std {err_std:.3f} {unit}"
+        )
         axis.grid(True, alpha=0.3)
         axis.legend(loc="best")
     axes[-1].set_xlabel("Time [s]")
@@ -830,13 +864,22 @@ def compare_graphics(
                 command = data[command_key]
                 frozen = data["frozen"] > 0.5
                 rmse = float(np.sqrt(np.mean((velocity - command) ** 2)))
+                # Error mean +- std (error = measured - command), robust to an
+                # in-episode command change; RMSE^2 = mean_err^2 + std_err^2.
+                valid = ~frozen
+                err = velocity - command
+                err = err[valid] if np.any(valid) else err
+                err_mean, err_std = float(np.mean(err)), float(np.std(err))
 
                 axis.plot(
                     time_data,
                     np.where(frozen, np.nan, velocity),
                     color=color,
                     linewidth=1.3,
-                    label=f"{controller_name} - RMSE {rmse:.3f}",
+                    label=(
+                        f"{controller_name} - RMSE {rmse:.3f} | "
+                        f"err mean {err_mean:+.3f} ± std {err_std:.3f}"
+                    ),
                 )
             axis.set_ylabel(ylabel)
             axis.grid(True, alpha=0.3)
@@ -959,7 +1002,13 @@ def run_sequence(
     camera = mujoco.MjvCamera()
     mujoco.mjv_defaultCamera(camera)
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-    camera.distance = 4.0
+    # Stand-off from the tracked robot (metres, world units). Was 4 m, which sat
+    # too close on every scene and cropped the (larger) Tita out of frame. 6.5 m
+    # gives every robot some breathing room. NB: a fixed metre value is used on
+    # purpose -- model.stat.extent is unreliable here because the rough/perlin
+    # scenes set a terrain-sized <statistic extent> (4-5 m), which would push the
+    # camera out to 30 m and shrink the robot to a dot.
+    camera.distance = 6.5
     camera.elevation = -15.0
     camera.azimuth = 135.0
 
@@ -969,15 +1018,11 @@ def run_sequence(
     last_q = None
     last_dq = None
 
-    # Wall-clock report at every test boundary: how long the test just finished
-    # took, and the time of day it ended.
-    test_start_time = time.monotonic()
-
+    # Wall-clock report at every test boundary: how long the run has taken in
+    # total so far, and the time of day the test ended.
     def print_test_time(test_index: int) -> None:
-        nonlocal test_start_time
         now = time.monotonic()
-        minutes, seconds = divmod(int(now - test_start_time), 60)
-        test_start_time = now
+        minutes, seconds = divmod(int(now - SCRIPT_START_TIME), 60)
         print(
             f"  [{controller_name}] test {tests[test_index][0]} "
             f"| elapsed {minutes:02d}:{seconds:02d} | "
@@ -1255,6 +1300,50 @@ def main() -> None:
 
     reset_fn, step_fn, velocity_fn, _ = get_runtime(env, _default_scene(env_name))
 
+    # The MPC baseline needs the residual branch OFF, not just a zero action.
+    # In a residual env a ZERO action is NOT the plain MPC: at action 0 the
+    # low-level controller still adds tau_rl = residual_gain*(Kp*(default_pose-q)
+    # - Kd*qvel), a PD holding the joints at the nominal stance, on top of
+    # tau_mpc. That stance PD fights the MPC gait and, at a 1 m/s forward command,
+    # collapses tracking and tips the base over (measured on this env: vx command
+    # 1.0 -> 0.01 m/s and roll -> pi, i.e. a fall), while the same MPC with the
+    # branch disabled tracks 1.02 m/s upright -- matching the standalone
+    # lite3_srbd.py baseline. The env exposes this exact gate via
+    # config.enable_residual (-> _residual_gain 0.0); use a dedicated env so the
+    # residual/e2e modes keep their branch on. Setting it on _config too keeps it
+    # off across a scene reload (load_scene re-__init__s from _config).
+    from mujoco_playground import registry as _registry
+    try:
+        baseline_env = _registry.load(
+            env_name,
+            config_overrides={
+                "residual_config.enabled": False,
+            },
+        )
+    except (KeyError, AttributeError, ValueError, TypeError):
+        baseline_env = _registry.load(
+            env_name,
+            config_overrides={
+                "enable_residual": False,
+            },
+        )
+    mark_scene(baseline_env, _default_scene(env_name))
+    # enable_residual=False sets _residual_gain=0.0 in the env __init__ (and, being
+    # baked into _config, it survives a scene reload, which re-__init__s from
+    # _config). Assert it so a silent config change can't let the stance PD back
+    # into the "baseline". _residual_gain is captured by the jit built just below.
+    try:
+        residual_enabled = baseline_env._config.residual_config.enabled
+    except AttributeError:
+        residual_enabled = baseline_env._config.enable_residual
+
+    assert not residual_enabled, (
+        "baseline env still has the residual branch enabled"
+    )
+    baseline_reset_fn, baseline_step_fn, baseline_velocity_fn, _ = get_runtime(
+        baseline_env, _default_scene(env_name)
+    )
+
     comparison_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     comparison_dir = (
         Path(run_dir) / f"comparison_{env_name}" / comparison_timestamp
@@ -1262,11 +1351,12 @@ def main() -> None:
     comparison_dir.mkdir(parents=True, exist_ok=True)
     copy_joystick_source(env, comparison_dir)
     controller_modes = [
-        ("baseline", env, reset_fn, step_fn, velocity_fn, policy_fn, False),
+        ("baseline", baseline_env, baseline_reset_fn, baseline_step_fn,
+         baseline_velocity_fn, policy_fn, False),
         ("residual", env, reset_fn, step_fn, velocity_fn, policy_fn, True),
     ]
 
-    if not args.no_e2e:
+    if args.use_e2e:
         _, e2e_env, _ = train_srbd.make_envs(env_name=e2e_env_name)
         mark_scene(e2e_env, _default_scene(e2e_env_name))
         e2e_base_dir = os.path.join(args.ckpt_dir, e2e_env_name)

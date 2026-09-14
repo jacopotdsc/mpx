@@ -1,0 +1,7 @@
+# Rumore diagnostico non necessario nel version control (visibile solo su disco).
+# Nasconde i file NON tracciati con queste estensioni dentro analysis_lite3/.
+# Nota: i file gia' in staging non vengono nascosti da .gitignore.
+*.err
+*.txt
+*.log
+*.json

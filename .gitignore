@@ -17,3 +17,7 @@ mpx/examples/plots/**
 #!**/checkpoints/TitaJoystickFlatTerrain/
 #!**/checkpoints/TitaJoystickFlatTerrain/saved/
 #!**/checkpoints/TitaJoystickFlatTerrain/saved/**
+*.err
+*.png
+*.log
+*.mp4
