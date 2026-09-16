@@ -30,6 +30,7 @@ Examples:
     python compare.py --load final
     python compare.py --load --use-e2e
     python compare.py --load --use-e2e --load-e2e saved/my_e2e_run
+    python compare.py --load 20260907_101530 --redo 20260907_123000
 """
 
 from __future__ import annotations
@@ -137,7 +138,7 @@ def _measured_source(name: str, index: int) -> tuple[str, int, str]:
 # Scenes the whole test sequence is repeated over, as the env's `task` names.
 # Add or remove entries to change the terrains every test is run on; each one
 # multiplies the run time, and the length of the videos, by roughly one pass.
-DEFAULT_SCENES = ("flat_terrain", "rough_terrain")#, "perlin_terrain")
+DEFAULT_SCENES = ("flat_terrain", "rough_terrain", "perlin_terrain")
 
 # Fixed command sequence to run, per environment. Each entry is a
 # (name, command) pair, optionally extended to (name, command, scene).
@@ -522,6 +523,17 @@ def parse_args() -> argparse.Namespace:
              "baseline and residual are compared unless this flag is passed.",
     )
     parser.add_argument(
+        "--redo",
+        type=str,
+        default=None,
+        metavar="COMPARISON_RUN",
+        help=(
+            "Regenerate plots from CSV files without executing environments. "
+            "The argument selects the comparison run directory inside the "
+            "checkpoint selected by --load, for example 20260907_123000."
+        ),
+    )
+    parser.add_argument(
         "--ckpt-dir",
         default="checkpoints",
         help="Checkpoint root used by train_srbd.py (default: checkpoints).",
@@ -635,6 +647,7 @@ def save_tracking_plot(
 def save_csv(
     output_path: Path,
     time_values: np.ndarray,
+    target_commands: np.ndarray,
     commands: np.ndarray,
     measured: np.ndarray,
     reset_flags: np.ndarray,
@@ -647,6 +660,7 @@ def save_csv(
     then the whole qvel as dq0 ... dq(nv-1), floating base included."""
     header = (
         ["time_s"]
+        + [f"target_{name}" for name in component_names]
         + [f"cmd_{name}" for name in component_names]
         + list(component_names)
         + ["reset", "frozen"]
@@ -656,13 +670,13 @@ def save_csv(
     with output_path.open("w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(header)
-        for time_s, command, velocity, reset, frozen, q, dq in zip(
-            time_values, commands, measured, reset_flags, frozen_flags,
+        for time_s, target, command, velocity, reset, frozen, q, dq in zip(
+            time_values, target_commands, commands, measured, reset_flags, frozen_flags,
             q_values, dq_values,
         ):
             writer.writerow(
                 (
-                    time_s, *command.tolist(), *velocity.tolist(),
+                    time_s, *target.tolist(), *command.tolist(), *velocity.tolist(),
                     int(reset), int(frozen),
                     *q.tolist(), *dq.tolist(),
                 )
@@ -842,12 +856,17 @@ def compare_graphics(
         for axis, (velocity_key, command_key, ylabel) in zip(
             axes, velocity_fields
         ):
-            baseline_data = controller_data["baseline"]
-            baseline_time = baseline_data["time_s"]
-            baseline_command = baseline_data[command_key]
+            # Use the command from the controller that remained active the longest.
+            reference_name, reference_data = max(
+                controller_data.items(),
+                key=lambda item: np.count_nonzero(item[1]["frozen"] <= 0.5),
+            )
+
+            command_time = reference_data["time_s"]
+            reference_command = reference_data[command_key]
             axis.step(
-                baseline_time,
-                baseline_command,
+                command_time,
+                reference_command,
                 where="post",
                 color="black",
                 linestyle="--",
@@ -897,6 +916,202 @@ def compare_graphics(
         plt.close(fig)
 
     print(f"Comparison graphics saved to: {output_dir}")
+
+
+def _resolve_redo_dir(
+    run_dir: str | Path,
+    env_name: str,
+    comparison_run: str,
+) -> Path:
+    """Resolve one exact comparison run inside the selected checkpoint."""
+    comparison_dir = (
+        Path(run_dir) / f"comparison_{env_name}" / comparison_run
+    )
+    if not comparison_dir.is_dir():
+        raise FileNotFoundError(
+            f"Comparison run not found: '{comparison_dir}'."
+        )
+    if not (comparison_dir / "baseline").is_dir():
+        raise FileNotFoundError(
+            f"Missing baseline directory in '{comparison_dir}'."
+        )
+    return comparison_dir
+
+
+def _tracking_layout_from_csv(comparison_dir: Path) -> tuple[list[str], list[tuple[str, str]]]:
+    """Infer command names and plot units using only a saved tracking CSV."""
+    csv_paths = sorted((comparison_dir / "baseline").glob("*.csv"))
+    if not csv_paths:
+        raise FileNotFoundError(
+            f"No baseline tracking CSV found in '{comparison_dir / 'baseline'}'."
+        )
+    data = np.atleast_1d(
+        np.genfromtxt(csv_paths[0], delimiter=",", names=True, dtype=float)
+    )
+    fields = data.dtype.names or ()
+    component_names = [
+        field.removeprefix("cmd_")
+        for field in fields
+        if field.startswith("cmd_")
+    ]
+    if not component_names:
+        raise ValueError(f"No cmd_* columns found in '{csv_paths[0]}'.")
+    component_labels = [
+        (name, _measured_source(name, index)[2])
+        for index, name in enumerate(component_names)
+    ]
+    return component_names, component_labels
+
+
+def redo_plots(
+    comparison_dir: Path,
+    env_name: str,
+    tests: tuple,
+) -> None:
+    """Regenerate every CSV-backed plot without loading an environment.
+
+    New CSVs contain target_* columns. For older CSVs, which only persisted
+    cmd_*, the filtered command is also used as the target so historical runs
+    remain usable.
+    """
+    component_names, component_labels = _tracking_layout_from_csv(comparison_dir)
+    controller_names = ["baseline", "residual"]
+    if (comparison_dir / "end_to_end").is_dir():
+        controller_names.append("end_to_end")
+
+    # Keep declaration order but avoid processing an accidentally duplicated
+    # test name twice (its CSV path is necessarily the same).
+    # The CSV files are the source of truth for --redo. Historical runs may
+    # use a different naming convention from the current _normalize_tests
+    # implementation (for example test__scene instead of scene__test), and
+    # TESTS itself may have changed after the run was produced.
+    available_test_names = {
+        path.stem
+        for path in (comparison_dir / "baseline").glob("*.csv")
+    }
+
+    # Preserve the declared execution order where possible, accepting both
+    # historical scene suffixes and current scene prefixes. Any CSV not known
+    # to the current TESTS definition is still processed afterwards.
+    ordered_test_names = []
+    for test_name, _, scene in tests:
+        candidates = [test_name]
+        scene_prefix = f"{scene}__"
+        if test_name.startswith(scene_prefix):
+            candidates.append(f"{test_name[len(scene_prefix):]}__{scene}")
+        for candidate in candidates:
+            if (
+                candidate in available_test_names
+                and candidate not in ordered_test_names
+            ):
+                ordered_test_names.append(candidate)
+                break
+    ordered_test_names.extend(
+        sorted(available_test_names.difference(ordered_test_names))
+    )
+
+    if not ordered_test_names:
+        raise FileNotFoundError(
+            f"No tracking CSV found in '{comparison_dir / 'baseline'}'."
+        )
+
+    for controller_name in controller_names:
+        controller_dir = comparison_dir / controller_name
+        complete_parts = []
+        for test_name in ordered_test_names:
+            csv_path = controller_dir / f"{test_name}.csv"
+            if not csv_path.exists():
+                print(
+                    f"[WARN] Test '{test_name}' exists for baseline but its "
+                    f"CSV is missing for {controller_name}: {csv_path}"
+                )
+                continue
+            data = np.atleast_1d(
+                np.genfromtxt(csv_path, delimiter=",", names=True, dtype=float)
+            )
+            fields = data.dtype.names or ()
+            commands = np.column_stack(
+                [data[f"cmd_{name}"] for name in component_names]
+            )
+            target_commands = np.column_stack([
+                data[f"target_{name}"]
+                if f"target_{name}" in fields else data[f"cmd_{name}"]
+                for name in component_names
+            ])
+            measured = np.column_stack(
+                [data[name] for name in component_names]
+            )
+            reset_flags = data["reset"] > 0.5
+            frozen_flags = data["frozen"] > 0.5
+            time_values = np.asarray(data["time_s"], dtype=float)
+            save_tracking_plot(
+                controller_dir / f"{test_name}_tracking.png",
+                f"{env_name} {controller_name} - {test_name}",
+                time_values,
+                target_commands,
+                commands,
+                measured,
+                reset_flags,
+                frozen_flags,
+                component_labels,
+            )
+            complete_parts.append(
+                (time_values, target_commands, commands, measured,
+                 reset_flags, frozen_flags)
+            )
+
+            rewards_csv = (
+                controller_dir / "rewards" / f"{test_name}_rewards.csv"
+            )
+            if rewards_csv.exists():
+                reward_data = np.atleast_1d(
+                    np.genfromtxt(
+                        rewards_csv, delimiter=",", names=True, dtype=float
+                    )
+                )
+                reward_names = [
+                    field for field in (reward_data.dtype.names or ())
+                    if field not in {"time_s", "frozen"}
+                ]
+                rewards = np.column_stack(
+                    [reward_data[name] for name in reward_names]
+                )
+                save_reward_plots(
+                    controller_dir / "rewards" / test_name,
+                    f"{env_name} {controller_name} - {test_name}",
+                    np.asarray(reward_data["time_s"], dtype=float),
+                    rewards,
+                    reward_data["frozen"] > 0.5,
+                    reward_names,
+                )
+
+        if complete_parts:
+            complete_time = []
+            elapsed = 0.0
+            for part in complete_parts:
+                local_time = part[0]
+                complete_time.append(local_time - local_time[0] + elapsed)
+                if len(local_time) > 1:
+                    elapsed = complete_time[-1][-1] + float(
+                        np.median(np.diff(local_time))
+                    )
+                else:
+                    elapsed = complete_time[-1][-1]
+            save_tracking_plot(
+                controller_dir / "tracking_complete.png",
+                f"{env_name} {controller_name} - complete command sequence",
+                np.concatenate(complete_time),
+                np.concatenate([part[1] for part in complete_parts]),
+                np.concatenate([part[2] for part in complete_parts]),
+                np.concatenate([part[3] for part in complete_parts]),
+                np.concatenate([part[4] for part in complete_parts]),
+                np.concatenate([part[5] for part in complete_parts]),
+                component_labels,
+            )
+
+    compare_graphics(comparison_dir, env_name, component_labels)
+    compare_rewards(comparison_dir, env_name)
+    print(f"Plots regenerated from CSV files: {comparison_dir}")
 
 
 def run_sequence(
@@ -1236,6 +1451,19 @@ def main() -> None:
     block_counts = _test_block_counts(tests)
     total_blocks = sum(block_counts)
 
+    # --redo is deliberately handled before make_envs: --load selects the
+    # checkpoint and --redo selects one exact comparison run within it. This
+    # path reads CSVs only and therefore neither creates nor steps an environment.
+    if args.redo is not None:
+        env_base_dir = os.path.join(args.ckpt_dir, env_name)
+        run_dir, _ = train_srbd._resolve_load(env_base_dir, args.load)
+        comparison_dir = _resolve_redo_dir(
+            run_dir, env_name, args.redo
+        )
+        print(f"Redoing plots from: {comparison_dir}")
+        redo_plots(comparison_dir, env_name, tests)
+        return
+
     _, env, _ = train_srbd.make_envs(env_name=env_name)
     # registry.load already built the env with the scene its name implies, so
     # record it: a test asking for that same scene must not trigger a reload.
@@ -1488,6 +1716,7 @@ def main() -> None:
                 save_csv(
                     mode_dir / f"{test_name}.csv",
                     local_time,
+                    target_commands[start:stop],
                     commands[start:stop],
                     measured[start:stop],
                     reset_flags[start:stop],
