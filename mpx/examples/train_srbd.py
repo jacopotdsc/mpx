@@ -141,8 +141,8 @@ ZERO_INIT_OUTPUT_LAYER = True # residual policy must start near zero (near-zero 
 ZERO_INIT_LOAD = False # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
-NUM_TIMESTEPS = 20_000_000
-NUM_EVALS = 10
+NUM_TIMESTEPS = 30_000_000
+NUM_EVALS = 15
 EPISODE_LENGTH = 1000
 NUM_ENVS = 1024
 DETERMINISTIC_EVAL = True  # eval usa la media della policy, non un sample rumoroso
@@ -1301,7 +1301,7 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
     header_lines = [
         "=" * 60,
         f"  {algo.upper()} Training  —  {env_name}",
-        f"  date         : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"  date         : {SCRIPT_START_TIME}",
         f"  JAX backend  : {jax.default_backend()}",
         f"  devices      : {jax.devices()}",
         f"  GPU name:    : "

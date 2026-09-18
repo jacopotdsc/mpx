@@ -11,6 +11,9 @@ term, and one complete video per controller:
     <run>/residual/rewards/...
     <run>/end_to_end/rewards/...             # only with --use-e2e
     <run>/compare_rewards/<test>/<reward>_comparison.png
+    <run>/compare_torque/<test>_comparison.png
+    <run>/compare_joint_velocity/<test>_comparison.png
+    <run>/compare_joint_position/<test>_comparison.png
 
 The whole sequence is repeated on every scene in DEFAULT_SCENES, so <test> above
 reads "<command>__<scene>", e.g. "vx_1p5__flat_terrain". The scenes are run one
@@ -178,13 +181,15 @@ TESTS = {
         ("vx_1p5", np.array([1.5, 0.0], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p0", np.array([2.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
         ("wz_0p6", np.array([0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("wz_0p8", np.array([0.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
         ("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p5_wz_0p6", np.array([1.5, 0.6], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p0_then_0", np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p0_wz_0p4_then_0", np.array([[2.0, 0.4], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        #("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
+        #("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
     )
 }
 
@@ -655,6 +660,13 @@ def save_csv(
     component_names: list[str],
     q_values: np.ndarray,
     dq_values: np.ndarray,
+    torque_values: np.ndarray,
+    actuator_force_values: np.ndarray,
+    tau_nominal_values: np.ndarray,
+    tau_residual_values: np.ndarray,
+    mpc_tau_values: np.ndarray,
+    tau_saturated_values: np.ndarray,
+    mpc_bad_values: np.ndarray,
 ) -> None:
     """The full state closes every row: the whole qpos as q0 ... q(nq-1),
     then the whole qvel as dq0 ... dq(nv-1), floating base included."""
@@ -666,19 +678,38 @@ def save_csv(
         + ["reset", "frozen"]
         + [f"q{index}" for index in range(q_values.shape[1])]
         + [f"dq{index}" for index in range(dq_values.shape[1])]
+        + [f"joint_pos_{index}" for index in range(torque_values.shape[1])]
+        + [f"joint_vel_{index}" for index in range(torque_values.shape[1])]
+        + [f"tau_total_{index}" for index in range(torque_values.shape[1])]
+        + [f"actuator_force_{index}" for index in range(torque_values.shape[1])]
+        + [f"tau_nominal_{index}" for index in range(torque_values.shape[1])]
+        + [f"tau_residual_{index}" for index in range(torque_values.shape[1])]
+        + [f"mpc_tau_{index}" for index in range(torque_values.shape[1])]
+        + ["tau_saturated_frac", "mpc_bad"]
     )
     with output_path.open("w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(header)
-        for time_s, target, command, velocity, reset, frozen, q, dq in zip(
+        for (
+            time_s, target, command, velocity, reset, frozen, q, dq,
+            torque, actuator_force, tau_nominal, tau_residual, mpc_tau,
+            tau_saturated, mpc_bad,
+        ) in zip(
             time_values, target_commands, commands, measured, reset_flags, frozen_flags,
             q_values, dq_values,
+            torque_values, actuator_force_values, tau_nominal_values,
+            tau_residual_values, mpc_tau_values, tau_saturated_values,
+            mpc_bad_values,
         ):
             writer.writerow(
                 (
                     time_s, *target.tolist(), *command.tolist(), *velocity.tolist(),
                     int(reset), int(frozen),
                     *q.tolist(), *dq.tolist(),
+                    *q[7:].tolist(), *dq[6:].tolist(),
+                    *torque.tolist(), *actuator_force.tolist(),
+                    *tau_nominal.tolist(), *tau_residual.tolist(),
+                    *mpc_tau.tolist(), tau_saturated, mpc_bad,
                 )
             )
 
@@ -918,6 +949,124 @@ def compare_graphics(
     print(f"Comparison graphics saved to: {output_dir}")
 
 
+def compare_joint_data(comparison_dir: Path, env_name: str) -> None:
+    """Compare torque, velocity and position of TITA's eight actuators.
+
+    Each figure uses four rows and two columns: left-leg joints 0..3 are in
+    the left column and right-leg joints 4..7 in the right column. Row four is
+    the wheel on each side.
+    """
+    controller_specs = [
+        ("baseline", "tab:blue"),
+        ("residual", "tab:orange"),
+    ]
+    if (comparison_dir / "end_to_end").is_dir():
+        controller_specs.append(("end_to_end", "tab:green"))
+
+    plot_specs = (
+        (
+            "compare_torque",
+            ("tau_total",),
+            "Torque [N m]",
+        ),
+        ("compare_joint_velocity", ("joint_vel",), "Velocity [rad/s]"),
+        ("compare_joint_position", ("joint_pos",), "Position [rad]"),
+    )
+    torque_styles = {
+        "tau_nominal": ("--", "nominal"),
+        "tau_residual": (":", "residual"),
+        "tau_total": ("-", "total"),
+    }
+    joint_names = ("hip", "thigh", "knee", "wheel")
+    baseline_dir = comparison_dir / "baseline"
+
+    for output_name, field_prefixes, ylabel in plot_specs:
+        output_dir = comparison_dir / output_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        missing_fields_reported = False
+
+        for baseline_csv in sorted(baseline_dir.glob("*.csv")):
+            controller_data = {}
+            for controller_name, _ in controller_specs:
+                csv_path = comparison_dir / controller_name / baseline_csv.name
+                if not csv_path.exists():
+                    continue
+                controller_data[controller_name] = np.atleast_1d(
+                    np.genfromtxt(
+                        csv_path, delimiter=",", names=True, dtype=float
+                    )
+                )
+
+            if "baseline" not in controller_data or "residual" not in controller_data:
+                continue
+            required_fields = [
+                f"{field_prefix}_{index}"
+                for field_prefix in field_prefixes
+                for index in range(8)
+            ]
+            if any(
+                field not in (data.dtype.names or ())
+                for data in controller_data.values()
+                for field in required_fields
+            ):
+                if not missing_fields_reported:
+                    print(
+                        f"[WARN] Cannot regenerate {output_name} for this run: "
+                        "the required joint fields are not present in its CSVs."
+                    )
+                    missing_fields_reported = True
+                continue
+
+            fig, axes = plt.subplots(
+                4, 2, figsize=(14, 13), sharex=True, constrained_layout=True
+            )
+            for row, joint_name in enumerate(joint_names):
+                for column, side in enumerate(("left", "right")):
+                    joint_index = row + 4 * column
+                    axis = axes[row, column]
+                    for controller_name, color in controller_specs:
+                        data = controller_data.get(controller_name)
+                        if data is None:
+                            continue
+                        frozen = data["frozen"] > 0.5
+                        for field_prefix in field_prefixes:
+                            field = f"{field_prefix}_{joint_index}"
+                            if output_name == "compare_torque":
+                                linestyle, component_name = torque_styles[
+                                    field_prefix
+                                ]
+                                label = f"{controller_name} {component_name}"
+                            else:
+                                linestyle = "-"
+                                label = controller_name
+                            axis.plot(
+                                data["time_s"],
+                                np.where(frozen, np.nan, data[field]),
+                                color=color,
+                                linestyle=linestyle,
+                                linewidth=1.2,
+                                label=label,
+                            )
+                    axis.set_title(f"{side} {joint_name}")
+                    axis.set_ylabel(ylabel)
+                    axis.grid(True, alpha=0.3)
+                    axis.legend(loc="best")
+            axes[-1, 0].set_xlabel("Time [s]")
+            axes[-1, 1].set_xlabel("Time [s]")
+            fig.suptitle(
+                f"{env_name} - {baseline_csv.stem} - "
+                f"{output_name.removeprefix('compare_').replace('_', ' ')}"
+            )
+            fig.savefig(
+                output_dir / f"{baseline_csv.stem}_comparison.png",
+                dpi=160,
+                bbox_inches="tight",
+            )
+            plt.close(fig)
+
+        print(f"{output_name} graphics saved to: {output_dir}")
+
+
 def _resolve_redo_dir(
     run_dir: str | Path,
     env_name: str,
@@ -1111,6 +1260,7 @@ def redo_plots(
 
     compare_graphics(comparison_dir, env_name, component_labels)
     compare_rewards(comparison_dir, env_name)
+    compare_joint_data(comparison_dir, env_name)
     print(f"Plots regenerated from CSV files: {comparison_dir}")
 
 
@@ -1128,24 +1278,14 @@ def run_sequence(
     component_names: list[str],
     get_runtime,
     on_scene_end=None,
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    list[str],
-    np.ndarray,
-    np.ndarray,
-]:
+) -> tuple:
     """Run the whole test sequence for one controller.
 
     `on_scene_end`, when given, is called as
     on_scene_end(scene, test_indices, results) every time the last test of a
     scene finishes -- so a scene's CSVs and plots are on disk before the next
     one starts loading, and an interrupted run keeps whatever it had already
-    completed. `results` is the same 9-tuple this function returns, holding the
+    completed. `results` is the same tuple this function returns, holding the
     series recorded so far; the test indices are absolute, so the caller slices
     it with the same offsets it would use at the end."""
     # Flatten the tests into 5-second blocks. Consecutive rows of a 2D command
@@ -1206,6 +1346,13 @@ def run_sequence(
     # base included. They close every row of the tracking CSV.
     q_values = []
     dq_values = []
+    torque_values = []
+    actuator_force_values = []
+    tau_nominal_values = []
+    tau_residual_values = []
+    mpc_tau_values = []
+    tau_saturated_values = []
+    mpc_bad_values = []
     # Use the same source as train_srbd.py --eval: that evaluator flattens
     # state.info and plots the fields below reward_terms/. These values are
     # already multiplied by reward_config.scales inside the environment.
@@ -1232,6 +1379,28 @@ def run_sequence(
     last_frame = None
     last_q = None
     last_dq = None
+    last_torque = None
+    last_actuator_force = None
+    last_tau_nominal = None
+    last_tau_residual = None
+    last_mpc_tau = None
+    last_tau_saturated = None
+    last_mpc_bad = None
+
+    def info_array(name: str, fallback: np.ndarray) -> np.ndarray:
+        """Read one batched diagnostic from state.info, or use a fallback."""
+        value = state.info.get(name)
+        if value is None:
+            return np.asarray(fallback, dtype=np.float64)
+        array = np.asarray(jax.device_get(value), dtype=np.float64)
+        return array[0] if array.ndim > np.asarray(fallback).ndim else array
+
+    def info_scalar(name: str) -> float:
+        """Read one batched scalar diagnostic, returning NaN if unavailable."""
+        value = state.info.get(name)
+        if value is None:
+            return float("nan")
+        return float(np.asarray(jax.device_get(value)).reshape(-1)[0])
 
     # Wall-clock report at every test boundary: how long the run has taken in
     # total so far, and the time of day the test ended.
@@ -1259,6 +1428,13 @@ def run_sequence(
             reward_names,
             np.asarray(q_values, dtype=np.float64),
             np.asarray(dq_values, dtype=np.float64),
+            np.asarray(torque_values, dtype=np.float64),
+            np.asarray(actuator_force_values, dtype=np.float64),
+            np.asarray(tau_nominal_values, dtype=np.float64),
+            np.asarray(tau_residual_values, dtype=np.float64),
+            np.asarray(mpc_tau_values, dtype=np.float64),
+            np.asarray(tau_saturated_values, dtype=np.float64),
+            np.asarray(mpc_bad_values, dtype=np.float64),
         )
 
     # First test of the scene currently running: the tests from here up to the
@@ -1295,6 +1471,13 @@ def run_sequence(
             measured.append(last_velocity.copy())
             q_values.append(last_q.copy())
             dq_values.append(last_dq.copy())
+            torque_values.append(last_torque.copy())
+            actuator_force_values.append(last_actuator_force.copy())
+            tau_nominal_values.append(last_tau_nominal.copy())
+            tau_residual_values.append(last_tau_residual.copy())
+            mpc_tau_values.append(last_mpc_tau.copy())
+            tau_saturated_values.append(last_tau_saturated)
+            mpc_bad_values.append(last_mpc_bad)
             current_target_command = np.asarray(
                 command_row,
                 dtype=np.float64,
@@ -1365,6 +1548,28 @@ def run_sequence(
             q_values.append(last_q.copy())
             dq_values.append(last_dq.copy())
 
+            last_torque = info_array(
+                "tau_total",
+                np.asarray(jax.device_get(state.data.ctrl[0])),
+            )
+            last_actuator_force = np.asarray(
+                jax.device_get(state.data.actuator_force[0]),
+                dtype=np.float64,
+            )
+            nan_torque = np.full_like(last_torque, np.nan, dtype=np.float64)
+            last_tau_nominal = info_array("tau_nominal", nan_torque)
+            last_tau_residual = info_array("tau_residual", nan_torque)
+            last_mpc_tau = info_array("mpc_tau", nan_torque)
+            last_tau_saturated = info_scalar("tau_saturated_frac")
+            last_mpc_bad = info_scalar("mpc_bad")
+            torque_values.append(last_torque.copy())
+            actuator_force_values.append(last_actuator_force.copy())
+            tau_nominal_values.append(last_tau_nominal.copy())
+            tau_residual_values.append(last_tau_residual.copy())
+            mpc_tau_values.append(last_mpc_tau.copy())
+            tau_saturated_values.append(last_tau_saturated)
+            mpc_bad_values.append(last_mpc_bad)
+
             render_data.qpos[:] = last_q
             render_data.qvel[:] = last_dq
             mujoco.mj_forward(env.mj_model, render_data)
@@ -1414,6 +1619,13 @@ def run_sequence(
             last_frame = None
             last_q = None
             last_dq = None
+            last_torque = None
+            last_actuator_force = None
+            last_tau_nominal = None
+            last_tau_residual = None
+            last_mpc_tau = None
+            last_tau_saturated = None
+            last_mpc_bad = None
         # else, if block_finished within the same test: only the command target
         # changes (applied at the top of the next step); the robot state and any
         # frozen/terminated status are preserved -- no reset.
@@ -1465,6 +1677,7 @@ def main() -> None:
         return
 
     _, env, _ = train_srbd.make_envs(env_name=env_name)
+    env._config.randomize_reset = 0.0
     # registry.load already built the env with the scene its name implies, so
     # record it: a test asking for that same scene must not trigger a reload.
     mark_scene(env, _default_scene(env_name))
@@ -1546,6 +1759,7 @@ def main() -> None:
             env_name,
             config_overrides={
                 "residual_config.enabled": False,
+                "randomize_reset": 0.0,
             },
         )
     except (KeyError, AttributeError, ValueError, TypeError):
@@ -1553,6 +1767,7 @@ def main() -> None:
             env_name,
             config_overrides={
                 "enable_residual": False,
+                "randomize_reset": 0.0,
             },
         )
     mark_scene(baseline_env, _default_scene(env_name))
@@ -1586,6 +1801,7 @@ def main() -> None:
 
     if args.use_e2e:
         _, e2e_env, _ = train_srbd.make_envs(env_name=e2e_env_name)
+        e2e_env._config.randomize_reset = 0.0
         mark_scene(e2e_env, _default_scene(e2e_env_name))
         e2e_base_dir = os.path.join(args.ckpt_dir, e2e_env_name)
         e2e_run_dir, e2e_suffix = train_srbd._resolve_load(
@@ -1702,6 +1918,13 @@ def main() -> None:
                 reward_names,
                 q_values,
                 dq_values,
+                torque_values,
+                actuator_force_values,
+                tau_nominal_values,
+                tau_residual_values,
+                mpc_tau_values,
+                tau_saturated_values,
+                mpc_bad_values,
             ) = results
             for test_index in test_indices:
                 test_name = tests[test_index][0]
@@ -1724,6 +1947,13 @@ def main() -> None:
                     component_names,
                     q_values[start:stop],
                     dq_values[start:stop],
+                    torque_values[start:stop],
+                    actuator_force_values[start:stop],
+                    tau_nominal_values[start:stop],
+                    tau_residual_values[start:stop],
+                    mpc_tau_values[start:stop],
+                    tau_saturated_values[start:stop],
+                    mpc_bad_values[start:stop],
                 )
                 save_tracking_plot(
                     mode_dir / f"{test_name}_tracking.png",
@@ -1767,6 +1997,13 @@ def main() -> None:
             reward_names,
             q_values,
             dq_values,
+            torque_values,
+            actuator_force_values,
+            tau_nominal_values,
+            tau_residual_values,
+            mpc_tau_values,
+            tau_saturated_values,
+            mpc_bad_values,
         ) = run_sequence(
             env=mode_env,
             controller_name=mode_name,
@@ -1816,6 +2053,7 @@ def main() -> None:
 
     compare_graphics(comparison_dir, env_name, component_labels)
     compare_rewards(comparison_dir, env_name)
+    compare_joint_data(comparison_dir, env_name)
     create_comparison_video(
         video_paths=controller_video_paths,
         source_fps=controller_video_fps,

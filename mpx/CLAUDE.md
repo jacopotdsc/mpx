@@ -34,9 +34,8 @@ So `import mpx` resolves to this directory, and everything below is relative to 
 Because of the jax 0.10 / brax 0.14 mismatch, `examples/train_srbd.py` installs a
 compatibility shim restoring `jax.device_put_replicated` — keep it when editing that file.
 
-There is **no test suite and no linter configured.** The only checked-in check is
-`diagnostics/smoke_test_a.py` (import/config sanity + short rollouts). Verify changes by
-running the relevant example.
+There is **no test suite and no linter configured.** Verify changes by running the relevant
+example end to end.
 
 Run examples directly (first run JITs for >1 min; headless rendering auto-selects EGL when
 `$DISPLAY` is unset):
@@ -47,10 +46,12 @@ python examples/srbd_quad.py         # SRBD MPC
 python examples/train_srbd.py --name tita          # PPO train TITA (residual policy)
 python examples/train_srbd.py --eval --name tita [--headless]
 python examples/compare.py --name tita --load      # MPC baseline vs residual vs e2e policy
+python examples/max_velocities.py --name tita --load  # commandable-velocity envelope per controller
 ```
 
 `--name` shortcuts in `train_srbd.py`: `tita` → `TitaJoystickFlatTerrain`,
-`titae2e` → `TitaJoystickE2EFlatTerrain`, `go1`, `aliengo`. Any other value is passed
+`titae2e` → `TitaJoystickE2EFlatTerrain`, `go1` → `Go1JoystickFlatTerrain`,
+`aliengo` → `AliengoJoystickE2EFlatTerrain`. Any other value is passed
 straight to the MuJoCo Playground registry. Checkpoints land in
 `examples/checkpoints/<env_name>/<timestamp>/` (a few TITA runs are force-tracked in git via
 `.gitignore` exceptions).
@@ -90,7 +91,14 @@ the wrapper. Note `config_srbd.py` currently targets Aliengo geometry.
 - `examples/compare.py` — runs MPC baseline, residual policy, and (optional) end-to-end policy
   through fixed-command sequences; emits per-reward-term CSVs, plots, and videos. Reads the
   command layout from the env's `command_config.names` rather than hardcoding it.
+- `examples/max_velocities.py` — sweeps commands outward from zero per direction to find the
+  velocity envelope each controller can actually track. Reuses `compare.py`/`train_srbd.py` for
+  env selection, checkpoint loading, fixed-command injection and fall detection, so tracking
+  semantics match the comparison pipeline.
 
 **Analysis / diagnosis artifacts** (read for context on the TITA training investigation):
-`TITA_PPO_TRAINING_DIAGNOSIS.md` (this dir) and `examples/analysis_training/` (experiment
-plans, reward-vs-tracking studies, aggregated results).
+- `TITA_PPO_TRAINING_DIAGNOSIS.md` (this dir) and `examples/analysis_training/` (experiment
+  plans, reward-vs-tracking studies, aggregated results).
+- `analysis_tita/` (at the **git root**, untracked): `perlin_fix/` (Perlin heightfield-terrain
+  fix investigation, report + reproduction scripts) and `diagnostics/` (heightfield profiling
+  and PNG-inspection scripts).
