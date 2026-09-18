@@ -141,8 +141,8 @@ ZERO_INIT_OUTPUT_LAYER = True # residual policy must start near zero (near-zero 
 ZERO_INIT_LOAD = False # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
-NUM_TIMESTEPS = 30_000_000
-NUM_EVALS = 15
+NUM_TIMESTEPS = 20_000_000
+NUM_EVALS = 10
 EPISODE_LENGTH = 1000
 NUM_ENVS = 1024
 DETERMINISTIC_EVAL = True  # eval usa la media della policy, non un sample rumoroso

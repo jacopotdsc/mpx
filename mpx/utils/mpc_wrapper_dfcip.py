@@ -257,7 +257,7 @@ class BatchedMPCControllerWrapper:
         self._X0_init = jnp.tile(X0, (n_env, 1, 1))
         self._D0_init = jnp.tile(D0, (n_env, 1, 1))
         
-    def init_state(self) -> MPCState:
+    def init_state(self, x0: jax.Array | None = None) -> MPCState:
         n, cfg = self.n_env, self.config
         # Same shapes as the state returned by run(): a/ac_z/alpha (n_env,), grf (n_env, 6).
         a = jnp.full((n,), cfg.u_ref[0])
@@ -265,9 +265,20 @@ class BatchedMPCControllerWrapper:
         alpha = jnp.full((n,), cfg.u_ref[2])
         grf = jnp.tile(cfg.u_ref[3:], (n, 1))
 
+        if x0 is None:
+            X_init = self._X0_init
+        else:
+            x0 = jnp.asarray(x0)
+            if x0.ndim == 1:
+                x0 = x0[None, :]
+            X_init = jnp.broadcast_to(
+                x0[:, None, :],
+                (self.n_env, self.config.N + 1, self.config.nx),
+            )
+
         return MPCState(
             sol= ControlSol(a=a, ac_z=ac_z, alpha=alpha, grf=grf),
-            X0_shifted=self._X0_init, 
+            X0_shifted=X_init, 
             U0_shifted=self._U0_init,
             D0_shifted=self._D0_init,
             X_prediction=self._X0_init,

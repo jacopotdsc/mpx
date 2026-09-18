@@ -184,12 +184,19 @@ TESTS = {
         ("wz_0p8", np.array([0.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
         ("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
         ("vx_1p5_wz_0p6", np.array([1.5, 0.6], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p0_then_0", np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_0p5_wz_0p8_then_vx_0p5_wz_n0p8", np.array([[0.5, 0.8], [0.5, -0.8]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p0_wz_0p8_then_vx_1p0_wz_n0p8", np.array([[1.0, 0.8], [1.0, -0.8]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p5_wz_0p8_then_vx_1p5_wz_n0p8", np.array([[1.5, 0.8], [1.5, -0.8]], dtype=np.float32), DEFAULT_SCENES),
         ("vx_2p0_wz_0p4_then_0", np.array([[2.0, 0.4], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
-        #("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
-        #("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p5_then_vx_1p0_wz_0p8", np.array([[2.5, 0.0], [1.0, 0.8]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0_wz_0p8_then_vx_1p0_wz_n0p8", np.array([[2.0, 0.8], [1.0, -0.8]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p5_wz_0p8_then_vx_0p5_wz_n0p8", np.array([[2.5, 0.8], [0.5, -0.8]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_1p0_wz_0p8_then_vx_n1p0_wz_n0p8", np.array([[1.0, 0.8], [-1.0, -0.8]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_2p0_wz_0p8_then_vx_n1p0_wz_n0p8", np.array([[2.0, 0.8], [-1.0, -0.8]], dtype=np.float32), DEFAULT_SCENES),
+        ("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
     )
 }
 
@@ -354,12 +361,17 @@ def _to_e2e_name(env_name: str) -> str:
 def add_video_hud(
     frame: np.ndarray,
     controller_name: str,
+    target_command: np.ndarray,
     command: np.ndarray,
     measured: np.ndarray,
     component_names: list[str],
     frozen: bool = False,
 ) -> np.ndarray:
     """Overlay controller name and command/measured velocity values."""
+    target_text = "   ".join(
+        f"{name}={value:+.2f}"
+        for name, value in zip(component_names, np.asarray(target_command))
+    )
     command_text = "   ".join(
         f"{name}={value:+.2f}"
         for name, value in zip(component_names, np.asarray(command))
@@ -378,6 +390,7 @@ def add_video_hud(
     status = " | TERMINATED - FRAME FROZEN" if frozen else ""
     lines = (
         f"{controller_name.upper()}{status}",
+        f"TARGET   {target_text}",
         f"COMMAND  {command_text}",
         f"ACTUAL   {measured_text}",
     )
@@ -1580,6 +1593,7 @@ def run_sequence(
                 renderer.render().copy(),
                 controller_name=controller_name,
                 command=current_command,
+                target_command=current_target_command,
                 measured=last_velocity,
                 component_names=component_names,
                 frozen=terminated,
@@ -1677,7 +1691,7 @@ def main() -> None:
         return
 
     _, env, _ = train_srbd.make_envs(env_name=env_name)
-    env._config.randomize_reset = 0.0
+    env._config.randomize_reset = 1.0
     # registry.load already built the env with the scene its name implies, so
     # record it: a test asking for that same scene must not trigger a reload.
     mark_scene(env, _default_scene(env_name))
@@ -1759,7 +1773,7 @@ def main() -> None:
             env_name,
             config_overrides={
                 "residual_config.enabled": False,
-                "randomize_reset": 0.0,
+                "randomize_reset": 1.0,
             },
         )
     except (KeyError, AttributeError, ValueError, TypeError):
@@ -1767,7 +1781,7 @@ def main() -> None:
             env_name,
             config_overrides={
                 "enable_residual": False,
-                "randomize_reset": 0.0,
+                "randomize_reset": 1.0,
             },
         )
     mark_scene(baseline_env, _default_scene(env_name))
@@ -1801,7 +1815,7 @@ def main() -> None:
 
     if args.use_e2e:
         _, e2e_env, _ = train_srbd.make_envs(env_name=e2e_env_name)
-        e2e_env._config.randomize_reset = 0.0
+        e2e_env._config.randomize_reset = 1.0
         mark_scene(e2e_env, _default_scene(e2e_env_name))
         e2e_base_dir = os.path.join(args.ckpt_dir, e2e_env_name)
         e2e_run_dir, e2e_suffix = train_srbd._resolve_load(
