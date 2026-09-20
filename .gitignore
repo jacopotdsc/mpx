@@ -10,6 +10,7 @@ c_generated_code/
 *.pkl
 *.egg*info/
 mpx/examples/plots/**
+mpx/examples/analysis_training/**
 **/checkpoints/**
 !**/checkpoints/TitaJoystickE2EFlatTerrain/
 !**/checkpoints/TitaJoystickE2EFlatTerrain/saved/

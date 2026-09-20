@@ -42,6 +42,7 @@ import argparse
 import csv
 import os
 import re
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -162,42 +163,73 @@ DEFAULT_SCENES = ("flat_terrain", "rough_terrain", "perlin_terrain")
 #   It takes either a single scene name or a list of them (DEFAULT_SCENES): with
 #   a list the test is repeated once per scene, and each repetition is named
 #   "<test>__<scene>" so their outputs stay apart. See _normalize_tests.
+LITE3_FLAT_TERRAIN_TESTS = (
+    ("vx_1p0", np.array([1.0, 0.0, 0.0], dtype=np.float32)),
+    ("vx_1p5", np.array([1.5, 0.0, 0.0], dtype=np.float32)),
+    ("vx_2p0", np.array([2.0, 0.0, 0.0], dtype=np.float32)),
+    ("vy_0p4", np.array([0.0, 0.4, 0.0], dtype=np.float32)),
+    ("vy_0p6", np.array([0.0, 0.6, 0.0], dtype=np.float32)),
+    ("vy_0p8", np.array([0.0, 0.8, 0.0], dtype=np.float32)),
+    ("wz_0p6", np.array([0.0, 0.0, 0.6], dtype=np.float32)),
+    ("vx_1p0_vy_0p4", np.array([1.0, 0.4, 0.0], dtype=np.float32)),
+    ("vx_1p0_wz_0p6", np.array([1.0, 0.0, 0.6], dtype=np.float32)),
+    ("vy_0p4_wz_0p6", np.array([0.0, 0.4, 0.6], dtype=np.float32)),
+    ("vx_0p5_then_0", np.array([[0.5, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)),
+)
+
+LITE3_ROUGH_TERRAIN_TESTS = LITE3_FLAT_TERRAIN_TESTS
+LITE3_PERLIN_TERRAIN_TESTS = LITE3_FLAT_TERRAIN_TESTS
+
+TITA_FLAT_TERRAIN_TESTS = (
+    ("vx_1p0", np.array([1.0, 0.0], dtype=np.float32)),
+    ("vx_1p5", np.array([1.5, 0.0], dtype=np.float32)),
+    ("vx_2p0", np.array([2.0, 0.0], dtype=np.float32)),
+    ("wz_0p6", np.array([0.0, 0.6], dtype=np.float32)),
+    ("wz_0p8", np.array([0.0, 0.8], dtype=np.float32)),
+    ("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32)),
+    ("vx_1p5_wz_0p6", np.array([1.5, 0.6], dtype=np.float32)),
+    ("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32)),
+    ("vx_2p0_then_0", np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32)),
+    ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32)),
+    ("vx_0p5_wz_0p8_then_vx_0p5_wz_n0p8", np.array([[0.5, 0.8], [0.5, -0.8]], dtype=np.float32)),
+    ("vx_1p0_wz_0p8_then_vx_1p0_wz_n0p8", np.array([[1.0, 0.8], [1.0, -0.8]], dtype=np.float32)),
+    ("vx_1p5_wz_0p8_then_vx_1p5_wz_n0p8", np.array([[1.5, 0.8], [1.5, -0.8]], dtype=np.float32)),
+    ("vx_2p0_wz_0p4_then_0", np.array([[2.0, 0.4], [0.0, 0.0]], dtype=np.float32)),
+    ("vx_2p5_then_vx_1p0_wz_0p8", np.array([[2.5, 0.0], [1.0, 0.8]], dtype=np.float32)),
+    ("vx_2p0_wz_0p8_then_vx_1p0_wz_n0p8", np.array([[2.0, 0.8], [1.0, -0.8]], dtype=np.float32)),
+    ("vx_2p5_wz_0p8_then_vx_0p5_wz_n0p8", np.array([[2.5, 0.8], [0.5, -0.8]], dtype=np.float32)),
+    ("vx_1p0_wz_0p8_then_vx_n1p0_wz_n0p8", np.array([[1.0, 0.8], [-1.0, -0.8]], dtype=np.float32)),
+    ("vx_2p0_wz_0p8_then_vx_n1p0_wz_n0p8", np.array([[2.0, 0.8], [-1.0, -0.8]], dtype=np.float32)),
+    ("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32)),
+)
+
+TITA_ROUGH_TERRAIN_TESTS = TITA_FLAT_TERRAIN_TESTS
+TITA_PERLIN_TERRAIN_TESTS = (
+    ("vx_0p2", np.array([0.2, 0.0], dtype=np.float32)),
+    ("vx_0p5", np.array([0.5, 0.0], dtype=np.float32)),
+    ("vx_0p7", np.array([0.7, 0.0], dtype=np.float32)),
+    ("vx_1p0", np.array([1.0, 0.0], dtype=np.float32)),
+    ("wz_0p5", np.array([0.0, 0.5], dtype=np.float32)),
+    ("vx_0p5_wz_0p3", np.array([0.5, 0.3], dtype=np.float32)),
+    ("vx_0p7_wz_0p3", np.array([0.7, 0.3], dtype=np.float32)),
+    ("vx_1p0_wz_0p3", np.array([1.0, 0.3], dtype=np.float32)),
+    ("vx_1p0_then_0", np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.float32)),
+    ("vx_0p5_wz_0p3_then_vx_0p5_wz_n0p3", np.array([[0.5, 0.3], [0.5, -0.3]], dtype=np.float32)),
+    ("vx_0p7_wz_0p3_then_vx_0p7_wz_n0p3", np.array([[0.7, 0.3], [0.7, -0.3]], dtype=np.float32)),
+    ("vx_1p0_wz_0p3_then_vx_0p5_wz_n0p3", np.array([[1.0, 0.3], [0.5, -0.3]], dtype=np.float32)),
+)
+
 TESTS = {
-    "Lite3JoystickFlatTerrain": (
-        ("vx_1p0", np.array([1.0, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_1p5", np.array([1.5, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p0", np.array([2.0, 0.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("vy_0p4", np.array([0.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("vy_0p6", np.array([0.0, 0.6, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("vy_0p8", np.array([0.0, 0.8, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("wz_0p6", np.array([0.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_1p0_vy_0p4", np.array([1.0, 0.4, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_1p0_wz_0p6", np.array([1.0, 0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
-        ("vy_0p4_wz_0p6", np.array([0.0, 0.4, 0.6], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_0p5_then_0", np.array([[0.5, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
-    ),
-    "TitaJoystickFlatTerrain": (
-        ("vx_1p0", np.array([1.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_1p5", np.array([1.5, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p0", np.array([2.0, 0.0], dtype=np.float32), DEFAULT_SCENES),
-        ("wz_0p6", np.array([0.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
-        ("wz_0p8", np.array([0.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_1p5_wz_0p6", np.array([1.5, 0.6], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p0_then_0", np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_0p5_wz_0p8_then_vx_0p5_wz_n0p8", np.array([[0.5, 0.8], [0.5, -0.8]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_1p0_wz_0p8_then_vx_1p0_wz_n0p8", np.array([[1.0, 0.8], [1.0, -0.8]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_1p5_wz_0p8_then_vx_1p5_wz_n0p8", np.array([[1.5, 0.8], [1.5, -0.8]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p0_wz_0p4_then_0", np.array([[2.0, 0.4], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p5_then_vx_1p0_wz_0p8", np.array([[2.5, 0.0], [1.0, 0.8]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p0_wz_0p8_then_vx_1p0_wz_n0p8", np.array([[2.0, 0.8], [1.0, -0.8]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p5_wz_0p8_then_vx_0p5_wz_n0p8", np.array([[2.5, 0.8], [0.5, -0.8]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_1p0_wz_0p8_then_vx_n1p0_wz_n0p8", np.array([[1.0, 0.8], [-1.0, -0.8]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_2p0_wz_0p8_then_vx_n1p0_wz_n0p8", np.array([[2.0, 0.8], [-1.0, -0.8]], dtype=np.float32), DEFAULT_SCENES),
-        ("vx_3p0_wz_0p8_then_0", np.array([[3.0, 0.8], [0.0, 0.0]], dtype=np.float32), DEFAULT_SCENES),
-    )
+    "Lite3JoystickFlatTerrain": {
+        "flat_terrain": LITE3_FLAT_TERRAIN_TESTS,
+        "rough_terrain": LITE3_ROUGH_TERRAIN_TESTS,
+        "perlin_terrain": LITE3_PERLIN_TERRAIN_TESTS,
+    },
+    "TitaJoystickFlatTerrain": {
+        "flat_terrain": TITA_FLAT_TERRAIN_TESTS,
+        "rough_terrain": TITA_ROUGH_TERRAIN_TESTS,
+        "perlin_terrain": TITA_PERLIN_TERRAIN_TESTS,
+    },
 }
 
 
@@ -272,39 +304,19 @@ def _scene_tuple(scene, default_scene: str) -> tuple[str, ...]:
     return scenes
 
 
-def _normalize_tests(tests: tuple, default_scene: str) -> tuple:
-    """Expand every TESTS entry into one (name, command, scene) test per scene.
+def _normalize_tests(tests_by_scene: dict[str, tuple]) -> tuple:
+    """Convert the terrain-grouped test configuration to the internal format.
 
-    An entry naming several scenes (DEFAULT_SCENES) is run once on each of them,
-    as a separate episode named "<test>__<scene>". The suffix is what keeps the
-    repetitions apart: test names are the file names of every CSV, plot and
-    reward folder this script writes, so without it each scene would overwrite
-    the previous one's results.
+    TESTS is declared as:
+        environment -> terrain -> ((test_name, command), ...)
 
-    The expansion is grouped by scene rather than by test. Switching scene
-    reloads the MuJoCo model and re-jits reset/step (see ensure_scene), so
-    running all the tests of one scene before moving to the next keeps that to a
-    single reload per scene instead of one per test."""
-    declared = [
-        (
-            test[0],
-            test[1],
-            _scene_tuple(test[2] if len(test) > 2 else None, default_scene),
-        )
-        for test in tests
-    ]
-
-    # Scene order = order of first appearance across the entries, so the run
-    # follows the order DEFAULT_SCENES is written in.
-    ordered_scenes = list(
-        dict.fromkeys(scene for _, _, scenes in declared for scene in scenes)
-    )
-
+    The rest of the script continues to receive:
+        (terrain__test_name, command, terrain)
+    """
     return tuple(
-        (f"{scene}__{name}", command, scene)
-        for scene in ordered_scenes
-        for name, command, scenes in declared
-        if scene in scenes
+        (f"{scene}__{test_name}", command, scene)
+        for scene, scene_tests in tests_by_scene.items()
+        for test_name, command in scene_tests
     )
 
 
@@ -357,6 +369,44 @@ def _to_e2e_name(env_name: str) -> str:
         return env_name
     return env_name.replace("Joystick", "JoystickE2E")
 
+def readable_test_name(test_name: str, wrap_commands: bool = False) -> tuple[str, str]:
+    """Return readable terrain and command."""
+    first, second = test_name.split("__", 1)
+
+    if first.endswith("_terrain"):
+        terrain, command = first, second
+    else:
+        command, terrain = first, second
+
+    blocks = []
+    for block in command.split("_then_"):
+        values = {"vx": 0.0, "wz": 0.0}
+
+        for name, value in re.findall(r"(vx|wz)_(n?\d+(?:p\d+)?)", block):
+            values[name] = float(value.replace("n", "-").replace("p", "."))
+
+        blocks.append(f"vx={values['vx']:.1f} m/s, wz={values['wz']:.1f} rad/s")
+
+    readable_command = blocks[0]
+    for index, block in enumerate(blocks[1:], start=1):
+        separator = "\nto " if wrap_commands and index % 2 == 0 else " to "
+        readable_command += separator + block
+
+    return terrain.replace("_", " "), readable_command
+
+
+def readable_title(
+    env_name: str,
+    test_name: str,
+    plot_type: str,
+) -> str:
+    terrain, command = readable_test_name(test_name, wrap_commands=True)
+
+    return (
+        f"{env_name} - {terrain} - "
+        f"{plot_type.replace('_', ' ')}\n"
+        f"{command}"
+    )
 
 def add_video_hud(
     frame: np.ndarray,
@@ -406,6 +456,259 @@ def add_video_hud(
         )
     return np.asarray(image)
 
+def _write_comparison_video_index(
+    output_path: Path,
+    tests: tuple,
+    controller_test_success: dict[str, dict[str, bool]],
+) -> None:
+    """Write test start times and controller completion tables."""
+    lines = []
+    elapsed_seconds = 0.0
+    current_scene = None
+
+    for full_test_name, command, scene in tests:
+        if scene != current_scene:
+            if lines:
+                lines.append("")
+            lines.append(scene.replace("_", " ").upper())
+            current_scene = scene
+
+        _, test_name = readable_test_name(full_test_name)
+
+        minutes, seconds = divmod(int(round(elapsed_seconds)), 60)
+        hours, minutes = divmod(minutes, 60)
+
+        lines.append(
+            f"{test_name} - {hours:02d}:{minutes:02d}:{seconds:02d}"
+        )
+
+        block_count = np.atleast_2d(
+            np.asarray(command, dtype=np.float32)
+        ).shape[0]
+        elapsed_seconds += TEST_DURATION_SECONDS * block_count
+
+    lines.extend(["", "TEST COMPLETION"])
+
+    controller_names = [
+        name
+        for name in ("baseline", "residual", "end_to_end")
+        if name in controller_test_success
+    ]
+
+    scenes = list(dict.fromkeys(scene for _, _, scene in tests))
+
+    for scene in scenes:
+        scene_tests = [
+            (full_test_name, full_test_name.removeprefix(f"{scene}__"))
+            for full_test_name, _, test_scene in tests
+            if test_scene == scene
+        ]
+
+        headers = ["task", *controller_names]
+        rows = []
+
+        for full_test_name, _ in scene_tests:
+            _, test_name = readable_test_name(full_test_name)
+            row = [test_name]
+
+            for controller_name in controller_names:
+                completed = controller_test_success[controller_name].get(
+                    full_test_name,
+                    False,
+                )
+                row.append("V" if completed else "")
+
+            rows.append(row)
+
+        totals = [
+            str(
+                sum(
+                    controller_test_success[controller_name].get(
+                        full_test_name,
+                        False,
+                    )
+                    for full_test_name, _ in scene_tests
+                )
+            )
+            for controller_name in controller_names
+        ]
+
+        total_row = ["TOTAL", *totals]
+
+        all_rows = [*rows, total_row]
+        column_widths = [
+            max(
+                len(headers[column_index]),
+                max(
+                    len(row[column_index])
+                    for row in all_rows
+                ),
+            )
+            for column_index in range(len(headers))
+        ]
+
+        separator = "-+-".join("-" * width for width in column_widths)
+
+        lines.extend(["", scene.replace("_", " ").upper()])
+        lines.append(
+            " | ".join(
+                value.ljust(column_widths[index])
+                for index, value in enumerate(headers)
+            )
+        )
+        lines.append(separator)
+
+        for row in rows:
+            lines.append(
+                " | ".join(
+                    value.ljust(column_widths[index])
+                    for index, value in enumerate(row)
+                )
+            )
+
+        lines.append(separator)
+        lines.append(
+            " | ".join(
+                value.ljust(column_widths[index])
+                for index, value in enumerate(total_row)
+            )
+        )
+
+    index_path = output_path.with_name("comparison_video.txt")
+    index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Comparison video index saved to: {index_path}")
+
+def _build_realtime_tracking_tile(
+    comparison_graphics_dir: Path,
+    tests: tuple,
+    time_seconds: float,
+    tile_width: int,
+    tile_height: int,
+    plot_cache: dict[str, np.ndarray],
+) -> np.ndarray:
+    """Reveal the comparison curves progressively with simulation time."""
+    elapsed = 0.0
+    selected_test_name = None
+    selected_duration = 0.0
+    local_time = 0.0
+
+    for test_name, command, _ in tests:
+        block_count = np.atleast_2d(
+            np.asarray(command, dtype=np.float32)
+        ).shape[0]
+        test_duration = TEST_DURATION_SECONDS * block_count
+
+        if time_seconds < elapsed + test_duration:
+            selected_test_name = test_name
+            selected_duration = test_duration
+            local_time = time_seconds - elapsed
+            break
+
+        elapsed += test_duration
+
+    if selected_test_name is None and tests:
+        selected_test_name, command, _ = tests[-1]
+        block_count = np.atleast_2d(
+            np.asarray(command, dtype=np.float32)
+        ).shape[0]
+        selected_duration = TEST_DURATION_SECONDS * block_count
+        local_time = selected_duration
+
+    if selected_test_name is None:
+        return np.full(
+            (tile_height, tile_width, 3),
+            255,
+            dtype=np.uint8,
+        )
+
+    if selected_test_name not in plot_cache:
+        plot_path = (
+            comparison_graphics_dir
+            / f"{selected_test_name}_comparison.png"
+        )
+
+        if not plot_path.exists():
+            print(f"[WARN] Missing comparison plot for video: {plot_path}")
+            plot_cache[selected_test_name] = np.full(
+                (tile_height, tile_width, 3),
+                255,
+                dtype=np.uint8,
+            )
+        else:
+            plot_image = Image.open(plot_path).convert("RGB")
+            plot_image = plot_image.resize(
+                (tile_width, tile_height),
+                Image.Resampling.LANCZOS,
+            )
+            plot_cache[selected_test_name] = np.asarray(plot_image)
+
+    full_plot = Image.fromarray(
+        plot_cache[selected_test_name].copy()
+    ).convert("RGBA")
+    tile = full_plot.copy()
+    draw = ImageDraw.Draw(tile, "RGBA")
+
+    # Approximate Matplotlib axes area after resizing.
+    plot_left = int(0.10 * tile_width)
+    plot_right = int(0.97 * tile_width)
+    plot_top = int(0.08 * tile_height)
+    plot_bottom = int(0.91 * tile_height)
+
+    progress = np.clip(
+        local_time / max(selected_duration, 1e-9),
+        0.0,
+        1.0,
+    )
+    cursor_x = int(
+        plot_left + progress * (plot_right - plot_left)
+    )
+
+    # Hide future data with an opaque white region.
+    # The already elapsed part of the original plot remains visible.
+    if cursor_x < plot_right:
+        draw.rectangle(
+            (
+                cursor_x,
+                plot_top,
+                plot_right,
+                plot_bottom,
+            ),
+            fill=(255, 255, 255, 255),
+        )
+
+    # Current-time cursor.
+    draw.line(
+        (
+            cursor_x,
+            plot_top,
+            cursor_x,
+            plot_bottom,
+        ),
+        fill=(255, 0, 0, 255),
+        width=3,
+    )
+
+    try:
+        font = ImageFont.truetype("DejaVuSansMono.ttf", 15)
+    except OSError:
+        font = ImageFont.load_default()
+
+    label = (
+        f"TRACKING COMPARISON | "
+        f"t={local_time:.2f}/{selected_duration:.2f} s"
+    )
+    draw.rectangle(
+        (0, 0, tile_width, 25),
+        fill=(0, 0, 0, 190),
+    )
+    draw.text(
+        (8, 5),
+        label,
+        fill=(255, 255, 255, 255),
+        font=font,
+    )
+
+    return np.asarray(tile.convert("RGB"))
 
 def create_comparison_video(
     video_paths: dict[str, Path],
@@ -413,6 +716,8 @@ def create_comparison_video(
     output_path: Path,
     fps: float,
     total_blocks: int,
+    tests: tuple,
+    controller_test_success: dict[str, dict[str, bool]],
 ) -> None:
     """Create normal-speed and x2 slow time-synchronized comparison videos."""
     layout = {
@@ -448,6 +753,8 @@ def create_comparison_video(
     )
 
     tile_width, tile_height = 640, 480
+    plot_cache: dict[str, np.ndarray] = {}
+    comparison_graphics_dir = output_path.parent
     duration_seconds = TEST_DURATION_SECONDS * total_blocks
     output_frame_count = int(round(duration_seconds * fps))
     try:
@@ -485,6 +792,22 @@ def create_comparison_video(
                     y0:y0 + tile_height,
                     x0:x0 + tile_width,
                 ] = frame[:, :, :3]
+            
+            if "end_to_end" in readers:
+                tracking_tile = _build_realtime_tracking_tile(
+                    comparison_graphics_dir=comparison_graphics_dir,
+                    tests=tests,
+                    time_seconds=time_seconds,
+                    tile_width=tile_width,
+                    tile_height=tile_height,
+                    plot_cache=plot_cache,
+                )
+
+                canvas[
+                    tile_height:2 * tile_height,
+                    tile_width:2 * tile_width,
+                ] = tracking_tile
+
 
             normal_writer.append_data(canvas)
             slow_writer.append_data(canvas)
@@ -494,6 +817,8 @@ def create_comparison_video(
         for reader in readers.values():
             reader.close()
 
+    _write_comparison_video_index(output_path, tests, controller_test_success)
+    print(f"Files txt for test summary saved to: {output_path.with_name('comparison_video.txt')}")
     print(f"Combined comparison video saved to: {output_path}")
     print(f"Slow combined comparison video saved to: {slow_output_path}")
 
@@ -764,7 +1089,13 @@ def save_reward_plots(
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         axis.set_xlabel("Time [s]")
         axis.set_ylabel("Weighted reward")
-        axis.set_title(f"{test_title} - {reward_name}")
+        title_header, separator, command = test_title.partition("\n")
+        title_header = title_header.removesuffix(" - rewards")
+
+        axis.set_title(
+            f"{title_header} - {reward_name.replace('_', ' ')}"
+            f"{separator}{command}"
+        )
         axis.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(
@@ -843,7 +1174,13 @@ def compare_rewards(comparison_dir: Path, env_name: str) -> None:
                 axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
                 axis.set_xlabel("Time [s]")
                 axis.set_ylabel("Weighted reward")
-                axis.set_title(f"{env_name} - {test_name} - {reward_name}")
+                axis.set_title(
+                    readable_title(
+                        env_name,
+                        test_name,
+                        reward_name,
+                    )
+                )
                 axis.grid(True, alpha=0.3)
                 axis.legend(loc="best")
                 fig.tight_layout()
@@ -949,8 +1286,13 @@ def compare_graphics(
             axis.legend(loc="best")
 
         axes[-1].set_xlabel("Time [s]")
-        names = " vs ".join(name for name, _ in controller_specs)
-        fig.suptitle(f"{env_name} {names} - {baseline_csv.stem}")
+        fig.suptitle(
+            readable_title(
+                env_name,
+                baseline_csv.stem,
+                "velocity tracking",
+            )
+        )
         fig.tight_layout()
         fig.savefig(
             output_dir / f"{baseline_csv.stem}_comparison.png",
@@ -961,6 +1303,169 @@ def compare_graphics(
 
     print(f"Comparison graphics saved to: {output_dir}")
 
+def _quaternion_to_roll_pitch_deg(
+    qw: np.ndarray,
+    qx: np.ndarray,
+    qy: np.ndarray,
+    qz: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert MuJoCo scalar-first quaternions to roll and pitch in degrees."""
+    quaternions = np.column_stack((qw, qx, qy, qz)).astype(float, copy=False)
+    norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+
+    valid = (
+        np.isfinite(quaternions).all(axis=1)
+        & (norms[:, 0] > 0.0)
+    )
+
+    normalized = np.full_like(quaternions, np.nan)
+    normalized[valid] = quaternions[valid] / norms[valid]
+
+    w, x, y, z = normalized.T
+
+    roll = np.arctan2(
+        2.0 * (w * x + y * z),
+        1.0 - 2.0 * (x * x + y * y),
+    )
+    pitch = np.arcsin(
+        np.clip(2.0 * (w * y - z * x), -1.0, 1.0)
+    )
+
+    return np.rad2deg(roll), np.rad2deg(pitch)
+
+
+def compare_attitude(comparison_dir: Path, env_name: str) -> None:
+    """Compare base roll and pitch for all available controllers."""
+    controller_specs = [
+        ("baseline", "tab:blue"),
+        ("residual", "tab:orange"),
+    ]
+
+    if (comparison_dir / "end_to_end").is_dir():
+        controller_specs.append(("end_to_end", "tab:green"))
+
+    output_dir = comparison_dir / "compare_attitude"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    required_fields = {
+        "time_s",
+        "frozen",
+        "q3",
+        "q4",
+        "q5",
+        "q6",
+    }
+    missing_fields_reported = False
+
+    baseline_dir = comparison_dir / "baseline"
+
+    for baseline_csv in sorted(baseline_dir.glob("*.csv")):
+        controller_data = {}
+
+        for controller_name, _ in controller_specs:
+            csv_path = (
+                comparison_dir
+                / controller_name
+                / baseline_csv.name
+            )
+
+            if not csv_path.exists():
+                print(f"[WARN] Missing attitude comparison CSV: {csv_path}")
+                continue
+
+            data = np.atleast_1d(
+                np.genfromtxt(
+                    csv_path,
+                    delimiter=",",
+                    names=True,
+                    dtype=float,
+                )
+            )
+
+            if not required_fields.issubset(data.dtype.names or ()):
+                if not missing_fields_reported:
+                    print(
+                        "[WARN] Cannot generate compare_attitude: "
+                        "the CSVs must contain time_s, frozen and q3..q6."
+                    )
+                    missing_fields_reported = True
+                continue
+
+            controller_data[controller_name] = data
+
+        if (
+            "baseline" not in controller_data
+            or "residual" not in controller_data
+        ):
+            continue
+
+        fig, axes = plt.subplots(
+            2,
+            1,
+            figsize=(10, 7),
+            sharex=True,
+        )
+
+        for controller_name, color in controller_specs:
+            data = controller_data.get(controller_name)
+
+            if data is None:
+                continue
+
+            roll, pitch = _quaternion_to_roll_pitch_deg(
+                data["q3"],
+                data["q4"],
+                data["q5"],
+                data["q6"],
+            )
+
+            frozen = data["frozen"] > 0.5
+
+            axes[0].plot(
+                data["time_s"],
+                np.where(frozen, np.nan, roll),
+                color=color,
+                linewidth=1.3,
+                label=controller_name,
+            )
+            axes[1].plot(
+                data["time_s"],
+                np.where(frozen, np.nan, pitch),
+                color=color,
+                linewidth=1.3,
+                label=controller_name,
+            )
+
+        axes[0].set_ylabel("Roll [deg]")
+        axes[1].set_ylabel("Pitch [deg]")
+        axes[1].set_xlabel("Time [s]")
+
+        for axis in axes:
+            axis.axhline(
+                0.0,
+                color="black",
+                linewidth=0.8,
+                alpha=0.5,
+            )
+            axis.grid(True, alpha=0.3)
+            axis.legend(loc="best")
+
+        fig.suptitle(
+            readable_title(
+                env_name,
+                baseline_csv.stem,
+                "base attitude",
+            )
+        )
+        fig.tight_layout()
+        fig.savefig(
+            output_dir / f"{baseline_csv.stem}_comparison.png",
+            dpi=160,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+    print(f"Attitude comparison graphics saved to: {output_dir}")
 
 def compare_joint_data(comparison_dir: Path, env_name: str) -> None:
     """Compare torque, velocity and position of TITA's eight actuators.
@@ -1066,9 +1571,14 @@ def compare_joint_data(comparison_dir: Path, env_name: str) -> None:
                     axis.legend(loc="best")
             axes[-1, 0].set_xlabel("Time [s]")
             axes[-1, 1].set_xlabel("Time [s]")
+            plot_type = output_name.removeprefix("compare_")
+
             fig.suptitle(
-                f"{env_name} - {baseline_csv.stem} - "
-                f"{output_name.removeprefix('compare_').replace('_', ' ')}"
+                readable_title(
+                    env_name,
+                    baseline_csv.stem,
+                    plot_type,
+                )
             )
             fig.savefig(
                 output_dir / f"{baseline_csv.stem}_comparison.png",
@@ -1208,7 +1718,11 @@ def redo_plots(
             time_values = np.asarray(data["time_s"], dtype=float)
             save_tracking_plot(
                 controller_dir / f"{test_name}_tracking.png",
-                f"{env_name} {controller_name} - {test_name}",
+                readable_title(
+                    env_name,
+                    test_name,
+                    "velocity tracking",
+                ),
                 time_values,
                 target_commands,
                 commands,
@@ -1240,7 +1754,11 @@ def redo_plots(
                 )
                 save_reward_plots(
                     controller_dir / "rewards" / test_name,
-                    f"{env_name} {controller_name} - {test_name}",
+                    readable_title(
+                        env_name,
+                        test_name,
+                        "rewards",
+                    ),
                     np.asarray(reward_data["time_s"], dtype=float),
                     rewards,
                     reward_data["frozen"] > 0.5,
@@ -1274,6 +1792,7 @@ def redo_plots(
     compare_graphics(comparison_dir, env_name, component_labels)
     compare_rewards(comparison_dir, env_name)
     compare_joint_data(comparison_dir, env_name)
+    compare_attitude(comparison_dir, env_name)
     print(f"Plots regenerated from CSV files: {comparison_dir}")
 
 
@@ -1673,7 +2192,7 @@ def main() -> None:
     # Keep the tests as declared: a 2D command stays one test (one episode with
     # in-episode command changes), it is NOT split into independent tests.
     # Entries without an explicit scene inherit the one the env name implies.
-    tests = _normalize_tests(TESTS[env_name], _default_scene(env_name))
+    tests = _normalize_tests(TESTS[env_name])
     block_counts = _test_block_counts(tests)
     total_blocks = sum(block_counts)
 
@@ -1683,11 +2202,29 @@ def main() -> None:
     if args.redo is not None:
         env_base_dir = os.path.join(args.ckpt_dir, env_name)
         run_dir, _ = train_srbd._resolve_load(env_base_dir, args.load)
-        comparison_dir = _resolve_redo_dir(
-            run_dir, env_name, args.redo
+        source_comparison_dir = _resolve_redo_dir(
+            run_dir, env_name, args.redo,
         )
-        print(f"Redoing plots from: {comparison_dir}")
-        redo_plots(comparison_dir, env_name, tests)
+
+        redo_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        redo_comparison_dir = (
+            source_comparison_dir.parent
+            / f"{redo_timestamp}_redo"
+        )
+
+        shutil.copytree(
+            source_comparison_dir,
+            redo_comparison_dir,
+        )
+
+        print(f"Original comparison: {source_comparison_dir}")
+        print(f"Redo copy created: {redo_comparison_dir}")
+
+        redo_plots(
+            redo_comparison_dir,
+            env_name,
+            tests,
+        )
         return
 
     _, env, _ = train_srbd.make_envs(env_name=env_name)
@@ -1855,6 +2392,7 @@ def main() -> None:
     comparison_dir.mkdir(parents=True, exist_ok=True)
     controller_video_paths = {}
     controller_video_fps = {}
+    controller_test_success = {}
 
     print(f"Environment: {env_name}")
     scene_order = list(dict.fromkeys(scene for _, _, scene in tests))
@@ -1971,7 +2509,11 @@ def main() -> None:
                 )
                 save_tracking_plot(
                     mode_dir / f"{test_name}_tracking.png",
-                    f"{env_name} {mode_name} - {test_name}",
+                    readable_title(
+                        env_name,
+                        test_name,
+                        "velocity tracking",
+                    ),
                     local_time,
                     target_commands[start:stop],
                     commands[start:stop],
@@ -1989,7 +2531,11 @@ def main() -> None:
                 )
                 save_reward_plots(
                     rewards_dir / test_name,
-                    f"{env_name} {mode_name} - {test_name}",
+                    readable_title(
+                        env_name,
+                        test_name,
+                        "rewards",
+                    ),
                     local_time,
                     rewards[start:stop],
                     frozen_flags[start:stop],
@@ -2033,6 +2579,20 @@ def main() -> None:
             get_runtime=get_runtime,
             on_scene_end=save_finished_scene,
         )
+
+        controller_test_success[mode_name] = {}
+
+        for test_index, (test_name, _, _) in enumerate(tests):
+            start = int(block_offsets[test_index]) * steps_per_command
+            stop = min(
+                int(block_offsets[test_index + 1]) * steps_per_command,
+                len(frozen_flags),
+            )
+
+            controller_test_success[mode_name][test_name] = not np.any(
+                frozen_flags[start:stop]
+            )
+
         normal_video_writer.close()
         slow_video_writer.close()
 
@@ -2078,6 +2638,8 @@ def main() -> None:
         ),
         fps=1.0 / float(env.dt),
         total_blocks=total_blocks,
+        tests=tests,
+        controller_test_success=controller_test_success,
     )
 
     print(f"Comparison completed: {comparison_dir}")
