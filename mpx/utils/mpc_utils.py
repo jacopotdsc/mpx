@@ -4,6 +4,8 @@ from functools import partial
 from mujoco.mjx._src import math
 from jax.scipy.spatial.transform import Rotation
 import mpx.jax_ocp_solvers.optimizers as optimizers
+from mujoco import mjx
+import qpax
 
 def timer_run(duty_factor,step_freq, leg_time, dt):
     # Extract relevant fields
@@ -270,197 +272,6 @@ def reference_generator_srbd(use_terrain_estimator,N,dt,n_contact,mass,foot0,t_t
 
     return jnp.concatenate([p_ref, quat_ref, dp_ref, omega_ref,contact_sequence], axis=1),jnp.concatenate([ contact_sequence,foot_ref], axis=1), liftoff , foot_ref_dot
 
-def reference_generator_dfcip_offline(
-    vel_lin: float = 0.0,
-    vel_ang: float = 0.0,
-    vel_z:   float = 0.0,
-    pcom     = (0.0, 0.0, 0.4),
-    nx:      int = 13,
-    nu:      int = 9,
-    t_sec:   float = 6,
-    dt:      float = 0.002,
-    m:       float = 27.68978,
-    grav:    float = 9.81,
-) -> jax.Array:
-
-        T = t_sec
-        dt_ = dt
-        N_STEP_ = int(t_sec / dt_)
-
-        x_ref = jnp.full((nx, N_STEP_), fill_value=0.0)
-        u_ref = jnp.full((nx, N_STEP_-1), fill_value=0.0)
-
-        T_const = 2 * T/3
-        T_acc = (T-T_const)/2
-
-        v_peak = vel_lin
-        omega_peak = vel_ang
-
-        a_max = v_peak / T_acc
-        alpha_max = omega_peak / T_acc
-
-        vz          = vel_z
-        v_contact_z = 0.0
-        v           = 0.0
-        omega       = 0.0
-        theta0      = 0.0
-
-        a           = 0.0
-        alpha       = 0.0
-
-        x0          = pcom[0]
-        y0          = pcom[1]
-        z0          = pcom[2]
-        z0_contact  = 0.0
-
-        z_min       = 0.25
-        z_max       = 0.50
-
-        x = x0
-        y = y0
-        z = z0
-
-        theta = theta0
-
-        def scan_step(carry, t_step):
-
-            t = t_step * dt_
-            x, y, z, theta, v_peak, omega_peak, vz, z0_contact, v_contact_z = carry
-            v_contact_z = 0.0
-
-            td = t - (T_acc + T_const)
-
-            a = jnp.where(
-                    t < T_acc,
-                    a_max,
-                                            jnp.where(
-                    t < T_acc + T_const,
-                    0.0,
-                                            jnp.where(
-                    t < T,
-                    a_max,
-                    0.0                     )
-                                            )
-            )
-
-            v = jnp.where(
-                    t < T_acc,
-                    a * t,
-                                            jnp.where(
-                    t < T_acc + T_const,
-                    v_peak,
-                                            jnp.where(
-                    t < T,
-                    v_peak - a * td,
-                    0.0                     )
-                                            )
-            )
-
-            alpha = jnp.where(
-                    t < T_acc,
-                    alpha_max,
-                                            jnp.where(
-                    t < T_acc + T_const,
-                    0.0,
-                                            jnp.where(
-                    t < T,
-                    -alpha_max,
-                    0.0                     )
-                                            )
-            )
-
-            omega = jnp.where(
-                    t < T_acc,
-                    alpha_max * t,
-                                            jnp.where(
-                    t < T_acc + T_const,
-                    omega_peak,
-                                            jnp.where(
-                    t < T,
-                    omega_peak + alpha_max * td,
-                    0.0                     )
-                                            )
-            )
-
-
-            vx = v * jnp.cos(theta)
-            vy = v * jnp.sin(theta)
-
-            x  = x  + vx  * dt_
-            y  = y  + vy  * dt_
-            theta = theta + omega * dt_
-
-            z = jnp.clip(z + vz * dt_, z_min, z_max)
-            z_contact = z0_contact + v_contact_z * t
-
-            vz = jnp.where(
-                z <= z_min,
-                0.0,
-                jnp.where(
-                    z >= z_max,
-                    0.0,
-                    vz
-                )
-            )
-
-            #jax.debug.print("---- frame: {i}", i=t)
-            #jax.debug.print("x={x} y={y} z={z}", x=x, y=y, z=z)
-            #jax.debug.print("vx={vx} vy={vy} vz={vz}", vx=vx, vy=vy, vz=vz)
-
-            x_ref_t = jnp.array([
-
-                # CoM information
-                x,    # [0]  com_x
-                y,    # [1]  com_y
-                z,    # [2]  com_z
-                vx,    # [3]  vx
-                vy,   # [4]  vy
-                vz,   # [5]  vz
-
-                # Midle point of contact points informations
-                x,    # [6]  pc_x
-                y,    # [7]  pc_y
-                z_contact,          # [8]  pc_z
-                v_contact_z,        # [9]  v_contact_z
-
-                # Command
-                theta,      # [10] theta
-                v,          # [11] v
-                omega,      # [12] omega
-            ])
-
-            u_ref_t = jnp.array([
-                0.0,     # a
-                0.0,     # ac_z
-                0.0,
-
-                0.0,        # fl_x
-                0.0,        # fl_y
-                m*grav/2,   # fl_z
-
-                0.0,         # fl_x
-                0.0,         # fl_y
-                m*grav/2     # fl_z
-            ])
-
-            carry_new = x, y, z, theta, v_peak, omega_peak, vz, z0_contact, v_contact_z
-
-            return carry_new, (x_ref_t, u_ref_t)
-
-        v_peak = vel_lin
-        omega_peak = vel_ang
-        vz = vel_z
-        z0_contact = 0.0
-        v_contact_z = 0.0
-
-        carry = x0, y0, z0, theta, v_peak, omega_peak, vz, z0_contact, v_contact_z
-
-        _, (x_ref_T, u_ref_T) = jax.lax.scan(scan_step, carry, jnp.arange(N_STEP_))
-
-        x_ref = x_ref_T#.T   # (N_STEP_, NX).T = (NX, N_STEP_)
-        u_ref = u_ref_T#.T   # (N_STEP_, NU).T = (NX, N_STEP_)
-
-        return x_ref, u_ref
 
 @partial(jax.jit, static_argnums=(0, 1, 2, 3))
 def reference_generator_dfcip_online(
@@ -471,89 +282,40 @@ def reference_generator_dfcip_online(
     x0: jax.Array,
     cmd: jax.Array,
 ):
-    """
-    Online reference generator for wheeled DFCIP.
-
-    State layout:
-        x = [
-            pcom_x, pcom_y, pcom_z,          # 0:3
-            vcom_x, vcom_y, vcom_z,          # 3:6
-            c_x, c_y, c_z,                   # 6:9
-            v_contact_z,                     # 9
-            theta, v, omega                  # 10:13
-        ]
-
-    Command layout (same as KeyboardVelocityCommand.mpc_wheeled_input and the
-    RL environment: [vx, vz, omega, height]):
-        cmd[0] = desired forward velocity v_des [m/s]
-        cmd[1] = desired vertical CoM velocity vz_des [m/s], ignored for flat ground
-        cmd[2] = desired yaw rate omega_des [rad/s]
-        cmd[3] = desired CoM height [m], currently ignored (z_com_ref is fixed below)
-
-    Args:
-        N:  number of MPC stages; the reference has N+1 nodes
-        dt: MPC prediction step (the reference is generated directly at the
-            MPC discretisation, no decimation)
-
-    Returns:
-        x_ref: (N+1, nx)
-        u_ref: (N+1, nu)
-
-    u_ref layout:
-        [a, ac_z, alpha, Fl_x, Fl_y, Fl_z, Fr_x, Fr_y, Fr_z]
-    """
-
-    # ============================================================
-    # Fixed future-reference quantities
-    # ============================================================
-    z_com_ref = 0.4
     z_contact_ref = 0.0
-    vcom_z_ref = 0.0
     vcz_ref = 0.0
 
-    # Acceleration limits for online ramp
     a_default = 5.0
     alpha_default = 5.0
+    az_default = 2.0
+    z_position_gain = 2.0
 
-    # ============================================================
-    # Current state / node 0
-    # ============================================================
     pcom0 = x0[0:3]
+    vcom_z0 = x0[5]
     theta0 = x0[10]
     v0 = x0[11]
     omega0 = x0[12]
 
-    # ============================================================
-    # Desired command
-    # ============================================================
     v_des = cmd[0]
     omega_des = cmd[2]
+    z_com_ref = cmd[3]
 
     def move_towards(current, target, max_delta):
         delta = target - current
         return current + jnp.clip(delta, -max_delta, max_delta)
 
-    def build_state(p_xy, theta, v, vx, vy, omega):
+    def build_state(p_xy, z, theta, v, vx, vy, vz, omega):
         return jnp.array([
-            # CoM position
             p_xy[0],
             p_xy[1],
-            z_com_ref,
-
-            # CoM velocity
+            z,
             vx,
             vy,
-            vcom_z_ref,
-
-            # Contact midpoint / ground projection
+            vz,
             p_xy[0],
             p_xy[1],
             z_contact_ref,
-
-            # Contact vertical velocity
             vcz_ref,
-
-            # Reduced coordinates
             theta,
             v,
             omega,
@@ -561,9 +323,9 @@ def reference_generator_dfcip_online(
 
     def build_u_ref():
         return jnp.array([
-            0.0,  # a
-            0.0,  # ac_z
-            0.0,  # alpha
+            0.0,
+            0.0,
+            0.0,
 
             0.0,
             0.0,
@@ -575,15 +337,19 @@ def reference_generator_dfcip_online(
         ])
 
     def scan_step(carry, _):
-        p_xy, theta, v, omega = carry
+        p_xy, z, theta, v, vz, omega = carry
 
-        # --------------------------------------------------------
-        # Acceleration-limited velocity update
-        # --------------------------------------------------------
         v_next = move_towards(
             v,
             v_des,
             a_default * dt,
+        )
+
+        vz_target = z_position_gain * (z_com_ref - z)
+        vz_next = move_towards(
+            vz,
+            vz_target,
+            az_default * dt,
         )
 
         omega_next = move_towards(
@@ -592,34 +358,25 @@ def reference_generator_dfcip_online(
             alpha_default * dt,
         )
 
-        # --------------------------------------------------------
-        # Unicycle forward-Euler integration, consistent with the MPC model
-        # (models.wheeled_dfcip_dynamics): the base point moves with the
-        # velocity/heading of the CURRENT node, and the reference CoM velocity
-        # at the NEXT node is expressed along the heading of that same node.
-        # NOTE: the previous version used cos/sin(theta) of the current node for
-        # the next node's CoM velocity, i.e. the reference CoM direction lagged
-        # the reference heading by one MPC node. Through the terminal
-        # stability constraint (pcom(N) = c(N)) that lag (N*dt^2*v*omega, 4 mm
-        # at v=1, omega=0.8, dt=0.01) made the MPC trade yaw-rate tracking for
-        # CoM/base alignment (measured omega 0.75 for a 0.8 rad/s command).
-        # --------------------------------------------------------
+        vx_next = v_next * jnp.cos(theta)
+        vy_next = v_next * jnp.sin(theta)
+
         p_xy_next = p_xy + jnp.array([
-            v * jnp.cos(theta) * dt,
-            v * jnp.sin(theta) * dt,
+            vx_next * dt,
+            vy_next * dt,
         ])
 
-        theta_next = theta + omega * dt
-
-        vx_next = v_next * jnp.cos(theta_next)
-        vy_next = v_next * jnp.sin(theta_next)
+        z_next = z + vz_next * dt
+        theta_next = theta + omega_next * dt
 
         x_ref_t = build_state(
             p_xy=p_xy_next,
+            z=z_next,
             theta=theta_next,
             v=v_next,
             vx=vx_next,
             vy=vy_next,
+            vz=vz_next,
             omega=omega_next,
         )
 
@@ -627,35 +384,35 @@ def reference_generator_dfcip_online(
 
         carry_next = (
             p_xy_next,
+            z_next,
             theta_next,
             v_next,
+            vz_next,
             omega_next,
         )
 
         return carry_next, (x_ref_t, u_ref_t)
 
-    # ============================================================
-    # Node 0 = measured current state
-    # ============================================================
     x_init = build_state(
         p_xy=pcom0[0:2],
+        z=pcom0[2],
         theta=theta0,
         v=v0,
         vx=v0 * jnp.cos(theta0),
         vy=v0 * jnp.sin(theta0),
+        vz=vcom_z0,
         omega=omega0,
     )
     u_init = build_u_ref()
-
-    # ============================================================
-    # Future nodes: x_ref[1], ..., x_ref[N]
-    # ============================================================
     p_xy0 = pcom0[0:2]
+    p_z = pcom0[2]
 
     carry0 = (
         p_xy0,
+        p_z,
         theta0,
         v0,
+        vcom_z0,
         omega0,
     )
 
@@ -665,10 +422,6 @@ def reference_generator_dfcip_online(
         xs=None,
         length=N,
     )
-
-    # ============================================================
-    # Final reference arrays
-    # ============================================================
     x_ref = jnp.concatenate([
         x_init[None, :],
         x_scan,
@@ -680,26 +433,6 @@ def reference_generator_dfcip_online(
     ], axis=0)
 
     return x_ref, u_ref
-
-import mujoco
-from mujoco import mjx
-
-def _wbc_qp_dynamics(x, u, t, parameter):
-    del u, t, parameter
-    return x
-
-def _wbc_qp_cost(W, reference, x, u, t):
-    del x
-    qacc_var = u
-    n = u.shape[0]
-    packed = reference[0]
-    h_flat = packed[: n * n]
-    f = packed[n * n : n * n + n]
-    H = h_flat.reshape((n, n))
-    w_diag = W[t]
-    W_reg = jnp.diag(w_diag)
-    stage_cost = 0.5 * (qacc_var @ ((H + W_reg) @ qacc_var)) - (f @ qacc_var)
-    return state_cost #jnp.where(t == 0, stage_cost, 0.0)
 
 @partial(jax.jit, static_argnums=(0))
 def whole_body_interface(model, mjx_model, contact_id, body_id,sim_frequency,Kp,Kd,qpos,qvel,grf,foot_ref,foot_ref_dot,contact):
@@ -755,182 +488,17 @@ def whole_body_interface(model, mjx_model, contact_id, body_id,sim_frequency,Kp,
 
     return tau , J
 
-@partial(jax.jit, static_argnums=(0))
-def whole_body_interface_qp(
-    model,
-    mjx_model,
-    contact_id,
-    body_id,
-    sim_frequency,
-    Kp,
-    Kd,
-    qpos,
-    qvel,
-    grf,
-    foot_ref,
-    foot_ref_dot,
-    contact,
-):
-    del sim_frequency
 
-    mjx_data = mjx.make_data(model)
-    mjx_data = mjx_data.replace(qpos=qpos, qvel=qvel)
-    mjx_data = mjx.fwd_position(mjx_model, mjx_data)
-    mjx_data = mjx.fwd_velocity(mjx_model, mjx_data)
 
-    M = mjx_data.qM
-    D = mjx_data.qfrc_bias
-
-    FL_leg = mjx_data.geom_xpos[contact_id[0]]
-    FR_leg = mjx_data.geom_xpos[contact_id[1]]
-    RL_leg = mjx_data.geom_xpos[contact_id[2]]
-    RR_leg = mjx_data.geom_xpos[contact_id[3]]
-
-    J_FL, _ = mjx.jac(mjx_model, mjx_data, FL_leg, body_id[0])
-    J_FR, _ = mjx.jac(mjx_model, mjx_data, FR_leg, body_id[1])
-    J_RL, _ = mjx.jac(mjx_model, mjx_data, RL_leg, body_id[2])
-    J_RR, _ = mjx.jac(mjx_model, mjx_data, RR_leg, body_id[3])
-
-    J = jnp.concatenate([J_FL, J_FR, J_RL, J_RR], axis=1)
-
-    current_leg = jnp.concatenate([FL_leg, FR_leg, RL_leg, RR_leg], axis=0)
-    current_leg_dot = J.T @ mjx_data.qvel
-    cartesian_space_action = Kp @ (foot_ref - current_leg) + Kd @ (foot_ref_dot - current_leg_dot)
-
-    contact_mask = jnp.array(
-        [
-            contact[0], contact[0], contact[0],
-            contact[1], contact[1], contact[1],
-            contact[2], contact[2], contact[2],
-            contact[3], contact[3], contact[3],
-        ],
-        dtype=J.dtype,
-    )
-    swing_mask = 1.0 - contact_mask
-    task_weights = 1e-2 * contact_mask + 1.0 * swing_mask
-    W_task = jnp.diag(task_weights)
-
-    A_task = W_task @ J.T
-    b_task = W_task @ cartesian_space_action
-
-    n_v = M.shape[0]
-    reg = 1e-4
-    H = A_task.T @ A_task + reg * jnp.eye(n_v, dtype=J.dtype)
-    f = A_task.T @ b_task
-
-    packed = jnp.concatenate([H.reshape(-1), f], axis=0)
-    reference = jnp.tile(packed[None, :], (2, 1))
-    parameter = jnp.zeros((2, 1), dtype=J.dtype)
-    W = 1e-3 * jnp.ones((2, n_v), dtype=J.dtype)
-
-    x0 = jnp.zeros((n_v,), dtype=J.dtype)
-    X0 = jnp.zeros((2, n_v), dtype=J.dtype)
-    U0 = jnp.zeros((1, n_v), dtype=J.dtype)
-    V0 = jnp.zeros((2, n_v), dtype=J.dtype)
-
-    X_sol, U_sol, _ = optimizers.mpc(
-        _wbc_qp_cost,
-        _wbc_qp_dynamics,
-        None,
-        True,
-        reference,
-        parameter,
-        W,
-        x0,
-        X0,
-        U0,
-        V0,
-        num_alpha=7,
-    )
-    qacc = U_sol[0]
-
-    tau_full = M @ qacc + D - J @ grf
-    tau = tau_full[6:]
-
-    return tau, J
-
-def quat_multiply(q1, q2):
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
-    return jnp.array([
-        w1*w2 - x1*x2 - y1*y2 - z1*z2,
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-        w1*z2 + x1*y2 - y1*x2 + z1*w2,
-    ])
-
-def quat_error(q_des, q_curr):
-    """Orientation error (3,) from two quaternions (w,x,y,z)."""
-    q_curr_inv = q_curr.at[1:].set(-q_curr[1:])
-    q_err = quat_multiply(q_des, q_curr_inv)
-    q_err = jnp.where(q_err[0] < 0, -q_err, q_err)
-    return 2.0 * q_err[1:]
-
-def err_rotation(Ra, Rb):
-    """Port fedele di Eigen::AngleAxisd — con clip esplicito che Eigen fa implicitamente."""
-    Rdiff = Rb.T @ Ra
-    cos_angle = jnp.clip((jnp.trace(Rdiff) - 1.0) / 2.0, -1.0, 1.0)
-    angle = jnp.arccos(cos_angle)
-    skew_vec = jnp.array([
-        Rdiff[2, 1] - Rdiff[1, 2],
-        Rdiff[0, 2] - Rdiff[2, 0],
-        Rdiff[1, 0] - Rdiff[0, 1],
-    ]) * 0.5
-    axis_norm = jnp.linalg.norm(skew_vec)
-    safe_norm = jnp.where(axis_norm < 1e-7, 1.0, axis_norm)
-    axis = skew_vec / safe_norm
-    err = angle * (Ra @ axis)
-    return jnp.where(angle < 1e-7, jnp.zeros(3), err)
-
-def skew(v):
-    """Skew-symmetric matrix from (3,) vector."""
-    return jnp.array([
-        [ 0,   -v[2],  v[1]],
-        [ v[2], 0,    -v[0]],
-        [-v[1], v[0],  0   ],
-    ])
-
-def compute_virtual_frame(wheel_R):
-    I = jnp.eye(3)                                     # Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
-    z_0 = jnp.array([0.0, 0.0, 1.0])                  # Eigen::Vector3d z_0 = Eigen::Vector3d(0,0,1);
-    n = wheel_R @ z_0                                  # Eigen::Vector3d n = wheel_R * z_0;
-    a = (I - jnp.outer(n, n)) @ z_0                    # Eigen::Vector3d a = (I - n*n.transpose()) * z_0;
-    s = a / jnp.linalg.norm(a)                         # Eigen::Vector3d s = a / a.norm();
-    t = jnp.cross(n, s)                                # Eigen::Vector3d t = n.cross(s);
-    t = t / jnp.linalg.norm(t)                         # t = t/t.norm();
-    R = jnp.column_stack([t, n, s])                    # R.col(0) = t; R.col(1) = n; R.col(2) = s;
-    return R                                           # return R;
-
-def compute_contact_frame(wheel_R):
-    z_0 = jnp.array([0.0, 0.0, 1.0])                  # Eigen::Vector3d z_0 = Eigen::Vector3d(0,0,1);
-    n = wheel_R @ z_0                                  # Eigen::Vector3d n = wheel_R * z_0;
-    a = jnp.cross(n, z_0)                              # Eigen::Vector3d a = n.cross(z_0);
-    t = a / jnp.linalg.norm(a)                         # Eigen::Vector3d t = a / a.norm();
-    R = jnp.column_stack([t, jnp.cross(z_0, t), z_0]) # R.col(0) = t; R.col(1) = z_0.cross(t); R.col(2) = z_0;
-    return R                                           # return R;
-
-def get_rCP(wheel_R, wheel_radius):
-    I = jnp.eye(3)                                     # Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
-    z_0 = jnp.array([0.0, 0.0, 1.0])                  # Eigen::Vector3d z_0 = Eigen::Vector3d(0,0,1);
-    n = wheel_R @ z_0                                  # Eigen::Vector3d n = wheel_R * z_0;
-    a = (I - jnp.outer(n, n)) @ z_0                    # Eigen::Vector3d a = (I - n*n.transpose()) * z_0;
-    s = a / jnp.linalg.norm(a)                         # Eigen::Vector3d s = a/a.norm();
-    rCP = -s * wheel_radius                            # Eigen::Vector3d rCP = - s * wheel_radius;
-    return rCP                                         # return rCP;
-
-_REF_COM_POS   = 0
-_REF_COM_VEL   = 3
-_REF_COM_ACC   = 6
-_REF_LW_POS    = 9
-_REF_LW_VEL    = 12
-_REF_LW_ACC    = 15
-_REF_RW_POS    = 18
-_REF_RW_VEL    = 21
-_REF_RW_ACC    = 24
-_REF_BASE_ROT = 27
-_REF_BASE_OMG  = 36
-_REF_BASE_ALP  = 39
-_REF_JOINTS    = 42  # da qui: qjnt | qjntdot | qjntddot (3*nj)
+# The layout of the flat ``desired`` reference vector is owned by the controller
+# wrapper (``BatchedMPCControllerWrapper._index_variables_qp``) and passed in as a
+# plain dict of field->offset. ``unpack_reference`` and the whole-body QP simply
+# consume it. Expected keys:
+#   com_pos, com_vel, com_acc,
+#   lwheel_pos, lwheel_vel, lwheel_acc,
+#   rwheel_pos, rwheel_vel, rwheel_acc,
+#   base_rot, base_omega, base_alpha,
+#   joints            (from here on: qjnt | qjntdot | qjntddot, each of size nj)
 
 
 def pack_reference(desired, nj):
@@ -953,79 +521,141 @@ def pack_reference(desired, nj):
         desired['qjntddot'],     # nj
     ])
 
-def unpack_reference(ref, nj):
-    """Flat array → dict di desired."""
-    j = _REF_JOINTS
+def unpack_reference(ref, nj, layout):
+    """Flat reference array -> dict of desired quantities, using the ``layout`` dict of offsets."""
+    j = layout['joints']
     return dict(
-        com_pos    = ref[_REF_COM_POS   : _REF_COM_VEL],
-        com_vel    = ref[_REF_COM_VEL   : _REF_COM_ACC],
-        com_acc    = ref[_REF_COM_ACC   : _REF_LW_POS],
-        lwheel_pos = ref[_REF_LW_POS   : _REF_LW_VEL],
-        lwheel_vel = ref[_REF_LW_VEL   : _REF_LW_ACC],
-        lwheel_acc = ref[_REF_LW_ACC   : _REF_RW_POS],
-        rwheel_pos = ref[_REF_RW_POS   : _REF_RW_VEL],
-        rwheel_vel = ref[_REF_RW_VEL   : _REF_RW_ACC],
-        rwheel_acc = ref[_REF_RW_ACC   : _REF_BASE_ROT],
-        base_rot   = ref[_REF_BASE_ROT: _REF_BASE_OMG].reshape((3, 3)),
-        base_omega = ref[_REF_BASE_OMG : _REF_BASE_ALP],
-        base_alpha = ref[_REF_BASE_ALP : j],
+        com_pos    = ref[layout['com_pos']    : layout['com_vel']],
+        com_vel    = ref[layout['com_vel']    : layout['com_acc']],
+        com_acc    = ref[layout['com_acc']    : layout['lwheel_pos']],
+        lwheel_pos = ref[layout['lwheel_pos'] : layout['lwheel_vel']],
+        lwheel_vel = ref[layout['lwheel_vel'] : layout['lwheel_acc']],
+        lwheel_acc = ref[layout['lwheel_acc'] : layout['rwheel_pos']],
+        rwheel_pos = ref[layout['rwheel_pos'] : layout['rwheel_vel']],
+        rwheel_vel = ref[layout['rwheel_vel'] : layout['rwheel_acc']],
+        rwheel_acc = ref[layout['rwheel_acc'] : layout['base_rot']],
+        base_rot   = ref[layout['base_rot']   : layout['base_omega']].reshape((3, 3)),
+        base_omega = ref[layout['base_omega'] : layout['base_alpha']],
+        base_alpha = ref[layout['base_alpha'] : j],
         qjnt       = ref[j          : j + nj],
-        qjntdot    = ref[j + nj     : j + 2*nj],
-        qjntddot   = ref[j + 2*nj   : j + 3*nj],
+        qjntdot    = ref[j + nj     : j + 2 * nj],
+        qjntddot   = ref[j + 2 * nj : j + 3 * nj],
     )
 
-import jax
-import jax.numpy as jnp
-from mujoco import mjx
-import jaxopt
-import qpax
 
-def _whole_body_interface_wheeled_legged_qp_impl(
+def get_rCP(wheel_R, radius):
+    """Vector from wheel centre to the contact point."""
+    I = jnp.eye(3)
+    z_0 = jnp.array([0.0, 0.0, 1.0])
+    n = wheel_R @ z_0
+    a = (I - jnp.outer(n, n)) @ z_0
+    s = a / jnp.linalg.norm(a)
+    return -s * radius
+
+def whole_body_interface_wheeled_legged_qp(
     mjx_model,
-    # ── static (via partial) ──────────────────────────────────────────────
-    mass, grav, d,
+    # ── static (bound via functools.partial) ──────────────────────────────
+    mass, grav, d,                       # kept for signature compatibility (unused here)
     contact_id, body_id, base_body_id,
     wheel_radius, sample_time, n_contacts,
     # ── gains ─────────────────────────────────────────────────────────────
-    Kp_motion,    Kd_motion,     # params_.Kp_motion   / Kd_motion
-    Kp_wheel,     Kd_wheel,      # params_.Kp_wheel    / Kd_wheel
-    Kp_regulation, Kd_regulation, # params_.Kp_regulation / Kd_regulation
+    Kp_motion, Kd_motion,
+    Kp_wheel, Kd_wheel,
+    Kp_regulation, Kd_regulation,
     w_posture,
-    # ── weights ───────────────────────────────────────────────────────────
-    w_qddot,    # params_.weight_q_ddot
-    w_com,      # params_.weight_com
-    w_lwheel,   # params_.weight_lwheel
-    w_rwheel,   # params_.weight_rwheel
-    w_base,     # params_.weight_base
-    mu_,        # params_.mu
+    # ── task weights ──────────────────────────────────────────────────────
+    w_qddot, w_com, w_lwheel, w_rwheel, w_base,
+    mu_,
     # ── runtime ───────────────────────────────────────────────────────────
     qpos, qvel, desired,
     posture_mask=None,
+    ref_layout=None,
 ):
-    nq    = qpos.shape[0]
-    nv    = mjx_model.nv
-    nj    = nv - 6           # n_joints_
-    n_f   = 3                # forze per contatto
-    # n_wbc_variables_ = 6 + n_joints_ + 2 * 3 * n_contacts
-    n_var = nv + 2 * n_f * n_contacts
-
-    # ── unpack desired ────────────────────────────────────────────────────
-    des = unpack_reference(desired, nj)
-
+    """Wheeled-legged whole-body QP.
+ 
+    Maps the MPC reference (``desired``) to actuated joint torques through a
+    single inverse-dynamics QP that tracks the CoM, both wheels and the base
+    orientation while enforcing rolling, floating-base dynamics, joint limits
+    and friction cones.
+ 
+    Returns ``(tau, qddot, fl, fr, diag)``. The public wrappers
+    ``whole_body_interface_wheeled_legged_qp`` (drops ``diag``) and
+    ``whole_body_interface_wheeled_legged_qp_diag`` (keeps it) are the entry
+    points used by the controller wrappers.
+    """
+ 
     # ══════════════════════════════════════════════════════════════════════
-    #  1. FORWARD KINEMATICS
-    #     pinocchio::jacobianCenterOfMass / framesForwardKinematics /
-    #     getFrameJacobian / getFrameJacobianTimeVariation
+    #  0. LOCAL GEOMETRY HELPERS (self-contained frame / rotation math)
+    # ══════════════════════════════════════════════════════════════════════
+    def skew(v):
+        """Skew-symmetric matrix from a (3,) vector."""
+        return jnp.array([
+            [0.0,  -v[2],  v[1]],
+            [v[2],  0.0,  -v[0]],
+            [-v[1], v[0],  0.0],
+        ])
+ 
+    def err_rotation(Ra, Rb):
+        """Angle-axis orientation error of Ra w.r.t. Rb (faithful Eigen AngleAxis port)."""
+        Rdiff = Rb.T @ Ra
+        cos_angle = jnp.clip((jnp.trace(Rdiff) - 1.0) / 2.0, -1.0, 1.0)
+        angle = jnp.arccos(cos_angle)
+        skew_vec = jnp.array([
+            Rdiff[2, 1] - Rdiff[1, 2],
+            Rdiff[0, 2] - Rdiff[2, 0],
+            Rdiff[1, 0] - Rdiff[0, 1],
+        ]) * 0.5
+        axis_norm = jnp.linalg.norm(skew_vec)
+        safe_norm = jnp.where(axis_norm < 1e-7, 1.0, axis_norm)
+        axis = skew_vec / safe_norm
+        err = angle * (Ra @ axis)
+        return jnp.where(angle < 1e-7, jnp.zeros(3), err)
+ 
+    def compute_virtual_frame(wheel_R):
+        """Virtual wheel frame [t, n, s]; n is the axle direction, s the ground-projected up."""
+        I = jnp.eye(3)
+        z_0 = jnp.array([0.0, 0.0, 1.0])
+        n = wheel_R @ z_0
+        a = (I - jnp.outer(n, n)) @ z_0
+        s = a / jnp.linalg.norm(a)
+        t = jnp.cross(n, s)
+        t = t / jnp.linalg.norm(t)
+        return jnp.column_stack([t, n, s])
+ 
+    def compute_contact_frame(wheel_R):
+        """Contact frame [t, z_0 x t, z_0] with a world-vertical normal."""
+        z_0 = jnp.array([0.0, 0.0, 1.0])
+        n = wheel_R @ z_0
+        a = jnp.cross(n, z_0)
+        t = a / jnp.linalg.norm(a)
+        return jnp.column_stack([t, jnp.cross(z_0, t), z_0])
+ 
+    # get_rCP is the module-level function (also used by the wrapper's state
+    # processing), so it is shared here rather than re-defined.
+ 
+    nv    = mjx_model.nv
+    nj    = nv - 6                        
+    n_f   = 3                             # force components per contact
+    n_var = nv + 2 * n_f * n_contacts     # decision vars: [qddot | f_left | f_right]
+ 
+    if ref_layout is None:
+        raise ValueError(
+            "ref_layout is required: pass the controller's index dict "
+            "(e.g. BatchedMPCControllerWrapper._index_variables_qp)."
+        )
+    des = unpack_reference(desired, nj, ref_layout)
+ 
+    # ══════════════════════════════════════════════════════════════════════
+    #  2. FORWARD KINEMATICS, MASS MATRIX, BIAS, JACOBIANS (+ time derivatives)
     # ══════════════════════════════════════════════════════════════════════
     mjx_data = mjx.make_data(mjx_model)
     mjx_data = mjx_data.replace(qpos=qpos, qvel=qvel)
     mjx_data = mjx.fwd_position(mjx_model, mjx_data)
     mjx_data = mjx.fwd_velocity(mjx_model, mjx_data)
-
-    M = mjx_data.qM
-    c = mjx_data.qfrc_bias   # Coriolis + gravity  (= rnea con qddot=0)
-
-    # tangente dqpos/dt per jvp  (quaternion kinematics)
+ 
+    M = mjx_data.qM            # mass matrix
+    c = mjx_data.qfrc_bias     # Coriolis + gravity (RNEA with qddot = 0)
+ 
     q_wxyz = qpos[3:7]
     omega  = qvel[3:6]
     dqw = 0.5 * (-q_wxyz[1]*omega[0] - q_wxyz[2]*omega[1] - q_wxyz[3]*omega[2])
@@ -1033,457 +663,271 @@ def _whole_body_interface_wheeled_legged_qp_impl(
     dqy = 0.5 * ( q_wxyz[0]*omega[1] - q_wxyz[1]*omega[2] + q_wxyz[3]*omega[0])
     dqz = 0.5 * ( q_wxyz[0]*omega[2] + q_wxyz[1]*omega[1] - q_wxyz[2]*omega[0])
     dqpos = jnp.concatenate([qvel[:3], jnp.array([dqw, dqx, dqy, dqz]), qvel[6:]])
-
+ 
     def _jac_geom(qpos_, geom_id, bid):
-        d_ = mjx.make_data(mjx_model)
-        d_ = d_.replace(qpos=qpos_, qvel=qvel)
+        d_ = mjx.make_data(mjx_model).replace(qpos=qpos_, qvel=qvel)
         d_ = mjx.fwd_position(mjx_model, d_)
         Jp_, Jr_ = mjx.jac(mjx_model, d_, d_.geom_xpos[geom_id], bid)
         return Jp_.T, Jr_.T   # (3, nv), (3, nv)
-
+ 
     def _jac_body(qpos_, bid):
-        d_ = mjx.make_data(mjx_model)
-        d_ = d_.replace(qpos=qpos_, qvel=qvel)
+        d_ = mjx.make_data(mjx_model).replace(qpos=qpos_, qvel=qvel)
         d_ = mjx.fwd_position(mjx_model, d_)
         Jp_, Jr_ = mjx.jac(mjx_model, d_, d_.xpos[bid], bid)
         return Jp_.T, Jr_.T
-
+ 
     def _jac_com(qpos_):
-        d_ = mjx.make_data(mjx_model)
-        d_ = d_.replace(qpos=qpos_, qvel=qvel)
+        d_ = mjx.make_data(mjx_model).replace(qpos=qpos_, qvel=qvel)
         d_ = mjx.fwd_position(mjx_model, d_)
         total_mass = jnp.sum(mjx_model.body_mass)
         nb = mjx_model.body_mass.shape[0]
         def _acc(i, J):
-            #Jp_i, _ = mjx.jac(mjx_model, d_, d_.subtree_com[i], i)
-            Jp_i, _ = mjx.jac(mjx_model, d_, d_.xipos[i], i) 
+            Jp_i, _ = mjx.jac(mjx_model, d_, d_.xipos[i], i)
             return J + mjx_model.body_mass[i] * Jp_i.T
         return jax.lax.fori_loop(1, nb, _acc, jnp.zeros((3, nv))) / total_mass
+    
 
-    # ── J_left_wheel_  / J_left_wheel_dot_  (= getFrameJacobian left_leg4) ──
-    (J_left_wheel_lin,  J_left_wheel_rot),  \
-    (J_left_wheel_dot_lin,  J_left_wheel_dot_rot)  = jax.jvp(
-        lambda qp: _jac_geom(qp, contact_id[0], body_id[0]),
-        (qpos,), (dqpos,),
-    )
-    # ── J_right_wheel_ / J_right_wheel_dot_ (= getFrameJacobian right_leg4) ─
+    # Frame Jacobians and their time derivatives (Jdot) via forward-mode AD.
+    (J_left_wheel_lin,  J_left_wheel_rot), \
+    (J_left_wheel_dot_lin,  J_left_wheel_dot_rot) = jax.jvp(
+        lambda qp: _jac_geom(qp, contact_id[0], body_id[0]), (qpos,), (dqpos,))
     (J_right_wheel_lin, J_right_wheel_rot), \
     (J_right_wheel_dot_lin, J_right_wheel_dot_rot) = jax.jvp(
-        lambda qp: _jac_geom(qp, contact_id[1], body_id[1]),
-        (qpos,), (dqpos,),
-    )
-    # ── J_base_link_ / J_base_link_dot_ (= getFrameJacobian base_link) ──────
+        lambda qp: _jac_geom(qp, contact_id[1], body_id[1]), (qpos,), (dqpos,))
     (_, J_base_link_rot), \
     (_, J_base_link_dot_rot) = jax.jvp(
-        lambda qp: _jac_body(qp, base_body_id),
-        (qpos,), (dqpos,),
-    )
-    # ── J_com / J_com_dot (= jacobianCenterOfMass) ───────────────────────────
+        lambda qp: _jac_body(qp, base_body_id), (qpos,), (dqpos,))
     J_com, J_com_dot = jax.jvp(_jac_com, (qpos,), (dqpos,))
-
-
-    # ── posizioni / velocità correnti ─────────────────────────────────────────
-    # robot_data_.oMf[right/left_leg4_idx_].translation() / .rotation()
-    r_wheel_center = mjx_data.geom_xpos[contact_id[1]]   # Eigen::Vector3d r_wheel_center
-    r_wheel_R      = mjx_data.xmat[body_id[1]].reshape(3, 3)  # Eigen::Matrix3d r_wheel_R
-    l_wheel_center = mjx_data.geom_xpos[contact_id[0]]   # Eigen::Vector3d l_wheel_center
-    l_wheel_R      = mjx_data.xmat[body_id[0]].reshape(3, 3)  # Eigen::Matrix3d l_wheel_R
-
-    # right_rCP = labrob::get_rCP(r_wheel_R, wheel_radius_)
-    right_rCP = get_rCP(r_wheel_R, wheel_radius)
-    # w_r = J_right_wheel_.bottomRows<3>() * qdot
-    w_r = J_right_wheel_rot @ qvel
-
-    # left_rCP = labrob::get_rCP(l_wheel_R, wheel_radius_)
+ 
+    J_left_wheel_  = jnp.vstack([J_left_wheel_lin,  J_left_wheel_rot])   # (6, nv)
+    J_right_wheel_ = jnp.vstack([J_right_wheel_lin, J_right_wheel_rot])  # (6, nv)
+ 
+    l_wheel_center = mjx_data.geom_xpos[contact_id[0]]
+    l_wheel_R      = mjx_data.xmat[body_id[0]].reshape(3, 3)
+    r_wheel_center = mjx_data.geom_xpos[contact_id[1]]
+    r_wheel_R      = mjx_data.xmat[body_id[1]].reshape(3, 3)
+ 
     left_rCP  = get_rCP(l_wheel_R, wheel_radius)
-    # w_l = J_left_wheel_.bottomRows<3>() * qdot
-    w_l = J_left_wheel_rot @ qvel
-
-    # J_com, centroidal_momentum_matrix (non usata qui), a_com_drift
-    # a_com_drift = robot_data_.acom[0]  → J_com_dot @ qvel
+    right_rCP = get_rCP(r_wheel_R, wheel_radius)
+    w_l = J_left_wheel_rot  @ qvel
+    w_r = J_right_wheel_rot @ qvel
+ 
+    l_virtual_frame_R = compute_virtual_frame(l_wheel_R)
+    r_virtual_frame_R = compute_virtual_frame(r_wheel_R)
+    l_contact_frame   = compute_contact_frame(l_wheel_R)
+    r_contact_frame   = compute_contact_frame(r_wheel_R)
+ 
+    # Drift terms (Jdot * qdot).
     a_com_drift              = J_com_dot             @ qvel
-    # a_lwheel_drift = J_left_wheel_dot_.topRows(3) * qdot
     a_lwheel_drift           = J_left_wheel_dot_lin  @ qvel
-    # a_rwheel_drift = J_right_wheel_dot_.topRows(3) * qdot
     a_rwheel_drift           = J_right_wheel_dot_lin @ qvel
-    # a_base_orientation_drift = J_base_link_dot_.bottomRows<3>() * qdot
     a_base_orientation_drift = J_base_link_dot_rot   @ qvel
-
-    # current_com_pos = robot_data_.com[0]
-    current_com_pos       = mjx_data.subtree_com[0]
-    # current_com_vel = robot_data_.vcom[0]
-    current_com_vel       = J_com @ qvel
-
-    # current_base_link_pos = robot_data_.oMf[base_link_idx_].rotation()
-    current_base_quat      = mjx_data.xquat[base_body_id]
+ 
+    current_com_pos    = mjx_data.subtree_com[0]
+    current_com_vel    = J_com @ qvel
+    current_lwheel_pos = l_wheel_center
+    current_lwheel_vel = J_left_wheel_lin  @ qvel
+    current_rwheel_pos = r_wheel_center
+    current_rwheel_vel = J_right_wheel_lin @ qvel
+ 
+    current_base_quat      = mjx_data.xquat[base_body_id]          # (w, x, y, z)
     current_base_quat_xyzw = jnp.array([
         current_base_quat[1], current_base_quat[2],
         current_base_quat[3], current_base_quat[0],
     ])
     current_base_quat_xyzw = current_base_quat_xyzw / (
-        jnp.linalg.norm(current_base_quat_xyzw) + 1e-9
-    )
-    current_base_link_pos  = jax.scipy.spatial.transform.Rotation.from_quat(
-        current_base_quat_xyzw
-    ).as_matrix()
-    # current_base_link_vel = J_base_link_.bottomRows<3>() * qdot
+        jnp.linalg.norm(current_base_quat_xyzw) + 1e-9)
+    current_base_link_pos = jax.scipy.spatial.transform.Rotation.from_quat(
+        current_base_quat_xyzw).as_matrix()
     current_base_link_vel = J_base_link_rot @ qvel
-
-    # r_virtual_frame_R = labrob::compute_virtual_frame(r_wheel_R)
-    r_virtual_frame_R = compute_virtual_frame(r_wheel_R)
-    # l_virtual_frame_R = labrob::compute_virtual_frame(l_wheel_R)
-    l_virtual_frame_R = compute_virtual_frame(l_wheel_R)
-
-    # r_contact_frame = labrob::compute_contact_frame(r_wheel_R)
-    r_contact_frame = compute_contact_frame(r_wheel_R)
-    # l_contact_frame = labrob::compute_contact_frame(l_wheel_R)
-    l_contact_frame = compute_contact_frame(l_wheel_R)
-
-    # current_lwheel_pos.p = l_wheel_center (SE3.translation)
-    # current_lwheel_vel   = J_left_wheel_.topRows(3) * qdot
-    current_lwheel_pos = l_wheel_center
-    current_lwheel_vel = J_left_wheel_lin @ qvel
-
-    # current_rwheel_pos.p = r_wheel_center
-    # current_rwheel_vel   = J_right_wheel_.topRows(3) * qdot
-    current_rwheel_pos = r_wheel_center
-    current_rwheel_vel = J_right_wheel_lin @ qvel
+ 
     # ══════════════════════════════════════════════════════════════════════
-    #  2. DESIRED ACCELERATIONS  (Compute desired accelerations)
+    #  4. DESIRED ACCELERATIONS (feedforward + PD per task)
     # ══════════════════════════════════════════════════════════════════════
-
-    # err_com = desired.com.pos - current_com_pos
     err_com     = des['com_pos'] - current_com_pos
-    # err_com_vel = desired.com.vel - current_com_vel
     err_com_vel = des['com_vel'] - current_com_vel
-
-    # err_lwheel = desired.lwheel.pos.p - current_lwheel_pos.p
     err_lwheel     = des['lwheel_pos'] - current_lwheel_pos
-    # err_lwheel_vel = desired.lwheel.vel.head(3) - current_lwheel_vel
     err_lwheel_vel = des['lwheel_vel'] - current_lwheel_vel
-
-    # err_rwheel = desired.rwheel.pos.p - current_rwheel_pos.p
     err_rwheel     = des['rwheel_pos'] - current_rwheel_pos
-    # err_rwheel_vel = desired.rwheel.vel.head(3) - current_rwheel_vel
     err_rwheel_vel = des['rwheel_vel'] - current_rwheel_vel
-
-    # err_base_orientation = err_rotation(desired.base_link.pos, current_base_link_pos)
     err_base_orientation     = err_rotation(des['base_rot'], current_base_link_pos)
-    # err_base_orientation_vel = desired.base_link.vel - current_base_link_vel
     err_base_orientation_vel = des['base_omega'] - current_base_link_vel
-
-    # q_joint   = q.tail(n_joints_)
-    q_jnt     = qpos[7:]     # (nj,)
-    # qdot_joint = qdot.tail(n_joints_)
-    qdot_jnt  = qvel[6:]     # (nj,)
-
-    # err_posture  << 0(6), desired.qjnt - q_joint
-    err_posture     = jnp.concatenate([jnp.zeros(6), des['qjnt']     - q_jnt])
-    # err_posture_vel << 0(6), desired.qjntdot - qdot_joint
-    err_posture_vel = jnp.concatenate([jnp.zeros(6), des['qjntdot']  - qdot_jnt])
-
-    # Posture-regulation selection: by default every leg joint except the wheel
-    # spin DOFs (joints 3 and 7); a custom (nj,) 0/1 mask restricts the task to a
-    # subset (e.g. the hip abduction joints only, see config.posture_joint_ids).
+ 
+    q_jnt    = qpos[7:]
+    qdot_jnt = qvel[6:]
+    err_posture     = jnp.concatenate([jnp.zeros(6), des['qjnt']    - q_jnt])
+    err_posture_vel = jnp.concatenate([jnp.zeros(6), des['qjntdot'] - qdot_jnt])
+ 
     if posture_mask is None:
         matrix_with_no_wheel = jnp.eye(nj).at[3, 3].set(0.0).at[7, 7].set(0.0)
     else:
         matrix_with_no_wheel = jnp.diag(jnp.asarray(posture_mask, dtype=qpos.dtype))
-    err_posture_selection_matrix = jax.scipy.linalg.block_diag(
-        jnp.zeros((6, 6)), matrix_with_no_wheel
-    )  # (nv, nv)
-
-    # desired_qddot << 0(6), desired.qjntddot
-    desired_qddot = jnp.concatenate([jnp.zeros(6), des['qjntddot']])
-
-    # a_jnt_total = desired_qddot + Kp_regulation * err_posture + Kd_regulation * err_posture_vel
-    a_jnt_total = desired_qddot + Kp_regulation * err_posture + Kd_regulation * err_posture_vel
-
-    # a_com_total = desired.com.acc + Kp_motion * err_com + Kd_motion * err_com_vel
-    a_com_total = des['com_acc'] + Kp_motion * err_com + Kd_motion * err_com_vel
-
-    # a_lwheel_total = desired.lwheel.acc.head(3) + Kp_wheel * err_lwheel + Kd_wheel * err_lwheel_vel
-    a_lwheel_total = des['lwheel_acc'] + Kp_wheel * err_lwheel + Kd_wheel * err_lwheel_vel
-
-    # a_rwheel_total = desired.rwheel.acc.head(3) + Kp_wheel * err_rwheel + Kd_wheel * err_rwheel_vel
-    a_rwheel_total = des['rwheel_acc'] + Kp_wheel * err_rwheel + Kd_wheel * err_rwheel_vel
-
-    # a_base_orientation_total = desired.base_link.acc + Kp_motion * err_base + Kd_motion * err_base_vel
+    S = jax.scipy.linalg.block_diag(jnp.zeros((6, 6)), matrix_with_no_wheel)   # (nv, nv)
+ 
+    desired_qddot  = jnp.concatenate([jnp.zeros(6), des['qjntddot']])
+    a_jnt_total    = desired_qddot + Kp_regulation * err_posture + Kd_regulation * err_posture_vel
+    a_com_total    = des['com_acc']    + Kp_motion * err_com    + Kd_motion * err_com_vel
+    a_lwheel_total = des['lwheel_acc'] + Kp_wheel  * err_lwheel + Kd_wheel  * err_lwheel_vel
+    a_rwheel_total = des['rwheel_acc'] + Kp_wheel  * err_rwheel + Kd_wheel  * err_rwheel_vel
     a_base_orientation_total = (
         des['base_alpha']
         + Kp_motion * err_base_orientation
         + Kd_motion * err_base_orientation_vel
     )
-
+ 
     # ══════════════════════════════════════════════════════════════════════
-    #  3. BUILD COST FUNCTION  H, f
-    #     H_acc (nv x nv),  f_acc (nv,)
-    #     H_force_one (3 x 3),  f_force_one (3,)
+    #  5. COST  (0.5 x' H x + f' x)
     # ══════════════════════════════════════════════════════════════════════
-
-    S = err_posture_selection_matrix
-
-    # H_acc += params_.weight_q_ddot * I
-    H_acc = w_qddot * jnp.eye(nv)
-    # H_acc += params_.weight_com * J_com' * J_com
-    H_acc = H_acc + w_com    * (J_com.T            @ J_com)
-    # H_acc += params_.weight_lwheel * J_left_wheel_.topRows(3)' * J_left_wheel_.topRows(3)
-    H_acc = H_acc + w_lwheel * (J_left_wheel_lin.T  @ J_left_wheel_lin)
-    # H_acc += params_.weight_rwheel * J_right_wheel_.topRows(3)' * J_right_wheel_.topRows(3)
-    H_acc = H_acc + w_rwheel * (J_right_wheel_lin.T @ J_right_wheel_lin)
-    # H_acc += params_.weight_base * J_base_link_.bottomRows(3)' * J_base_link_.bottomRows(3)
-    H_acc = H_acc + w_base   * (J_base_link_rot.T   @ J_base_link_rot)
+    H_acc = w_qddot   * jnp.eye(nv)
+    H_acc = H_acc + w_com     * (J_com.T            @ J_com)
+    H_acc = H_acc + w_lwheel  * (J_left_wheel_lin.T  @ J_left_wheel_lin)
+    H_acc = H_acc + w_rwheel  * (J_right_wheel_lin.T @ J_right_wheel_lin)
+    H_acc = H_acc + w_base    * (J_base_link_rot.T   @ J_base_link_rot)
     H_acc = H_acc + w_posture * S
-    
-    # f_acc += weight_com    * J_com'            * (a_com_drift              - a_com_total)
-    f_acc  = w_com    * J_com.T            @ (a_com_drift              - a_com_total)
-    # f_acc += weight_lwheel * J_left_wheel.top' * (a_lwheel_drift           - a_lwheel_total)
-    f_acc  = f_acc + w_lwheel * J_left_wheel_lin.T  @ (a_lwheel_drift           - a_lwheel_total)
-    # f_acc += weight_rwheel * J_right_wheel.top'* (a_rwheel_drift           - a_rwheel_total)
-    f_acc  = f_acc + w_rwheel * J_right_wheel_lin.T @ (a_rwheel_drift           - a_rwheel_total)
-    # f_acc += weight_base   * J_base_link.bot'  * (a_base_orientation_drift - a_base_orientation_total)
-    f_acc  = f_acc + w_base   * J_base_link_rot.T   @ (a_base_orientation_drift - a_base_orientation_total)
+ 
+    f_acc =         w_com     * J_com.T            @ (a_com_drift              - a_com_total)
+    f_acc = f_acc + w_lwheel  * J_left_wheel_lin.T  @ (a_lwheel_drift           - a_lwheel_total)
+    f_acc = f_acc + w_rwheel  * J_right_wheel_lin.T @ (a_rwheel_drift           - a_rwheel_total)
+    f_acc = f_acc + w_base    * J_base_link_rot.T   @ (a_base_orientation_drift - a_base_orientation_total)
     f_acc = f_acc - w_posture * (S @ a_jnt_total)
-
-    
-    # H_force_one = 1e-9 * I(3)   f_force_one = 0(3)
+ 
     H_force_one = 1e-9 * jnp.eye(n_f * n_contacts)
     f_force_one = jnp.zeros(n_f * n_contacts)
-
-    # H = block_diag(H_acc, H_force_one, H_force_one)
-    H = jax.scipy.linalg.block_diag(H_acc, H_force_one, H_force_one)  # (n_var, n_var)
-    # f = [f_acc; f_force_one; f_force_one]
+ 
+    H = jax.scipy.linalg.block_diag(H_acc, H_force_one, H_force_one)   # (n_var, n_var)
     f = jnp.concatenate([f_acc, f_force_one, f_force_one])             # (n_var,)
-
+ 
     # ══════════════════════════════════════════════════════════════════════
-    #  4. JOINT LIMITS CONSTRAINTS  (C_acc, d_min_acc, d_max_acc)
-    #     n_wbc_inequalities_ = 2*4*n_contacts + 2*n_joints
-    #     C_acc (2*nj, nv),  righe velocity + position
+    #  6. INEQUALITY: joint position / velocity limits (linearised over dt)
     # ══════════════════════════════════════════════════════════════════════
-
-    # q_jnt_dot_min/max = ±robot_model_.velocityLimit.tail(n_joints_)
-    # q_jnt_min/max     =  robot_model_.lowerPositionLimit.tail(n_joints_)
-    # In MuJoCo: jnt_range[1:] esclude il free joint (id 0)
-    jnt_ids       = jnp.arange(1, mjx_model.njnt)   # joint attuati (skip free)
-    q_jnt_min     = mjx_model.jnt_range[jnt_ids, 0]  # (nj,)
-    q_jnt_max     = mjx_model.jnt_range[jnt_ids, 1]  # (nj,)
-    # MuJoCo non ha velocity limit esplicito per ogni joint → usa dof_armature o un valore fisso
-    # Se il tuo XML definisce <joint ... range="..." /> userai jnt_range; per vel usa un valore generoso
-    vel_limit     = 100.0 * jnp.ones(nj)              # rad/s — adatta al tuo URDF
-
-
-    # C_acc.rightCols(nj).topRows(nj).diagonal()    = sample_time
-    # C_acc.rightCols(nj).bottomRows(nj).diagonal() = sample_time^2 / 2
-    zeros_fb      = jnp.zeros((nj, 6))
-    C_vel_block   = sample_time               * jnp.eye(nj)
-    C_pos_block   = (sample_time**2 / 2.0)   * jnp.eye(nj)
-    C_acc_ineq    = jnp.block([
-        [zeros_fb, C_vel_block],   # velocity rows: dt * qddot_jnt
-        [zeros_fb, C_pos_block],   # position rows: dt²/2 * qddot_jnt
-    ])                              # (2*nj, nv)
-
-    # d_min_acc << q_jnt_dot_min - qdot_joint,  q_jnt_min - q_joint - dt*qdot_joint
-    d_min_acc     = jnp.concatenate([
+    jnt_ids   = jnp.arange(1, mjx_model.njnt)   # actuated joints (skip free joint id 0)
+    q_jnt_min = mjx_model.jnt_range[jnt_ids, 0]
+    q_jnt_max = mjx_model.jnt_range[jnt_ids, 1]
+    vel_limit = 100.0 * jnp.ones(nj)            # rad/s (MuJoCo has no explicit vel limit)
+ 
+    zeros_fb   = jnp.zeros((nj, 6))
+    C_acc_ineq = jnp.block([
+        [zeros_fb, sample_time            * jnp.eye(nj)],   # velocity rows: dt * qddot_jnt
+        [zeros_fb, (sample_time**2 / 2.0) * jnp.eye(nj)],   # position rows: dt^2/2 * qddot_jnt
+    ])                                                       # (2*nj, nv)
+    d_min_acc = jnp.concatenate([
         -vel_limit - qdot_jnt,
         q_jnt_min - q_jnt - sample_time * qdot_jnt,
     ])
-    # d_max_acc << q_jnt_dot_max - qdot_joint,  q_jnt_max - q_joint - dt*qdot_joint
-    d_max_acc     = jnp.concatenate([
+    d_max_acc = jnp.concatenate([
         vel_limit - qdot_jnt,
         q_jnt_max - q_jnt - sample_time * qdot_jnt,
     ])
-
+ 
     # ══════════════════════════════════════════════════════════════════════
-    #  5. FRICTION CONE CONSTRAINTS  (C_force_block, d_min_force, d_max_force)
+    #  7. INEQUALITY: friction cone per contact (+ small Fz floor)
+    #
+    #  The 4-row pyramid alone constrains |Fx|,|Fy| <= mu*Fz but leaves Fz
+    #  unbounded below; a combined vx+omega command can drive the planned normal
+    #  force negative, making the block infeasible and qpax return NaN torques.
+    #  A small positive Fz floor keeps the friction block always feasible.
     # ══════════════════════════════════════════════════════════════════════
-
-    # C_force_block <<  1,  0, -mu,
-    #                   0,  1, -mu,
-    #                  -1,  0, -mu,
-    #                   0, -1, -mu;
-    #                   0,  0, -1    <- added: Fz >= fz_min
-    # The 4-row pyramid alone only constrains |Fx|,|Fy| <= mu*Fz -- it has no
-    # explicit lower bound on Fz itself, so a combined vx+omega command that
-    # pushes the optimizer toward a small/negative planned normal force on
-    # one wheel makes this constraint block infeasible (mu*Fz<0 with the
-    # |Fx|,|Fy|<=mu*Fz rows admits no solution). qpax's QP solver does not
-    # degrade gracefully on infeasibility -- it was observed to return NaN
-    # torques under the vx=0.6/omega=0.4 combined case, which is the root
-    # cause of the residual instability there (confirmed by an ablation:
-    # the NaN reproduces identically with/without the MPC-side h_fz fix
-    # above, isolating it to this QP, not the MPC). Adding an explicit small
-    # positive floor on Fz keeps the friction-cone block always feasible.
-    fz_min = 5.0  # N, small margin -- not meant to be a real load-bearing bound
+    fz_min = 5.0  # N, feasibility margin only (not a real load-bearing bound)
     C_force_block = jnp.array([
         [ 1.0,  0.0, -mu_],
         [ 0.0,  1.0, -mu_],
         [-1.0,  0.0, -mu_],
         [ 0.0, -1.0, -mu_],
-        [ 0.0,  0.0, -1.0],
+        [ 0.0,  0.0, -1.0],   # Fz >= fz_min
     ])  # (5, 3)
-
-    # C_force_left  = C_force_block * l_contact_frame'
-    # C_force_right = C_force_block * r_contact_frame'
-    C_force_left_one  = C_force_block @ l_contact_frame.T   # (4, 3)
-    C_force_right_one = C_force_block @ r_contact_frame.T   # (4, 3)
-    
     C_force_left = jax.scipy.linalg.block_diag(
-        *[C_force_left_one for _ in range(n_contacts)]
-    )
-
+        *[C_force_block @ l_contact_frame.T for _ in range(n_contacts)])
     C_force_right = jax.scipy.linalg.block_diag(
-        *[C_force_right_one for _ in range(n_contacts)]
-    )
-    # d_min_force_one = -10000 * ones(5*n_contacts); d_max_force_one = 0 for
-    # the 4 friction-pyramid rows, -fz_min for the added Fz>=fz_min row.
+        *[C_force_block @ r_contact_frame.T for _ in range(n_contacts)])
     d_min_force_one = -10000.0 * jnp.ones(5 * n_contacts)
-    d_max_force_one = jnp.tile(
-        jnp.array([0.0, 0.0, 0.0, 0.0, -fz_min]), n_contacts
-    )
-
+    d_max_force_one = jnp.tile(jnp.array([0.0, 0.0, 0.0, 0.0, -fz_min]), n_contacts)
+ 
     # ══════════════════════════════════════════════════════════════════════
-    #  6. EQUALITY CONSTRAINTS  A, b
-    #
-    #  righe: rolling L (3) | rolling R (3) | no_contact (0) | dynamics (6)
-    #  n_wbc_equalities_ = 6 + 2*3 + 2*3*n_contacts = 18  (n_contacts=1)
+    #  8. EQUALITY: rolling constraints (L, R) + floating-base dynamics
     # ══════════════════════════════════════════════════════════════════════
     I3 = jnp.eye(3)
-
-    # T_l, T_r  (n_contacts=1: pcis = R * [0, 0, -wheel_radius])
+ 
+    # Force-transmission maps T = [I3; skew(pcis)] (n_contacts = 1).
     left_rCP_local  = jnp.array([0.0, 0.0, -wheel_radius])
     right_rCP_local = jnp.array([0.0, 0.0, -wheel_radius])
-    pcis_l = l_virtual_frame_R @ left_rCP_local    # ≡ left_rCP  se virtual_frame = l_wheel_R
+    pcis_l = l_virtual_frame_R @ left_rCP_local
     pcis_r = r_virtual_frame_R @ right_rCP_local
     T_l = jnp.vstack([I3, skew(pcis_l)])   # (6, 3)
     T_r = jnp.vstack([I3, skew(pcis_r)])   # (6, 3)
-
-    # J_left_wheel_  = [J_left_wheel_lin;  J_left_wheel_rot]   (6, nv)
-    # J_right_wheel_ = [J_right_wheel_lin; J_right_wheel_rot]  (6, nv)
-    J_left_wheel_  = jnp.vstack([J_left_wheel_lin,  J_left_wheel_rot])
-    J_right_wheel_ = jnp.vstack([J_right_wheel_lin, J_right_wheel_rot])
-
-    # nl = l_virtual_frame_R.col(1)   nr = r_virtual_frame_R.col(1)
+ 
+    # Rolling (no-slip at the contact point): transport wheel-centre motion to
+    # the contact point through rCP and remove the virtual spin component.
     nl = l_virtual_frame_R[:, 1]
     nr = r_virtual_frame_R[:, 1]
-    # wl_virtual = (I - nl*nl') * w_l
     wl_virtual = (I3 - jnp.outer(nl, nl)) @ w_l
-    # wr_virtual = (I - nr*nr') * w_r
     wr_virtual = (I3 - jnp.outer(nr, nr)) @ w_r
-
-    # A_acc.topRows(3)    = J_left_wheel_.topRows(3)  - skew(left_rCP)  * J_left_wheel_.bottomRows(3)
-    # b_acc.topRows(3)    = (-Jdot_l.top + skew(left_rCP)*Jdot_l.bot)*qdot - w_l x (wl_virt x left_rCP)
-    A_roll_L = J_left_wheel_lin  - skew(left_rCP)  @ J_left_wheel_rot   # (3, nv)
+ 
+    A_roll_L = J_left_wheel_lin  - skew(left_rCP)  @ J_left_wheel_rot
     b_roll_L = (
         -(J_left_wheel_dot_lin  - skew(left_rCP)  @ J_left_wheel_dot_rot)  @ qvel
         - jnp.cross(w_l, jnp.cross(wl_virtual, left_rCP))
     )
-    # A_acc.bottomRows(3) = J_right_wheel_.topRows(3) - skew(right_rCP) * J_right_wheel_.bottomRows(3)
-    # b_acc.bottomRows(3) = (-Jdot_r.top + skew(right_rCP)*Jdot_r.bot)*qdot - w_r x (wr_virt x right_rCP)
-    A_roll_R = J_right_wheel_lin - skew(right_rCP) @ J_right_wheel_rot  # (3, nv)
+    A_roll_R = J_right_wheel_lin - skew(right_rCP) @ J_right_wheel_rot
     b_roll_R = (
         -(J_right_wheel_dot_lin - skew(right_rCP) @ J_right_wheel_dot_rot) @ qvel
         - jnp.cross(w_r, jnp.cross(wr_virtual, right_rCP))
     )
-
-    # A_no_contact = 0  (in_contact always True, block commented in C++)
-    A_no_contact = jnp.zeros((2 * 3 * n_contacts, 2 * 3 * n_contacts))
-    b_no_contact = jnp.zeros(2 * 3 * n_contacts)
-
-    # Mu = M.block(0,0,6,nv),  cu = c.block(0,0,6,1)
-    Mu = M[:6, :]
-    cu = c[:6]
-    # Ma = M.block(6,0,nj,nv),  ca = c.block(6,0,nj,1)
-    Ma = M[6:, :]
-    ca = c[6:]
-
-    # Jlu = J_left_wheel_.block(0,0,6,6)   Jla = J_left_wheel_.block(0,6,6,nj)
-    Jlu = J_left_wheel_[:, :6]
-    Jla = J_left_wheel_[:, 6:]
-    # Jru = J_right_wheel_.block(0,0,6,6)  Jra = J_right_wheel_.block(0,6,6,nj)
-    Jru = J_right_wheel_[:, :6]
-    Jra = J_right_wheel_[:, 6:]
-
-    # A_dyn << Mu, -Jlu'*T_l, -Jru'*T_r   b_dyn = -cu
+ 
+    # Floating-base (unactuated) dynamics: Mu*qddot - Jlu'*T_l*fl - Jru'*T_r*fr = -cu
+    Mu, cu   = M[:6, :], c[:6]
+    Ma, ca   = M[6:, :], c[6:]
+    Jlu, Jla = J_left_wheel_[:, :6],  J_left_wheel_[:, 6:]
+    Jru, Jra = J_right_wheel_[:, :6], J_right_wheel_[:, 6:]
     A_dyn = jnp.hstack([Mu, -(Jlu.T @ T_l), -(Jru.T @ T_r)])   # (6, n_var)
     b_dyn = -cu
-
-    # Build A and b matrices
-    # A = [A_acc (6, nv) | 0; A_no_contact | A_no_contact; A_dyn]
-    zeros_f_eq = jnp.zeros((6, 2 * n_f * n_contacts))
+ 
+    zeros_roll_f = jnp.zeros((3, 2 * n_f * n_contacts))
     A_eq = jnp.vstack([
-        jnp.hstack([A_roll_L,    zeros_f_eq[:3]]),   # rolling L  (3, n_var)
-        jnp.hstack([A_roll_R,    zeros_f_eq[:3]]),   # rolling R  (3, n_var)
-        #jnp.hstack([
-        #    jnp.zeros((2 * 3 * n_contacts, nv)),
-        #    A_no_contact,
-        #]),                                           # no_contact (6, n_var)  — zero block
-        A_dyn,                                        # dynamics   (6, n_var)
-    ])                                                # (18, n_var)
-    #b_eq = jnp.concatenate([b_roll_L, b_roll_R, b_no_contact, b_dyn])  # (18,)
-    b_eq = jnp.concatenate([b_roll_L, b_roll_R, b_dyn])  # (18,)
+        jnp.hstack([A_roll_L, zeros_roll_f]),   # rolling L (3, n_var)
+        jnp.hstack([A_roll_R, zeros_roll_f]),   # rolling R (3, n_var)
+        A_dyn,                                   # dynamics  (6, n_var)
+    ])
+    b_eq = jnp.concatenate([b_roll_L, b_roll_R, b_dyn])
+ 
     # ══════════════════════════════════════════════════════════════════════
-    #  7. BUILD C, d_min, d_max  (inequality block)
-    #
-    #  C = [C_acc | 0 | 0;  0 | C_force_left | 0;  0 | 0 | C_force_right]
+    #  9. ASSEMBLE INEQUALITIES AND SOLVE
+    #     qpax: min 0.5 x'Hx + f'x  s.t.  A_eq x = b_eq,  G x <= h
     # ══════════════════════════════════════════════════════════════════════
     zeros_acc_f = jnp.zeros((5 * n_contacts, nv))
     zeros_f_f   = jnp.zeros((5 * n_contacts, n_f * n_contacts))
-
     C_ineq = jnp.block([
-        # joint limits rows: (2*nj, n_var)
-        [C_acc_ineq,   jnp.zeros((2 * nj, n_f * n_contacts)), jnp.zeros((2 * nj, n_f * n_contacts))],
-        # friction left rows: (4, n_var)
-        [zeros_acc_f,  C_force_left,                           zeros_f_f                            ],
-        # friction right rows: (4, n_var)
-        [zeros_acc_f,  zeros_f_f,                              C_force_right                        ],
-    ])   # (2*nj + 8, n_var)
-
+        [C_acc_ineq,  jnp.zeros((2 * nj, n_f * n_contacts)), jnp.zeros((2 * nj, n_f * n_contacts))],
+        [zeros_acc_f, C_force_left,                          zeros_f_f                            ],
+        [zeros_acc_f, zeros_f_f,                             C_force_right                        ],
+    ])
     d_min_ineq = jnp.concatenate([d_min_acc, d_min_force_one, d_min_force_one])
     d_max_ineq = jnp.concatenate([d_max_acc, d_max_force_one, d_max_force_one])
-
-    # ══════════════════════════════════════════════════════════════════════
-    #  8. SOLVE QP  (wbc_solver_ptr_->solve — qui jaxopt.OSQP)
-    #
-    #  min  0.5 x'Hx + f'x
-    #  s.t. A_eq x = b_eq
-    #       d_min ≤ C_ineq x ≤ d_max
-    #
-    #  jaxopt.OSQP vuole: l ≤ A_osqp x ≤ u
-    #  → eq:   b_eq  ≤ A_eq   x ≤ b_eq    (hard equality)
-    #  → ineq: d_min ≤ C_ineq x ≤ d_max
-    # ══════════════════════════════════════════════════════════════════════
+ 
     G = jnp.vstack([C_ineq, -C_ineq])
     h = jnp.concatenate([d_max_ineq, -d_min_ineq])
-
-
-    #jax.debug.callback(_tic_qpax, jnp.array(0))
-    x, s, z, y, converged, iters = qpax.solve_qp(
-        H, f, A_eq, b_eq, G, h,
-        solver_tol=1e-3,          
-    )
-    #jax.debug.callback(_toc_qpax, (converged, iters))
-    
+ 
+    x, s, z, y, converged, iters = qpax.solve_qp(H, f, A_eq, b_eq, G, h, solver_tol=1e-3)
+ 
     qddot = x[:nv]
-    fl    = x[nv               : nv + n_f * n_contacts]
+    fl    = x[nv                    : nv + n_f * n_contacts]
     fr    = x[nv + n_f * n_contacts : nv + 2 * n_f * n_contacts]
+ 
     # ══════════════════════════════════════════════════════════════════════
-    #  9. INVERSE DYNAMICS → TAU
-    #     tau = Ma * q_ddot + ca - Jla' * T_l * fl - Jra' * T_r * fr
+    #  10. INVERSE DYNAMICS -> actuated torques
     # ══════════════════════════════════════════════════════════════════════
     tau = Ma @ qddot + ca - Jla.T @ T_l @ fl - Jra.T @ T_r @ fr
-
+ 
     # ══════════════════════════════════════════════════════════════════════
-    #  10. DIAGNOSTICS (not used by the control law; consumed by the headless
-    #      validation harness through BatchedMPCControllerWrapper.whole_body_run_diag)
+    #  11. DIAGNOSTICS (unused by the control law; consumed by the *_diag wrapper)
     # ══════════════════════════════════════════════════════════════════════
-    fl_local = l_contact_frame.T @ fl          # contact frame: [tangent, lateral, normal]
+    fl_local = l_contact_frame.T @ fl   # contact frame: [tangent, lateral, normal]
     fr_local = r_contact_frame.T @ fr
-    ineq_slack = h - G @ x                     # >= 0 when satisfied
+    ineq_slack = h - G @ x              # >= 0 when satisfied
     n_jl = 2 * nj
     diag = dict(
         converged=converged,
         iters=iters,
-        # task residuals: J qddot + Jdot qdot - a_total (zero = task exactly realised)
+        # task residuals: J qddot + Jdot qdot - a_total (0 = task exactly realised)
         res_com=J_com @ qddot + a_com_drift - a_com_total,
         res_lwheel=J_left_wheel_lin @ qddot + a_lwheel_drift - a_lwheel_total,
         res_rwheel=J_right_wheel_lin @ qddot + a_rwheel_drift - a_rwheel_total,
@@ -1501,7 +945,10 @@ def _whole_body_interface_wheeled_legged_qp_impl(
         err_base=err_base_orientation,
         # constraint satisfaction
         eq_res_norm=jnp.linalg.norm(A_eq @ x - b_eq),
-        ineq_slack_min_joint=jnp.min(jnp.concatenate([ineq_slack[:n_jl], ineq_slack[G.shape[0] // 2: G.shape[0] // 2 + n_jl]])),
+        ineq_slack_min_joint=jnp.min(jnp.concatenate([
+            ineq_slack[:n_jl],
+            ineq_slack[G.shape[0] // 2: G.shape[0] // 2 + n_jl],
+        ])),
         # friction margins in the contact frame: [mu Fz - |Fx|, mu Fz - |Fy|, Fz - fz_min]
         fric_margin_l=jnp.array([mu_ * fl_local[2] - jnp.abs(fl_local[0]),
                                  mu_ * fl_local[2] - jnp.abs(fl_local[1]),
@@ -1512,98 +959,8 @@ def _whole_body_interface_wheeled_legged_qp_impl(
         fl_local=fl_local,
         fr_local=fr_local,
     )
-    return tau, qddot, fl, fr, diag
-
-
-def whole_body_interface_wheeled_legged_qp(*args, **kwargs):
-    """Whole-body QP (public entry point). Returns (tau, qddot, fl, fr).
-
-    The diagnostics computed by the implementation are dropped here so that the
-    call signature used by the controller wrappers and the RL environment is
-    unchanged; use ``whole_body_interface_wheeled_legged_qp_diag`` to get them.
-    """
-    tau, qddot, fl, fr, _ = _whole_body_interface_wheeled_legged_qp_impl(*args, **kwargs)
     return tau, qddot, fl, fr
 
-
-def whole_body_interface_wheeled_legged_qp_diag(*args, **kwargs):
-    """Whole-body QP returning also a diagnostics dict (see the implementation)."""
-    return _whole_body_interface_wheeled_legged_qp_impl(*args, **kwargs)
-
-
-import time
-
-_WBC_TIMING = {}
-
-
-def _tic_jac(_):
-    _WBC_TIMING["jac_t0"] = time.perf_counter()
-
-def _tic_post_solver(_):
-    _WBC_TIMING["post_solver_t0"] = time.perf_counter()
-
-
-def _toc_post_solver(_):
-    t0 = _WBC_TIMING.get("post_solver_t0", None)
-    if t0 is None:
-        print("[timing] post_solver: missing tic")
-        return
-
-    dt_ms = (time.perf_counter() - t0) * 1000.0
-    print(f"[timing] post_solver+tau {dt_ms:.3f} ms")
-
-def _tic_fwd(_):
-    _WBC_TIMING["fwd_t0"] = time.perf_counter()
-
-
-def _toc_fwd(_):
-    t0 = _WBC_TIMING.get("fwd_t0", None)
-    if t0 is None:
-        print("[timing] mjx_fwd: missing tic")
-        return
-
-    dt_ms = (time.perf_counter() - t0) * 1000.0
-    print(f"[timing] mjx_fwd+dqpos {dt_ms:.3f} ms")
-
-def _toc_jac(_):
-    t0 = _WBC_TIMING.get("jac_t0", None)
-    if t0 is None:
-        print("[timing] jacobian: missing tic")
-        return
-    dt_ms = (time.perf_counter() - t0) * 1000.0
-    print(f"[timing] jacobian_build {dt_ms:.3f} ms")
-
-
-def _tic_pre_solver(_):
-    _WBC_TIMING["pre_solver_t0"] = time.perf_counter()
-
-
-def _toc_pre_solver(_):
-    t0 = _WBC_TIMING.get("pre_solver_t0", None)
-    if t0 is None:
-        print("[timing] pre_solver: missing tic")
-        return
-    dt_ms = (time.perf_counter() - t0) * 1000.0
-    print(f"[timing] pre_solver_build {dt_ms:.3f} ms")
-
-
-def _tic_qpax(_):
-    _WBC_TIMING["qpax_t0"] = time.perf_counter()
-
-
-def _toc_qpax(info):
-    t0 = _WBC_TIMING.get("qpax_t0", None)
-    if t0 is None:
-        print("[timing] qpax: missing tic")
-        return
-
-    dt_ms = (time.perf_counter() - t0) * 1000.0
-    converged, iters = info
-
-    print(
-        f"[timing] qpax.solve_qp {dt_ms:.3f} ms | "
-        f"converged={bool(converged)} | iters={int(iters)}"
-    )
 @partial(jax.jit, static_argnums=(0,1,2,3))
 def reference_barell_roll(N,dt,n_joints,n_contact,foot0,q0):
     t1 = 0.2

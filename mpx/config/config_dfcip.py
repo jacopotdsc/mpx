@@ -45,12 +45,14 @@ mpc_iterations = 1
 wbc_lookahead_dt = 0.0
 T_TRAJECTORY = 60
 grav = 9.81
-# Timer values (make sure the values match your intended configuration)
+
 timer_t = jnp.array([0.5, 0.0, 0.0, 0.5])  # Timer values for each leg
 duty_factor = 0.65  # Duty factor for the gait
 step_freq = 1.35   # Step frequency in Hz
 step_height = 0.065  # Step height in meters
 robot_height = 0.44  # Height of the robot's base in meters
+h_min=0.3
+h_max=0.4
 com_z_to_track = 0.4
 clearence_speed = 0.4
 # NOTE: was 0.6. The C++ baseline (WholeBodyController's WBC friction-cone

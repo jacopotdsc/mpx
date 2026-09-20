@@ -16,7 +16,6 @@ import numpy as np
 
 import mpx.config.config_dfcip as config
 import mpx.utils.mpc_wrapper_dfcip as mpc_wrapper_dfcip
-import mpx.utils.mpc_utils as mpc_utils
 import mpx.utils.sim as sim_utils
 
 jax.config.update("jax_enable_x64", True)
@@ -49,45 +48,6 @@ def _gather_raw_state(model, data, base_body_id, contact_ids):
     return pcom, vcom, centers, Rs, radii, feet_vel
 
 
-@jax.jit
-def _process_state(pcom, vcom, centers, Rs, radii, feet_vel, theta_prev):
-    l_rcp = mpc_utils.get_rCP(Rs[0], radii[0])
-    r_rcp = mpc_utils.get_rCP(Rs[1], radii[1])
-
-    pl_world = centers[0] + l_rcp
-    pr_world = centers[1] + r_rcp
-    dpl_world, dpr_world = feet_vel[0], feet_vel[1]
-
-    tita_state = jnp.concatenate([pcom, vcom, pl_world, pr_world, dpl_world, dpr_world])
-
-    c_world = (pl_world + pr_world) / 2.0
-    vc_world = (dpl_world + dpr_world) / 2.0
-
-    diff = pl_world - pr_world
-    theta_wrapped = jnp.arctan2(-diff[0], diff[1])
-    a = (theta_wrapped - theta_prev + jnp.pi) % (2 * jnp.pi)
-    a = jnp.where(a < 0, a + 2 * jnp.pi, a) - jnp.pi
-    theta = theta_prev + a
-
-    ct, st = jnp.cos(theta), jnp.sin(theta)
-    R = jnp.array([[ct, -st, 0.0], [st, ct, 0.0], [0.0, 0.0, 1.0]])
-    dpl_b = R.T @ dpl_world
-    dpr_b = R.T @ dpr_world
-    w = (dpr_b[0] - dpl_b[0]) / config.d
-    v = (dpr_b[0] + dpl_b[0]) / 2.0
-
-    x0 = jnp.concatenate([
-        pcom,
-        vcom,
-        c_world,
-        jnp.array([vc_world[2]]),
-        jnp.array([theta]),
-        jnp.array([v]),
-        jnp.array([w]),
-    ])
-    return tita_state, x0, theta
-
-
 def main(headless=False, steps=500, scene="flat"):
     model = mujoco.MjModel.from_xml_path(dir_path + f"/../data/tita/scene_{scene}.xml")
     data = mujoco.MjData(model)
@@ -100,19 +60,23 @@ def main(headless=False, steps=500, scene="flat"):
         vx=0.0,
         vy=0.0,
         wz=0.0,
+        height=config.com_z_to_track,
         forward_step=0.1,
         yaw_step=0.2,
+        height_step=0.01,
         forward_limits=(-10.0, 10.0),
         yaw_limits=(-1.5, 1.5),
+        height_limits=(config.h_min, config.h_max),
     )
+
     mpc = mpc_wrapper_dfcip.BatchedMPCControllerWrapper(config, n_env=1)
 
     _reset_to_initial_state(model, data)
 
     theta_prev = 0.0
     raw = _gather_raw_state(model, data, base_body_id, contact_ids)
-    tita_state, x0, theta_prev = _process_state(*raw, theta_prev)
-    command = jnp.asarray(command_handle.mpc_wheeled_input(config.com_z_to_track))
+    tita_state, x0, theta_prev = mpc.process_state(*raw, theta_prev)
+    command = jnp.asarray(command_handle.mpc_wheeled_input())
     mpc_state = mpc.init_state()
     mpc_state, _ = mpc.run(mpc_state, x0[None, :], command[None, :])
     mpc_state, tau, qddot, _, _, _ = mpc.whole_body_run(
@@ -139,10 +103,10 @@ def main(headless=False, steps=500, scene="flat"):
         qvel = data.qvel.copy()
 
         raw = _gather_raw_state(model, data, base_body_id, contact_ids)
-        tita_state, x0, theta_prev = _process_state(*raw, theta_prev)
+        tita_state, x0, theta_prev = mpc.process_state(*raw, theta_prev)
 
         if counter % period == 0:
-            command = jnp.asarray(command_handle.mpc_wheeled_input(config.com_z_to_track))
+            command = jnp.asarray(command_handle.mpc_wheeled_input())
             mpc_state, _ = mpc.run(mpc_state, x0[None, :], command[None, :])
 
         mpc_state, tau, qddot, _, _, _ = mpc.whole_body_run(
@@ -156,18 +120,7 @@ def main(headless=False, steps=500, scene="flat"):
             tita_state[15:18][None, :],
         )
 
-        dt = model.opt.timestep
-        q_joint = qpos[7:]
-        dq_joint = qvel[6:]
-        qddot_joint = np.asarray(qddot[0, 6:])
-
-        dq_des = dq_joint + qddot_joint * dt
-        q_des = q_joint + dq_joint * dt + 0.5 * qddot_joint * dt**2
-
-        pd_ctrl = 35.0 * (q_des - q_joint) + 10.0 * (dq_des - dq_joint)
-        pd_ctrl[[3, 7]] = 0.0  # wheels: no position term
-
-        data.ctrl = pd_ctrl + np.asarray(tau[0])
+        data.ctrl = np.asarray(tau[0])
         mujoco.mj_step(model, data)
         counter += 1
 
@@ -185,8 +138,11 @@ def main(headless=False, steps=500, scene="flat"):
     ) as viewer:
         viewer.cam.distance *= 5.5
         viewer.sync()
+        overlay_text = None
         while viewer.is_running():
-            overlay_text = command_handle.consume_overlay_text()
+            updated_overlay_text = command_handle.consume_overlay_text_dfcip()
+            if updated_overlay_text is not None:
+                overlay_text = updated_overlay_text
             tic = timer()
             if overlay_text is not None:
                 viewer.set_texts((None, None, *overlay_text))

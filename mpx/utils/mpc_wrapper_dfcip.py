@@ -61,7 +61,15 @@ class BatchedMPCControllerWrapper:
         self.initial_state = jnp.concatenate([pcom_init, dpcom_init, c_init, vcz_init, jnp.array([theta]), v, omega])
 
         self._nj = mjx_model.nv - 6
-        self._desired_size = mpc_utils._REF_JOINTS + 3 * self._nj
+
+        self._index_variables_qp = {
+            'com_pos': 0,     'com_vel': 3,     'com_acc': 6,
+            'lwheel_pos': 9,  'lwheel_vel': 12, 'lwheel_acc': 15,
+            'rwheel_pos': 18, 'rwheel_vel': 21, 'rwheel_acc': 24,
+            'base_rot': 27,   'base_omega': 36, 'base_alpha': 39,
+            'joints': 42,
+        }
+        self._desired_size = self._index_variables_qp['joints'] + 3 * self._nj
 
         posture_joint_ids = getattr(config, "posture_joint_ids", None)
         if posture_joint_ids is None:
@@ -95,12 +103,14 @@ class BatchedMPCControllerWrapper:
                 config.mu,
                 qpos, qvel, desired,
                 posture_mask=self._posture_mask,
+                ref_layout=self._index_variables_qp,
             )
 
         self._solve                = jax.jit(jax.vmap(work))
         self._ref_gen              = jax.jit(jax.vmap(ref_gen))
         self._whole_body_interface = jax.jit(jax.vmap(whole_body_control))
         self._build_desired_jit    = jax.jit(self._build_desired_impl)
+        self._process_state_jit    = jax.jit(self._process_state_impl)
 
         U0 = jnp.tile(config.u_ref, (config.N, 1))
         X0 = jnp.tile(self.initial_state, (config.N + 1, 1))
@@ -130,6 +140,9 @@ class BatchedMPCControllerWrapper:
             U0_shifted=self._U0_init,
             D0_shifted=self._D0_init,
         )
+
+    def process_state(self, pcom, vcom, centers, Rs, radii, feet_vel, theta_prev):
+        return self._process_state_jit(pcom, vcom, centers, Rs, radii, feet_vel, theta_prev)
 
     def run(self, state: MPCState, x0, cmd) -> MPCState:
         cfg = self.config
@@ -169,6 +182,45 @@ class BatchedMPCControllerWrapper:
     def reset(self) -> MPCState:
         print("MPC Controller Reset")
         return self.init_state()
+
+    def _process_state_impl(self, pcom, vcom, centers, Rs, radii, feet_vel, theta_prev):
+        cfg = self.config
+
+        l_rcp = mpc_utils.get_rCP(Rs[0], radii[0])
+        r_rcp = mpc_utils.get_rCP(Rs[1], radii[1])
+
+        pl_world = centers[0] + l_rcp
+        pr_world = centers[1] + r_rcp
+        dpl_world, dpr_world = feet_vel[0], feet_vel[1]
+
+        tita_state = jnp.concatenate([pcom, vcom, pl_world, pr_world, dpl_world, dpr_world])
+
+        c_world = (pl_world + pr_world) / 2.0
+        vc_world = (dpl_world + dpr_world) / 2.0
+
+        diff = pl_world - pr_world
+        theta_wrapped = jnp.arctan2(-diff[0], diff[1])
+        a = (theta_wrapped - theta_prev + jnp.pi) % (2 * jnp.pi)
+        a = jnp.where(a < 0, a + 2 * jnp.pi, a) - jnp.pi
+        theta = theta_prev + a
+
+        ct, st = jnp.cos(theta), jnp.sin(theta)
+        R = jnp.array([[ct, -st, 0.0], [st, ct, 0.0], [0.0, 0.0, 1.0]])
+        dpl_b = R.T @ dpl_world
+        dpr_b = R.T @ dpr_world
+        w = (dpr_b[0] - dpl_b[0]) / cfg.d
+        v = (dpr_b[0] + dpl_b[0]) / 2.0
+
+        x0 = jnp.concatenate([
+            pcom,
+            vcom,
+            c_world,
+            jnp.array([vc_world[2]]),
+            jnp.array([theta]),
+            jnp.array([v]),
+            jnp.array([w]),
+        ])
+        return tita_state, x0, theta
 
     def _build_desired_impl(self, x0, qpos, state, pl_world, pr_world, dpl_world, dpr_world):
         cfg = self.config
@@ -272,20 +324,21 @@ class BatchedMPCControllerWrapper:
         qjntddot_ref = jnp.zeros((B, self._nj))
 
         nj = self._nj
-        desired = desired.at[:, mpc_utils._REF_COM_POS:mpc_utils._REF_COM_POS + 3].set(com_pos_ref)
-        desired = desired.at[:, mpc_utils._REF_COM_VEL:mpc_utils._REF_COM_VEL + 3].set(com_vel_ref)
-        desired = desired.at[:, mpc_utils._REF_COM_ACC:mpc_utils._REF_COM_ACC + 3].set(com_acc_ref)
-        desired = desired.at[:, mpc_utils._REF_LW_POS:mpc_utils._REF_LW_POS + 3].set(lwheel_pos_ref)
-        desired = desired.at[:, mpc_utils._REF_RW_POS:mpc_utils._REF_RW_POS + 3].set(rwheel_pos_ref)
-        desired = desired.at[:, mpc_utils._REF_LW_VEL:mpc_utils._REF_LW_VEL + 3].set(lwheel_vel_ref)
-        desired = desired.at[:, mpc_utils._REF_RW_VEL:mpc_utils._REF_RW_VEL + 3].set(rwheel_vel_ref)
-        desired = desired.at[:, mpc_utils._REF_LW_ACC:mpc_utils._REF_LW_ACC + 3].set(lwheel_acc_ref)
-        desired = desired.at[:, mpc_utils._REF_RW_ACC:mpc_utils._REF_RW_ACC + 3].set(rwheel_acc_ref)
-        desired = desired.at[:, mpc_utils._REF_BASE_ROT:mpc_utils._REF_BASE_ROT + 9].set(base_rot_ref)
-        desired = desired.at[:, mpc_utils._REF_BASE_OMG:mpc_utils._REF_BASE_OMG + 3].set(base_omega_ref)
-        desired = desired.at[:, mpc_utils._REF_BASE_ALP:mpc_utils._REF_BASE_ALP + 3].set(base_alpha_ref)
-        desired = desired.at[:, mpc_utils._REF_JOINTS:mpc_utils._REF_JOINTS + nj].set(qjnt_ref)
-        desired = desired.at[:, mpc_utils._REF_JOINTS + nj:mpc_utils._REF_JOINTS + 2 * nj].set(qjntdot_ref)
-        desired = desired.at[:, mpc_utils._REF_JOINTS + 2 * nj:mpc_utils._REF_JOINTS + 3 * nj].set(qjntddot_ref)
+        idx = self._index_variables_qp
+        desired = desired.at[:, idx['com_pos']:idx['com_pos'] + 3].set(com_pos_ref)
+        desired = desired.at[:, idx['com_vel']:idx['com_vel'] + 3].set(com_vel_ref)
+        desired = desired.at[:, idx['com_acc']:idx['com_acc'] + 3].set(com_acc_ref)
+        desired = desired.at[:, idx['lwheel_pos']:idx['lwheel_pos'] + 3].set(lwheel_pos_ref)
+        desired = desired.at[:, idx['rwheel_pos']:idx['rwheel_pos'] + 3].set(rwheel_pos_ref)
+        desired = desired.at[:, idx['lwheel_vel']:idx['lwheel_vel'] + 3].set(lwheel_vel_ref)
+        desired = desired.at[:, idx['rwheel_vel']:idx['rwheel_vel'] + 3].set(rwheel_vel_ref)
+        desired = desired.at[:, idx['lwheel_acc']:idx['lwheel_acc'] + 3].set(lwheel_acc_ref)
+        desired = desired.at[:, idx['rwheel_acc']:idx['rwheel_acc'] + 3].set(rwheel_acc_ref)
+        desired = desired.at[:, idx['base_rot']:idx['base_rot'] + 9].set(base_rot_ref)
+        desired = desired.at[:, idx['base_omega']:idx['base_omega'] + 3].set(base_omega_ref)
+        desired = desired.at[:, idx['base_alpha']:idx['base_alpha'] + 3].set(base_alpha_ref)
+        desired = desired.at[:, idx['joints']:idx['joints'] + nj].set(qjnt_ref)
+        desired = desired.at[:, idx['joints'] + nj:idx['joints'] + 2 * nj].set(qjntdot_ref)
+        desired = desired.at[:, idx['joints'] + 2 * nj:idx['joints'] + 3 * nj].set(qjntddot_ref)
 
         return desired
