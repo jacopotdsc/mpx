@@ -1,0 +1,237 @@
+============================================================
+  PPO Training  —  TitaJoystickFlatTerrain
+  date         : 20260918_124502
+  JAX backend  : gpu
+  devices      : [CudaDevice(id=0)]
+  GPU name:    :   
+--- network ---
+  distribution : tanh_normal
+  hidden layers: (512, 256, 128)
+  entropy cost : 0.001
+  policy obs   : state
+  value obs    : privileged_state
+  policy net shape: (51,)
+  value net shape : (102,)
+  obs size     : {'privileged_state': (102,), 'state': (51,)}
+  action size  : 8
+  --- PPO params ---
+  num_timesteps            : 30000000
+  num_evals                : 15
+  reward_scaling           : 1.0
+  episode_length           : 1000
+  normalize_observations   : True
+  action_repeat            : 1
+  unroll_length            : 20
+  num_minibatches          : 32
+  num_updates_per_batch    : 4
+  discounting              : 0.99
+  learning_rate            : 0.0003
+  entropy_cost             : 0.001
+  num_envs                 : 1024
+  batch_size               : 256
+  max_grad_norm            : 1.0
+  network_factory          : {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}
+  num_resets_per_eval      : 10
+  seed                     : 0
+  deterministic_eval       : True
+============================================================
+
+--- environment config ---
+Kd: 10.0
+Kd_wheel: 10.0
+Kp: 35.0
+action_repeat: 1
+action_scale_pos: 0.5
+action_scale_vel: 25.0
+command_config:
+  a:
+  - 2.5
+  - 0.8
+  a_learned:
+  - 2.0
+  - 0.6
+  b:
+  - 0.75
+  - 0.75
+  command_lpf: 0.02
+  h:
+  - 0.4
+  - 0.4
+  names:
+  - vx
+  - wz
+  p_extend: 0.2
+ctrl_dt: 0.01
+episode_length: 1000
+impl: jax
+naconmax: 32768
+njmax: 40
+noise_config:
+  level: 1.0
+  scales:
+    gravity: 0.05
+    gyro: 0.2
+    joint_mpc_pos: 0.01
+    joint_mpc_vel: 0.1
+    joint_pos: 0.01
+    joint_vel: 0.1
+    linvel: 0.1
+pert_config:
+  enable: false
+  kick_durations:
+  - 0.05
+  - 0.2
+  kick_wait_times:
+  - 1.0
+  - 3.0
+  velocity_kick:
+  - 0.0
+  - 3.0
+randomize_reset: 1.0
+residual_config:
+  Kd: 0.5
+  Kd_wheel: 0.5
+  Kp: 20.0
+  enabled: true
+  scale: 0.5
+  tau_limit_leg: 25.0
+  tau_limit_wheel: 12.5
+reward_config:
+  base_height_target: 0.4
+  only_positive_rewards: false
+  scales:
+    action_rate: -0.001
+    action_rate_2nd: -0.0001
+    base_height: -1.0
+    dof_pos_limits: -1.0
+    orientation: -1.0
+    residual: -0.0
+    termination: -100.0
+    tracking_ang_vel: 5.0
+    tracking_lin_vel: 10.0
+  tracking_sigma: 0.0625
+sim_dt: 0.002
+soft_joint_pos_limit_factor: 0.95
+
+============================================================
+
+  eval#0 
+	num_steps =            0
+	reward = +140.164 ± 14.814
+	std = n/a
+	kl = n/a
+	elapsed 02:06
+	time 12:47:08
+-------------------------------
+  eval#1 
+	num_steps =    3,276,800
+	reward = +142.438 ± 5.650
+	std = 0.3152
+	kl = 0.6989
+	elapsed 10:20
+	time 12:55:22
+-------------------------------
+  eval#2 
+	num_steps =    6,553,600
+	reward = +143.415 ± 7.853
+	std = 0.3045
+	kl = 0.0797
+	elapsed 17:12
+	time 13:02:14
+-------------------------------
+  eval#3 
+	num_steps =    9,830,400
+	reward = +142.480 ± 6.038
+	std = 0.3218
+	kl = 14.1773
+	elapsed 24:06
+	time 13:09:09
+-------------------------------
+  eval#4 
+	num_steps =   13,107,200
+	reward = +142.698 ± 5.093
+	std = 0.3128
+	kl = 0.0684
+	elapsed 30:13
+	time 13:15:15
+-------------------------------
+  eval#5 
+	num_steps =   16,384,000
+	reward = +140.823 ± 11.072
+	std = 0.3190
+	kl = 0.0470
+	elapsed 36:44
+	time 13:21:46
+-------------------------------
+  eval#6 
+	num_steps =   19,660,800
+	reward = +141.659 ± 13.898
+	std = 0.3248
+	kl = 0.0493
+	elapsed 43:23
+	time 13:28:25
+-------------------------------
+  eval#7 
+	num_steps =   22,937,600
+	reward = +142.255 ± 9.327
+	std = 0.3484
+	kl = 0.7091
+	elapsed 49:59
+	time 13:35:02
+-------------------------------
+  eval#8 
+	num_steps =   26,214,400
+	reward = +63.023 ± 883.429
+	std = 0.3523
+	kl = 0.0549
+	elapsed 56:14
+	time 13:41:16
+-------------------------------
+  eval#9 
+	num_steps =   29,491,200
+	reward = +142.562 ± 10.065
+	std = 0.3546
+	kl = 0.0439
+	elapsed 62:33
+	time 13:47:35
+-------------------------------
+  eval#10
+	num_steps =   32,768,000
+	reward = +140.566 ± 13.364
+	std = 0.3527
+	kl = 0.0541
+	elapsed 68:53
+	time 13:53:55
+-------------------------------
+  eval#11
+	num_steps =   36,044,800
+	reward = +143.064 ± 5.778
+	std = 0.3536
+	kl = 0.0498
+	elapsed 75:06
+	time 14:00:08
+-------------------------------
+  eval#12
+	num_steps =   39,321,600
+	reward = +143.266 ± 5.141
+	std = 0.3621
+	kl = 0.9249
+	elapsed 81:23
+	time 14:06:25
+-------------------------------
+  eval#13
+	num_steps =   42,598,400
+	reward = +143.940 ± 5.249
+	std = 0.3591
+	kl = 0.1420
+	elapsed 88:02
+	time 14:13:04
+-------------------------------
+  eval#14
+	num_steps =   45,875,200
+	reward = +140.951 ± 15.524
+	std = 0.3716
+	kl = 0.0743
+	elapsed 94:16
+	time 14:19:18
+-------------------------------
