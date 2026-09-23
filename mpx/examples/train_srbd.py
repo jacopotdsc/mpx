@@ -16,6 +16,32 @@ import os
 import jax
 
 jax.config.update("jax_enable_x64", True)
+
+# Compatibility shim: brax 0.14.2 calls jax.device_put_replicated (train.py:756),
+# which jax 0.10.2 removed (along with device_put_sharded). Restore it with the
+# correct semantics: replicate the pytree across `devices`, adding a leading
+# device axis so pmap can map over it.
+if not hasattr(jax, "device_put_replicated"):
+    import jax.numpy as _jnp
+
+    def _device_put_replicated(x, devices):
+        n = len(devices)
+        try:
+            from jax.sharding import PositionalSharding
+            sharding = PositionalSharding(devices)
+
+            def _rep(leaf):
+                leaf = _jnp.asarray(leaf)
+                stacked = _jnp.broadcast_to(leaf, (n,) + leaf.shape)
+                return jax.device_put(stacked, sharding.reshape((n,) + (1,) * leaf.ndim))
+        except Exception:
+            def _rep(leaf):
+                leaf = _jnp.asarray(leaf)
+                return _jnp.broadcast_to(leaf, (n,) + leaf.shape)
+        return jax.tree_util.tree_map(_rep, x)
+
+    jax.device_put_replicated = _device_put_replicated
+
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_command_buffer=")
 CACHE_DIR = os.path.expanduser("~/.jax_cache")
 jax.config.update("jax_compilation_cache_dir", CACHE_DIR)
@@ -33,6 +59,7 @@ if not os.environ.get("DISPLAY"):
 import argparse
 import functools
 import inspect
+import json
 import os
 import pickle
 import re
@@ -108,14 +135,13 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 #  PPO parameters  (edit here)
 # ─────────────────────────────────────────────────────────────────────────────
-POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
 DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match checkpoint
 ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for safe exploration)
 ZERO_INIT_LOAD = True # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
-NUM_TIMESTEPS = 20_000_000
-NUM_EVALS = 10
+NUM_TIMESTEPS = 30_000_000
+NUM_EVALS = 15
 EPISODE_LENGTH = 1000
 NUM_ENVS = 1024
 DETERMINISTIC_EVAL = True  # eval usa la media della policy, non un sample rumoroso
@@ -137,8 +163,9 @@ PPO_PARAMS = dict(
       batch_size=256,
       max_grad_norm=1.0,
       network_factory=dict(
-            policy_hidden_layer_sizes=(512, 256, 128),
-            value_hidden_layer_sizes=(512, 256, 128),
+            distribution_type=DISTRIBUTION_TYPE,
+            policy_hidden_layer_sizes=(256, 256, 256),
+            value_hidden_layer_sizes=(256, 256, 256),
             policy_obs_key="state",
             value_obs_key="privileged_state",
         ),
@@ -176,14 +203,33 @@ print(f"SAC_PARAMS: \n{SAC_PARAMS}")
 
 def make_envs(
     env_name: str = "Go1JoystickFlatTerrain",
+    reward_scale_overrides: dict | None = None,
 ):
-    """Return (env, eval_env, wrap_fn) for a MuJoCo Playground env."""
+    """Return (env, eval_env, wrap_fn) for a MuJoCo Playground env.
+
+    reward_scale_overrides: optional {term_name: value} dict merged into
+    config.reward_config.scales via registry.load's config_overrides. Used
+    by the analysis_training reward-effects study to vary only the reward
+    coefficients while every other config field (command, PPO, network,
+    episode length, ...) stays exactly as the env's default_config().
+    """
 
     from mujoco_playground import registry
     from mujoco_playground._src.wrapper import wrap_for_brax_training as pg_wrap
 
-    env      = registry.load(env_name)
-    eval_env = registry.load(env_name)
+    import mujoco_playground
+    print(f"  [INFO] mujoco_playground loaded from: {mujoco_playground.__file__}")
+    print(f"  [INFO] mujoco_playground._src.wrapper loaded from: {pg_wrap.__module__} -> {sys.modules[pg_wrap.__module__].__file__}")
+
+    config_overrides = None
+    if reward_scale_overrides:
+        config_overrides = {
+            f"reward_config.scales.{k}": v for k, v in reward_scale_overrides.items()
+        }
+        print(f"  [INFO] reward_config.scales overrides: {reward_scale_overrides}")
+
+    env      = registry.load(env_name, config_overrides=config_overrides)
+    eval_env = registry.load(env_name, config_overrides=config_overrides)
 
     if ALGO == "sac":
         class SACStateWrapper(Wrapper):
@@ -477,6 +523,27 @@ def load_params(ckpt_dir: str, suffix: str = "best"):
         return None
     with open(pkl_path, "rb") as f:
         return pickle.load(f)
+
+
+def build_eval_inference_fn(env, load_arg, env_name="TitaJoystickFlatTerrain",
+                            ckpt_root=None):
+    """Return a deterministic inference_fn(obs, key) -> (action, extras) built
+    from a saved checkpoint. Reuses the training network construction and the
+    (normalizer_params, policy_params) pickle. Used by the residual_eval sweeps."""
+    if ckpt_root is None:
+        ckpt_root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "checkpoints")
+    env_base_dir = os.path.join(ckpt_root, env_name)
+    run_dir, load_suffix = _resolve_load(env_base_dir, load_arg if load_arg else "best")
+    ckpt_dir = run_dir if run_dir else env_base_dir
+    params = load_params(ckpt_dir, suffix=load_suffix)
+    if params is None:
+        raise FileNotFoundError(f"No checkpoint under {ckpt_dir}")
+    networks = _build_fresh_networks(env)
+    make_inf = ppo_networks.make_inference_fn(networks)
+    print(f"  [build_eval_inference_fn] loaded {ckpt_dir} suffix={load_suffix}")
+    return make_inf(params, deterministic=True)
+
 
 _RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}$")  # matches SCRIPT_START_TIME's "%Y%m%d_%H%M%S"
 
@@ -1055,9 +1122,8 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
             observation_size=env.observation_size,
             action_size=env.action_size,
             preprocess_observations_fn=running_statistics.normalize,
-            distribution_type=DISTRIBUTION_TYPE,
-            **ALGO_PARAMS["network_factory"],
-            #activation=linen.elu,
+            **ALGO_PARAMS["network_factory"],  # include distribution_type
+            activation=linen.elu,
             policy_network_kernel_init_fn=_policy_kernel_init_factory,
             #init_noise_std=INIT_STD
         )
@@ -1065,7 +1131,7 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
         networks = sac_networks.make_sac_networks(
             observation_size=env.observation_size,
             action_size=env.action_size,
-            hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
+            hidden_layer_sizes=PPO_PARAMS["network_factory"]["policy_hidden_layer_sizes"],
             preprocess_observations_fn=running_statistics.normalize,
             distribution_type=DISTRIBUTION_TYPE,
             activation=linen.elu,
@@ -1106,7 +1172,7 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
         print("  -- network info --")
         print(f"    ALGO                : {ALGO}")
         print(f"    distribution_type   : {DISTRIBUTION_TYPE}")
-        print(f"    hidden layers       : {POLICY_HIDDEN_LAYER_SIZES}")
+        print(f"    hidden layers       : {PPO_PARAMS['network_factory']['policy_hidden_layer_sizes']}")
         print(f"    action_size         : {env.action_size}")
         print(f"    param_size (output) : {param_size}")
         print(f"    zero_init_output    : {zero_init_output_layer}")
@@ -1217,13 +1283,13 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
     header_lines = [
         "=" * 60,
         f"  {algo.upper()} Training  —  {env_name}",
-        f"  date         : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"  date         : {SCRIPT_START_TIME}",
         f"  JAX backend  : {jax.default_backend()}",
         f"  devices      : {jax.devices()}",
         f"  GPU name:    : "
         "  \n--- network ---",
         f"  distribution : {DISTRIBUTION_TYPE}",
-        f"  hidden layers: {POLICY_HIDDEN_LAYER_SIZES}",
+        f"  hidden layers: {PPO_PARAMS['network_factory']['policy_hidden_layer_sizes']}",
         f"  entropy cost : {ALGO_PARAMS.get('entropy_cost', 'N/A')}",
         f"  policy obs   : {policy_obs_key}",
         f"  value obs    : {value_obs_key if algo == 'ppo' else '(shared)'}",
@@ -1385,7 +1451,7 @@ def main():
     parser.add_argument(
         "--name",
         type=str,
-        default="TitaJoystickFlatTerrain",
+        default="Lite3JoystickFlatTerrain",
         help="MuJoCo Playground environment name.",
     )
     parser.add_argument("--algo", type=str, choices=["ppo", "sac"], default="ppo",
