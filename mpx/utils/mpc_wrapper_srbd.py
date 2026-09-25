@@ -78,14 +78,48 @@ class BatchedMPCControllerWrapper:
         self._X0_init = jnp.tile(X0, (n_env, 1, 1))
         self._V0_init = jnp.tile(V0, (n_env, 1, 1))
 
-    def init_state(self) -> MPCState:
+    def init_state(self, x0=None) -> MPCState:
         n, cfg = self.n_env, self.config
         ct = jnp.tile(cfg.timer_t.reshape(1, -1), (n, 1))
         z3 = jnp.zeros((n, 3*cfg.n_contact))
         zc = jnp.ones((n, cfg.n_contact))
         # Command starts at rest so the first step ramps up from zero.
         cmd0 = jnp.zeros((n, 7))
-        return MPCState(contact_time=ct, liftoff=z3, foot_ref=z3, foot_ref_dot=z3, grf=z3, contact=zc, cmd_filt=cmd0, X0=self._X0_init, U0=self._U0_init, V0=self._V0_init)
+        liftoff = foot_ref = z3
+        if x0 is None:
+            X0, U0 = self._X0_init, self._U0_init
+        else:
+            # FULLY coherent warm-start for the passed reset pose (pos + yaw):
+            #  - X0: actual standing state on every horizon stage,
+            #  - U0: static-support GRF (weight split over the feet),
+            #  - liftoff / foot_ref: the nominal foot layout p_legs0 rotated by the
+            #    reset yaw and translated to the reset base position (the same
+            #    foot0_projected the reference generator builds), so the legs start
+            #    the gait from a stance consistent with the reset pose instead of
+            #    from zeros. Enabled via config.mpc_seed_warmstart: flattens the
+            #    startup roll to ~0.10 rad for any reset yaw (vs up to ~0.38 with the
+            #    nominal warm-start), provided the reset velocity command is zeroed
+            #    (compare.py does; otherwise the random reset command dominates).
+            x0 = jnp.reshape(x0, (n, cfg.n))
+            X0 = jnp.broadcast_to(x0[:, None, :], (n, cfg.N + 1, cfg.n))
+            fz = cfg.mass * 9.81 / cfg.n_contact
+            u_static = jnp.zeros((cfg.m,)).at[2::3].set(fz)
+            U0 = jnp.broadcast_to(u_static[None, None, :], (n, cfg.N, cfg.m))
+            # nominal feet (p_legs0) projected under the reset base pose, matching
+            # reference_generator_srbd's foot0_projected (Ryaw rotates x,y; z from p).
+            p = x0[:, :3]                                   # (n,3)
+            q = x0[:, 3:7]
+            yaw = jnp.arctan2(2 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]),
+                              1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))     # (n,)
+            c, s = jnp.cos(yaw)[:, None], jnp.sin(yaw)[:, None]         # (n,1)
+            f0 = cfg.p_legs0.reshape(cfg.n_contact, 3)                  # (nc,3) base frame
+            fx, fy = f0[:, 0][None, :], f0[:, 1][None, :]               # (1,nc)
+            wx = p[:, 0:1] + c * fx - s * fy                           # (n,nc)
+            wy = p[:, 1:2] + s * fx + c * fy
+            wz_ = p[:, 2:3] + f0[:, 2][None, :]
+            foot_world = jnp.stack([wx, wy, wz_], axis=-1).reshape(n, 3 * cfg.n_contact)
+            liftoff = foot_ref = foot_world
+        return MPCState(contact_time=ct, liftoff=liftoff, foot_ref=foot_ref, foot_ref_dot=z3, grf=z3, contact=zc, cmd_filt=cmd0, X0=X0, U0=U0, V0=self._V0_init)
 
     def run(self, state: MPCState, x0, input, foot_pos, contact) -> MPCState:
         cfg = self.config

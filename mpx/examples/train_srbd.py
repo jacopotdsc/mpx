@@ -140,8 +140,8 @@ ZERO_INIT_OUTPUT_LAYER = False # if True, init policy output layer to zero (for 
 ZERO_INIT_LOAD = True # if True, init policy output layer to zero (for safe exploration)
 INIT_STD = 0.03
 
-NUM_TIMESTEPS = 30_000_000
-NUM_EVALS = 15
+NUM_TIMESTEPS = 16_000_000
+NUM_EVALS = 8
 EPISODE_LENGTH = 1000
 NUM_ENVS = 1024
 DETERMINISTIC_EVAL = True  # eval usa la media della policy, non un sample rumoroso
@@ -721,7 +721,16 @@ def run_viewer_rollout(
         render_cam = mujoco.MjvCamera()
         mujoco.mjv_defaultCamera(render_cam)
         render_cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-        render_cam.distance = 8.0
+        # Distance is read from the model's XML (<custom><numeric name="render_cam_distance">)
+        # so each robot sets its own value; fall back to 8.0 (Tita's default) if absent.
+        _cam_dist_id = mujoco.mj_name2id(
+            eval_env.mj_model, mujoco.mjtObj.mjOBJ_NUMERIC, "render_cam_distance"
+        )
+        if _cam_dist_id >= 0:
+            _adr = eval_env.mj_model.numeric_adr[_cam_dist_id]
+            render_cam.distance = float(eval_env.mj_model.numeric_data[_adr])
+        else:
+            render_cam.distance = 8.0
         render_cam.elevation = -15.0
         render_cam.azimuth = 60.0
 

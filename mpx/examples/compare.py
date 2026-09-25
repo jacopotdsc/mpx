@@ -45,11 +45,17 @@ import re
 import shutil
 import time
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
 # Configure MuJoCo before importing it so off-screen rendering works headlessly.
-if not os.environ.get("DISPLAY"):
+_DEVICE = "cpu" #os.environ.get("COMPARE_DEVICE", "gpu").lower()
+if _DEVICE == "cpu":
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    os.environ.setdefault("MUJOCO_GL", "osmesa")
+    os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
+else:
     os.environ.setdefault("MUJOCO_GL", "egl")
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
@@ -87,21 +93,24 @@ DEFAULT_ENV_NAME = "Lite3JoystickFlatTerrain"
 
 TEST_DURATION_SECONDS = 5.0
 
-# The video is rendered at TARGET_VIDEO_FPS rather than at the full control
-# rate. The physics still advances every control step, so the tracking CSVs stay
-# at full resolution; only the off-screen render, its HUD and the H.264 encoding
-# are decimated. The MuJoCo renderer runs on the GPU under EGL, so rendering
-# every step competes with the env step for the device -- decimating it gives
-# those cycles back to the rollout.
-TARGET_VIDEO_FPS = 30.0
+# The video is rendered at the control rate itself (one frame per control step),
+# so the video FPS is derived from the env control period (env.dt = ctrl_dt) and
+# is never a hardcoded target. This keeps the rendered frames (and their HUD
+# values) at the exact same time resolution as the tracking CSVs and plots: every
+# CSV sample has a matching video frame, so a value read off the overlay always
+# matches the plotted trace (no decimated peaks). The MuJoCo renderer runs on the
+# GPU under EGL, so this costs more device time than decimating, but it is the
+# only way overlay and plots stay consistent.
 
 
 def _render_stride(dt: float) -> int:
-    """Control steps per rendered video frame to hit ~TARGET_VIDEO_FPS.
+    """Control steps per rendered video frame.
 
-    Returns 1 (render every step, i.e. the previous behaviour) when the control
-    rate is already at or below TARGET_VIDEO_FPS."""
-    return max(1, int(round((1.0 / float(dt)) / TARGET_VIDEO_FPS)))
+    Always 1: one frame per control step, so the video FPS equals the control
+    rate (1 / ctrl_dt), derived from the env and not from a hardcoded target.
+    Overlay/video therefore show exactly the same samples as the CSVs and plots."""
+    del dt  # kept for a stable signature; the stride no longer depends on it.
+    return 1
 
 # How each command component is measured, keyed by the names the env publishes
 # in command_config.names: linear-velocity commands are read from the base-local
@@ -161,7 +170,7 @@ def _measured_source(name: str, index: int) -> tuple[str, int, str]:
 # Scenes the whole test sequence is repeated over, as the env's `task` names.
 # Add or remove entries to change the terrains every test is run on; each one
 # multiplies the run time, and the length of the videos, by roughly one pass.
-DEFAULT_SCENES = ("flat_terrain", "rough_terrain")#, "perlin_terrain")
+DEFAULT_SCENES = ("flat_terrain", "rough_terrain", "perlin_terrain")
 
 # Fixed command sequence to run, per environment. Each entry is a
 # (name, command) or (name, command, duration_seconds).
@@ -179,13 +188,12 @@ DEFAULT_SCENES = ("flat_terrain", "rough_terrain")#, "perlin_terrain")
 LITE3_FLAT_TERRAIN_TESTS = (
     ("vx_1p0", np.array([1.0, 0.0, 0.0], dtype=np.float32)),
     ("vx_1p5", np.array([1.5, 0.0, 0.0], dtype=np.float32)),
-    #("vx_2p0", np.array([2.0, 0.0, 0.0], dtype=np.float32)),
-    #("vy_0p4", np.array([0.0, 0.4, 0.0], dtype=np.float32)),
-    #("vy_0p6", np.array([0.0, 0.6, 0.0], dtype=np.float32)),
-    #("vy_0p8", np.array([0.0, 0.8, 0.0], dtype=np.float32)),
-    #("vx_1p0_vy_0p4_then_0", np.array([[1.0, 0.4, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)),
-    #("vx_1p0_wz_0p6_then_0", np.array([[1.0, 0.0, 0.6], [0.0, 0.0, 0.0]], dtype=np.float32)),
-    #("vy_0p4_wz_0p6_then_0", np.array([[0.0, 0.4, 0.6], [0.0, 0.0, 0.0]], dtype=np.float32)),
+    ("vx_2p0", np.array([2.0, 0.0, 0.0], dtype=np.float32)),
+    ("vy_0p6", np.array([0.0, 0.6, 0.0], dtype=np.float32)),
+    ("vy_0p8", np.array([0.0, 0.8, 0.0], dtype=np.float32)),
+    ("vx_1p0_vy_0p4", np.array([1.0, 0.4, 0.0], dtype=np.float32)),
+    ("vx_1p0_wz_0p6", np.array([1.0, 0.0, 0.6], dtype=np.float32)),
+    ("vy_0p4_wz_0p6_then_0", np.array([[0.0, 0.4, 0.6], [0.0, 0.0, 0.0]], dtype=np.float32)),
 )
 
 LITE3_ROUGH_TERRAIN_TESTS = LITE3_FLAT_TERRAIN_TESTS
@@ -314,7 +322,89 @@ def _scene_tuple(scene, default_scene: str) -> tuple[str, ...]:
 
 
 def _normalize_tests(tests_by_scene: dict[str, tuple]) -> tuple[tuple, tuple]:
+
+    def _validate_test_names(tests_by_scene: dict[str, tuple]) -> None:
+        """Check duplicate names and consistency between names and commands."""
+        axes = {"vx": 0, "vy": 1, "wz": 2}
+        component = re.compile(r"(vx|vy|wz)_(-?\d+p\d+|-?\d+)")
+
+        def parse_command(label: str, test_name: str) -> np.ndarray:
+            if label == "0":
+                return np.zeros(3, dtype=np.float32)
+
+            expected = np.zeros(3, dtype=np.float32)
+            seen_axes = set()
+            position = 0
+
+            while position < len(label):
+                match = component.match(label, position)
+                if match is None:
+                    raise ValueError(
+                        f"{test_name}: invalid command in name: {label!r}"
+                    )
+
+                axis, value = match.groups()
+                if axis in seen_axes:
+                    raise ValueError(
+                        f"{test_name}: {axis} appears more than once"
+                    )
+                seen_axes.add(axis)
+                expected[axes[axis]] = float(value.replace("p", "."))
+
+                position = match.end()
+                if position < len(label):
+                    if not label.startswith("_", position):
+                        raise ValueError(
+                            f"{test_name}: invalid command in name: {label!r}"
+                        )
+                    position += 1
+
+            return expected
+
+        for scene, scene_tests in tests_by_scene.items():
+            seen_names = set()
+
+            for entry in scene_tests:
+                test_name, command = entry[:2]
+
+                if test_name in seen_names:
+                    raise ValueError(
+                        f"{scene}: duplicate test name {test_name!r}"
+                    )
+                seen_names.add(test_name)
+
+                rows = np.atleast_2d(
+                    np.asarray(command, dtype=np.float32)
+                )
+                if rows.shape[1] != 3:
+                    raise ValueError(
+                        f"{scene}__{test_name}: expected 3 command values per row, "
+                        f"got shape {rows.shape}"
+                    )
+
+                parts = test_name.split("_then_")
+                if len(parts) > 2:
+                    raise ValueError(
+                        f"{scene}__{test_name}: more than one '_then_'"
+                    )
+
+                if len(parts) != rows.shape[0]:
+                    raise ValueError(
+                        f"{scene}__{test_name}: name describes {len(parts)} "
+                        f"commands, but array has {rows.shape[0]} rows"
+                    )
+
+                for row_index, (part, actual) in enumerate(zip(parts, rows)):
+                    expected = parse_command(part, test_name)
+                    if not np.allclose(actual, expected, rtol=0, atol=1e-6):
+                        raise ValueError(
+                            f"{scene}__{test_name}, row {row_index}: "
+                            f"name expects {expected.tolist()}, "
+                            f"array contains {actual.tolist()}"
+                        )
+        
     """Return (test_name, command, scene) tests and row durations in seconds."""
+    _validate_test_names(tests_by_scene)
     normalized = []
     durations_by_test = []
     for scene, scene_tests in tests_by_scene.items():
@@ -2229,8 +2319,9 @@ def run_sequence(
     # test (its starts_new_test flag is True).
     blocks = _build_blocks(tests)
     num_blocks = len(blocks)
-    # Video frames are decimated to ~TARGET_VIDEO_FPS: the env still steps every
-    # control step below, only the render/HUD/encode runs every render_stride.
+    # One video frame per control step (render_stride == 1): the video FPS equals
+    # the control rate (1 / env.dt), so the render/HUD/encode run every step and
+    # the overlay matches the full-resolution CSVs and plots exactly.
     render_stride = _render_stride(env.dt)
 
     renderer = None
@@ -2312,7 +2403,7 @@ def run_sequence(
     # purpose -- model.stat.extent is unreliable here because the rough/perlin
     # scenes set a terrain-sized <statistic extent> (4-5 m), which would push the
     # camera out to 30 m and shrink the robot to a dot.
-    camera.distance = 6.5
+    camera.distance = 2.5 if type(env).__name__.startswith("Lite3") else 6.0
     camera.elevation = -15.0
     camera.azimuth = 135.0
 
@@ -2366,9 +2457,12 @@ def run_sequence(
         last_mpc_bad = np.nan
 
         command_np = np.asarray(command_row, dtype=np.float64)
+        current_command = np.asarray(
+            jax.device_get(state.info["command"][0]), dtype=np.float64
+        )
         measured.append(last_velocity.copy())
         target_commands.append(command_np.copy())
-        commands.append(command_np.copy())
+        commands.append(current_command.copy())
         reset_flags.append(False)
         frozen_flags.append(False)
         reward_values.append(np.full(len(reward_names), np.nan))

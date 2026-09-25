@@ -168,16 +168,19 @@ Kd = jnp.diag(jnp.tile(jnp.array([20, 20, 20]), n_contact))
 # exception (Qomega z, below).
 Qp = jnp.diag(jnp.array([0, 0, 1e4]))
 Qrot = jnp.diag(jnp.array([1e3, 1e3, 0]))
-# Lateral velocity weight. A moderate 2x emphasis reduces the vx-only lateral
-# transient (~0.125 -> ~0.112 m/s) without the slow combined-command divergence
-# observed at 5x; duty_factor remains 0.65.
-Qdp = jnp.diag(jnp.array([1, 2, 1])) * 1e3
-# Angular-velocity weight. The yaw component is the only direct yaw-rate penalty
-# (Qrot z = 0). Raising Qomega_z from 200 to 500 gives a small but repeatable
-# reduction of the vx-only yaw peak (~0.264 -> ~0.246 rad/s); higher values have
-# little extra benefit and become fragile in combined vx+wz commands. Startup is
-# decoupled from this weight by the coherent MPC warm-start.
-Qomega = jnp.diag(jnp.array([1, 1, 50])) * 1e1
+Qdp = jnp.diag(jnp.array([1, 1, 1])) * 1e3
+# Angular-velocity weight. The Aliengo values (all 1 * 1e1) were inherited (no vy /
+# no Lite3 yaw tuning). On Lite3 this is the ONLY term acting on yaw (Qrot z = 0).
+# Yaw component raised 10 -> 200 (x20): cuts the trot's steady yaw wiggle (vx=1.0
+# peak wz 0.48 -> 0.26) so the yaw/vy TRACKING error matches Aliengo (wz rms 0.14 vs
+# 0.13, vy err 0.12 vs 0.12). Startup is decoupled from this weight by the coherent
+# MPC warm-start (mpc_seed_warmstart), so 200 costs nothing at reset. Beyond ~200
+# wz barely improves (floor ~0.24) and torque grows. The residual oscillation PEAK
+# (~1.5x Aliengo) is the mass/inertia scale effect, not tunable here (lowering
+# duty_factor to 0.58 would shrink it but makes the gait fall ~1.5s under the env
+# command onset -> rejected); the residual RL closes it. Roll/pitch (x,y) stay at
+# 1e1 (angle held by Qrot=1e3). See analysis_lite3/lite3_fix.md Parte D/I.
+Qomega = jnp.diag(jnp.array([1, 1, 20])) * 1e1
 Qgrf = jnp.diag(jnp.ones(3 * n_contact)) * 1e-2
 
 W = jax.scipy.linalg.block_diag(Qp, Qrot, Qdp, Qomega, Qgrf)
