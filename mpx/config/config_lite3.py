@@ -168,16 +168,24 @@ Kd = jnp.diag(jnp.tile(jnp.array([20, 20, 20]), n_contact))
 # exception (Qomega z, below).
 Qp = jnp.diag(jnp.array([0, 0, 1e4]))
 Qrot = jnp.diag(jnp.array([1e3, 1e3, 0]))
-# Lateral velocity weight. A moderate 2x emphasis reduces the vx-only lateral
-# transient (~0.125 -> ~0.112 m/s) without the slow combined-command divergence
-# observed at 5x; duty_factor remains 0.65.
-Qdp = jnp.diag(jnp.array([1, 2, 1])) * 1e3
+# Velocity weight. vy x3 and vx x3 go together with Qgrf x5 (below): the smoother
+# GRF alone would slow the robot (vx 0.86 -> 0.73), so vx tracking is raised to
+# recover it (vx 0.84), and vy x3 keeps the lateral tracking. vy x5 alone diverges
+# slowly (~3.5 s) on vx+vy, so it is not pushed further; duty_factor stays 0.65.
+Qdp = jnp.diag(jnp.array([3, 3, 1])) * 1e3
 # Angular-velocity weight. The yaw component is the only direct yaw-rate penalty
 # (Qrot z = 0). Raising Qomega_z from 200 to 500 gives a small but repeatable
 # reduction of the vx-only yaw peak (~0.264 -> ~0.246 rad/s); higher values have
 # little extra benefit and become fragile in combined vx+wz commands. Startup is
 # decoupled from this weight by the coherent MPC warm-start.
 Qomega = jnp.diag(jnp.array([1, 1, 50])) * 1e1
-Qgrf = jnp.diag(jnp.ones(3 * n_contact)) * 1e-2
+# GRF regularisation x5 (1e-2 -> 5e-2): smoother foot forces -> smaller per-step
+# impulses -> lower trot oscillation peaks. With Qdp (3,3,1), on the TRUE baseline
+# env (residual off, as compare.py; 7 reset seeds, 5 s, t>=2 s) vs Qdp (1,2,1)/Qgrf
+# 1e-2: vx=1.0 pk_vy 0.10-0.16 -> ~0.075, pk_wz 0.24-0.26 -> 0.21-0.23; vx+vy
+# pk_wz 0.42-0.65 -> 0.35-0.40 and startup falls 2/7 -> 0/7; vx 0.87 -> 0.84.
+# Lower Qgrf (x0.1) falls; x100 over-smooths. See
+# analysis_lite3/startup_compare/env_eval.py and lite3_fix.md Parte J.
+Qgrf = jnp.diag(jnp.ones(3 * n_contact)) * 5e-2
 
 W = jax.scipy.linalg.block_diag(Qp, Qrot, Qdp, Qomega, Qgrf)

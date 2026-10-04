@@ -21,3 +21,8 @@ mpx/examples/plots/**
 *.png
 *.log
 *.mp4
+
+# Local diagnostic analyses and experiment outputs
+**/analysis_tita/**
+**/analysis_lite3/**
+**/analysis_training/**
