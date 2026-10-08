@@ -177,6 +177,8 @@ class BatchedMPCControllerWrapper:
                 _mu,
                 qpos, qvel, desired,
                 posture_mask=_posture_mask,
+                w_force=getattr(config, "w_force", 1e-9),
+                qdd_limit_brake=getattr(config, "qdd_limit_brake", 50.0),
             )
 
         def whole_body_control_diag(qpos, qvel, desired):
@@ -190,6 +192,8 @@ class BatchedMPCControllerWrapper:
                 _mu,
                 qpos, qvel, desired,
                 posture_mask=_posture_mask,
+                w_force=getattr(config, "w_force", 1e-9),
+                qdd_limit_brake=getattr(config, "qdd_limit_brake", 50.0),
             )
 
         # MPC diagnostics (harness only): cost before/after the FDDP step,

@@ -27,8 +27,8 @@ simulation_frequency = 500   # Hz  -> dt_sim = 0.002 s (must equal the XML times
 whole_body_frequency = 100   # Hz  -> dt_wbc = 0.01 s (WBC update period)
 mpc_frequency = 100          # Hz  -> MPC update period 0.01 s
 dt_mpc = 0.01                # s   MPC prediction step
-N = 50                       # MPC stages -> horizon N * dt_mpc = 0.5 s
-mpc_horizon_s = 0.5          # s   required prediction horizon (checked)
+N = 30                       # MPC stages -> horizon N * dt_mpc = 0.3 s
+mpc_horizon_s = 0.3          # s   required prediction horizon (checked)
 # FDDP iterations per MPC update (real-time iteration scheme: 1). Kept as an
 # explicit parameter for ablations; the combined-command fix does not need > 1.
 mpc_iterations = 1
@@ -120,6 +120,8 @@ w_posture = 0.1
 posture_joint_ids = (0, 4)   # joint_left_leg_1, joint_right_leg_1 (indices in the 8 actuated joints)
 
 w_qddot     = 1e-12
+w_force     = 1e-4  # ROS tuning: regularize WBC contact forces during braking.
+qdd_limit_brake = 50.0  # Bound the acceleration demanded by joint-limit recovery.
 w_com       = 1e0
 w_lwheel    = 1e0
 w_rwheel    = 1e0
@@ -185,7 +187,7 @@ w_theta  = 0e0      # heading
 # intentional: it is required to hit the vx tracking targets and does not
 # reproduce a bug just for parity's sake.
 w_v      = 1e1      # velocità com_ground projection
-w_omega  = 5e0      # velocità angolare
+w_omega  = 5e1      # velocità angolare
 # NOTE: raising w_v (15, 40) had been tried against the combined-command
 # undershoot and reintroduced the NaN/fall; that was a symptom of the w_eq
 # conditioning problem documented above, not of w_v itself. Left at 10.
@@ -242,4 +244,4 @@ dt_sim = _timing["dt_sim"]                              # 0.002 s
 dt_wbc = _timing["dt_wbc"]                              # 0.01 s
 mpc_period_sim_steps = _timing["mpc_period_sim_steps"]  # 5
 wbc_period_sim_steps = _timing["wbc_period_sim_steps"]  # 5
-mpc_shift_nodes = _timing["mpc_shift_nodes"]            # 1 MPC node per update
+mpc_shift_nodes = _timing["mpc_shift_nodes"]            # 1 MPC node per 100 Hz update

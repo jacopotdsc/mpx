@@ -18,3 +18,4 @@ mpx/examples/analysis_training/**
 #!**/checkpoints/TitaJoystickFlatTerrain/
 #!**/checkpoints/TitaJoystickFlatTerrain/saved/
 #!**/checkpoints/TitaJoystickFlatTerrain/saved/**
+**/analysis_tita/**

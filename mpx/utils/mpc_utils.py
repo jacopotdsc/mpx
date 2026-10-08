@@ -1001,6 +1001,8 @@ def _whole_body_interface_wheeled_legged_qp_impl(
     # ── runtime ───────────────────────────────────────────────────────────
     qpos, qvel, desired,
     posture_mask=None,
+    w_force=1e-9,
+    qdd_limit_brake=50.0,
 ):
     nq    = qpos.shape[0]
     nv    = mjx_model.nv
@@ -1246,8 +1248,8 @@ def _whole_body_interface_wheeled_legged_qp_impl(
     f_acc = f_acc - w_posture * (S @ a_jnt_total)
 
     
-    # H_force_one = 1e-9 * I(3)   f_force_one = 0(3)
-    H_force_one = 1e-9 * jnp.eye(n_f * n_contacts)
+    # H_force_one = w_force * I(3)   f_force_one = 0(3)
+    H_force_one = w_force * jnp.eye(n_f * n_contacts)
     f_force_one = jnp.zeros(n_f * n_contacts)
 
     # H = block_diag(H_acc, H_force_one, H_force_one)
@@ -1283,14 +1285,17 @@ def _whole_body_interface_wheeled_legged_qp_impl(
     ])                              # (2*nj, nv)
 
     # d_min_acc << q_jnt_dot_min - qdot_joint,  q_jnt_min - q_joint - dt*qdot_joint
+    # ROS joint-limit relaxation: never demand more than the braking bound
+    # solely to return inside a position limit within one WBC period.
+    pos_floor = (sample_time**2 / 2.0) * qdd_limit_brake
     d_min_acc     = jnp.concatenate([
         -vel_limit - qdot_jnt,
-        q_jnt_min - q_jnt - sample_time * qdot_jnt,
+        jnp.minimum(q_jnt_min - q_jnt - sample_time * qdot_jnt, pos_floor),
     ])
     # d_max_acc << q_jnt_dot_max - qdot_joint,  q_jnt_max - q_joint - dt*qdot_joint
     d_max_acc     = jnp.concatenate([
         vel_limit - qdot_jnt,
-        q_jnt_max - q_jnt - sample_time * qdot_jnt,
+        jnp.maximum(q_jnt_max - q_jnt - sample_time * qdot_jnt, -pos_floor),
     ])
 
     # ══════════════════════════════════════════════════════════════════════

@@ -194,15 +194,15 @@ LITE3_PERLIN_TERRAIN_TESTS = LITE3_FLAT_TERRAIN_TESTS
 
 TITA_FLAT_TERRAIN_TESTS = (
     #("vx_1p0", np.array([1.0, 0.0], dtype=np.float32)),
-    #("vx_1p5", np.array([1.5, 0.0], dtype=np.float32)),
-    ("vx_2p0", np.array([2.0, 0.0], dtype=np.float32)),
+    ("vx_1p5", np.array([1.5, 0.0], dtype=np.float32)),
+    #("vx_2p0", np.array([2.0, 0.0], dtype=np.float32)),
     #("wz_0p6", np.array([0.0, 0.6], dtype=np.float32)),
     ("wz_0p8", np.array([0.0, 0.8], dtype=np.float32)),
     #("vx_1p0_wz_0p6", np.array([1.0, 0.6], dtype=np.float32)),
-    ("vx_1p5_wz_0p6", np.array([1.5, 0.6], dtype=np.float32)),
+    #("vx_1p5_wz_0p6", np.array([1.5, 0.6], dtype=np.float32)),
     #("vx_3p0_wz_0p8", np.array([3.0, 0.8], dtype=np.float32)),
-    ("vx_2p0", np.array([[2.0, 0.0]], dtype=np.float32)),
-    ("vx_2p0_wz_0p6", np.array([[2.0, 0.0], [0.0, 0.6]], dtype=np.float32)),
+    #("vx_2p0", np.array([[2.0, 0.0]], dtype=np.float32)),
+    #("vx_2p0_wz_0p6", np.array([[2.0, 0.0], [0.0, 0.6]], dtype=np.float32)),
     #("vx_2p5_then_0", np.array([[2.5, 0.0], [0.0, 0.0]], dtype=np.float32)),
     #("vx_0p5_wz_0p8_then_vx_0p5_wz_n0p8", np.array([[0.5, 0.8], [0.5, -0.8]], dtype=np.float32)),
     #("vx_1p0_wz_0p8_then_vx_1p0_wz_n0p8", np.array([[1.0, 0.8], [1.0, -0.8]], dtype=np.float32)),
@@ -219,14 +219,14 @@ TITA_FLAT_TERRAIN_TESTS = (
 TITA_ROUGH_TERRAIN_TESTS = TITA_FLAT_TERRAIN_TESTS
 TITA_PERLIN_TERRAIN_TESTS = (
     ("vx_0p5", np.array([0.5, 0.0], dtype=np.float32)),
-    ("vx_0p7", np.array([0.7, 0.0], dtype=np.float32)),
-    ("vx_1p0", np.array([1.0, 0.0], dtype=np.float32)),
-    ("wz_0p5", np.array([0.0, 0.5], dtype=np.float32)),
-    ("vx_0p5_wz_0p3", np.array([0.5, 0.3], dtype=np.float32)),
-    ("vx_0p7_wz_0p3", np.array([0.7, 0.3], dtype=np.float32)),
-    ("vx_1p0_wz_0p3", np.array([1.0, 0.3], dtype=np.float32)),
-    ("vx_1p0_then_0", np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.float32)),
-    ("vx_1p0_wz_0p3_then_vx_0p0_wz_0p0", np.array([[1.0, 0.3], [0.0, 0.0]], dtype=np.float32)),
+    #("vx_0p7", np.array([0.7, 0.0], dtype=np.float32)),
+    #("vx_1p0", np.array([1.0, 0.0], dtype=np.float32)),
+    #("wz_0p5", np.array([0.0, 0.5], dtype=np.float32)),
+    #("vx_0p5_wz_0p3", np.array([0.5, 0.3], dtype=np.float32)),
+    #("vx_0p7_wz_0p3", np.array([0.7, 0.3], dtype=np.float32)),
+    #("vx_1p0_wz_0p3", np.array([1.0, 0.3], dtype=np.float32)),
+    #("vx_1p0_then_0", np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.float32)),
+    #("vx_1p0_wz_0p3_then_vx_0p0_wz_0p0", np.array([[1.0, 0.3], [0.0, 0.0]], dtype=np.float32)),
 )
 
 TESTS = {
@@ -2054,9 +2054,9 @@ def run_sequence(
         pose, attitude and velocities). It anchors every per-test plot at the
         shared initial state, making the first-step divergence explicit instead
         of hiding it in a post-step first sample. No control has run yet, so the
-        torques are zero and the MPC/residual split does not exist: those
-        diagnostics are marked NaN (skipped in the plots), exactly as the frozen
-        branch treats a missing term.
+        applied torques are zero. Rewards are read from the evaluated reset
+        state, and the planner reference is recorded separately if available.
+        Every plotted physical quantity therefore has a real t=0 sample.
         """
         nonlocal last_velocity, last_q, last_dq, last_torque
         nonlocal last_actuator_force, last_tau_nominal, last_tau_residual
@@ -2066,6 +2066,8 @@ def run_sequence(
             "qpos": state.data.qpos[0],
             "qvel": state.data.qvel[0],
             "actuator_force": state.data.actuator_force[0],
+            **({"mpc_tau": state.info["mpc_tau"][0]}
+               if "mpc_tau" in state.info else {}),
         })
         last_velocity = np.asarray(host["velocity"], dtype=np.float64)
         last_q = np.asarray(host["qpos"], dtype=np.float64)
@@ -2074,20 +2076,31 @@ def run_sequence(
             host["actuator_force"], dtype=np.float64
         )
         last_torque = np.zeros_like(last_actuator_force)
-        nan_torque = np.full_like(last_torque, np.nan, dtype=np.float64)
-        last_tau_nominal = nan_torque.copy()
-        last_tau_residual = nan_torque.copy()
-        last_mpc_tau = nan_torque.copy()
-        last_tau_saturated = np.nan
-        last_mpc_bad = np.nan
+        # No control has been applied at reset: every applied torque channel
+        # starts at zero. The planner may already have a computed reference.
+        last_tau_nominal = np.zeros_like(last_torque)
+        last_tau_residual = np.zeros_like(last_torque)
+        last_mpc_tau = _diag_array(host, "mpc_tau", np.zeros_like(last_torque))
+        last_tau_saturated = 0.0
+        last_mpc_bad = 0.0
 
         command_np = np.asarray(command_row, dtype=np.float64)
         measured.append(last_velocity.copy())
         target_commands.append(command_np.copy())
-        commands.append(command_np.copy())
+        commands.append(np.asarray(
+            jax.device_get(state.info["command"][0]), dtype=np.float64
+        ).copy())
         reset_flags.append(False)
         frozen_flags.append(False)
-        reward_values.append(np.full(len(reward_names), np.nan))
+        # Reset already evaluates every weighted reward term on the initial
+        # physical state. No action or simulation step has occurred. Keep the
+        # reset reward (zero accumulated reward) as the total at t=0.
+        reward_values.append(np.asarray(jax.device_get(jnp.stack(
+            [state.reward[0], *[
+                state.info["reward_terms"][name][0]
+                for name in reward_names[1:]
+            ]]
+        )), dtype=np.float64))
         q_values.append(last_q.copy())
         dq_values.append(last_dq.copy())
         torque_values.append(last_torque.copy())

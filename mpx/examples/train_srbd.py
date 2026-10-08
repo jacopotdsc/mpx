@@ -1,7 +1,7 @@
 """
 train_srbd.py
 -------------
-PPO training for quadruped locomotion.
+PPO / SAC training for MuJoCo Playground locomotion.
 Uses MuJoCo Playground environments.
 
 Usage:
@@ -87,7 +87,6 @@ from brax.envs.base import Wrapper
 from brax.training.agents.ppo import networks as ppo_networks
 from brax.training.agents.ppo import train as ppo
 from brax.training.agents.sac import networks as sac_networks
-from brax.training.agents.sac import train as sac
 from brax.training.acme import running_statistics
 from brax.training.acme import specs
 from brax.training.agents.ppo.optimizer import LRSchedule
@@ -102,6 +101,13 @@ from flax.core import freeze, unfreeze
 from brax.envs.wrappers.training import EpisodeWrapper, VmapWrapper, AutoResetWrapper
 import mujoco
 import mujoco.viewer
+
+from algorithm_initialization import (
+    initialize_residual,
+    install_configured_ppo_loss,
+    make_sac_networks,
+    restore_ppo_loss,
+)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plot_eval import (
@@ -135,67 +141,105 @@ def wrap_for_brax_training(env, episode_length, action_repeat=1, randomization_f
 # ─────────────────────────────────────────────────────────────────────────────
 #  PPO parameters  (edit here)
 # ─────────────────────────────────────────────────────────────────────────────
-POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)
-DISTRIBUTION_TYPE = "tanh_normal"  # ['normal', 'tanh_normal'] — must match checkpoint
-ZERO_INIT_OUTPUT_LAYER = True # residual policy must start near zero (near-zero residual at init)
-ZERO_INIT_LOAD = False # if True, init policy output layer to zero (for safe exploration)
-INIT_STD = 0.03
+POLICY_HIDDEN_LAYER_SIZES = (512, 256, 128)  # Dimensioni dei layer nascosti dell'actor.
+CRITIC_HIDDEN_LAYER_SIZES = (512, 256, 128)  # Dimensioni dei layer nascosti del critic/value.
+DISTRIBUTION_TYPE = "tanh_normal"  # Gaussiana compressa con tanh: azioni in [-1, 1].
+ZERO_INIT_OUTPUT_LAYER = True  # True: l'azione deterministica iniziale è esattamente zero.
+INIT_STD = 0.1  # Std iniziale della policy; il test verifica se 0.03 limitava l'attivazione.
+LOSS_NN_ACTION = True  # Aggiunge mean(action_deterministica**2) alla loss dell'actor.
+LOSS_NN_ACTION_COST = 1.0  # Prior sul mean action ridotto da 2.0 per consentire correzioni utili.
+CRITIC_WARMUP = True  # Prima adatta il critic al mix flat/rough con actor congelato.
+PPO_CRITIC_WARMUP_TIMESTEPS = 1_000_000  # Step richiesti per il burn-in PPO della value network.
+PPO_CRITIC_WARMUP_ON_RESTORE = False  # Resume dal checkpoint warm-up: actor e critic riprendono insieme.
 
-NUM_TIMESTEPS = 20_000_000
-NUM_EVALS = 10
-EPISODE_LENGTH = 1000
-NUM_ENVS = 1024
-DETERMINISTIC_EVAL = True  # eval usa la media della policy, non un sample rumoroso
+NUM_TIMESTEPS = 20_000_000  # Transizioni totali raccolte durante il training.
+NUM_EVALS = 10  # Numero di valutazioni distribuite lungo il training.
+EPISODE_LENGTH = 1000  # Durata massima di un episodio, in step dell'environment.
+NUM_ENVS = 1024  # Environment paralleli usati da PPO.
+DETERMINISTIC_EVAL = True  # Usa la media della policy durante l'eval, senza campionare.
+DEFAULT_NUM_EVAL_ENVS = inspect.signature(ppo.train).parameters["num_eval_envs"].default  # Default Brax, non duplicato localmente.
 
 PPO_PARAMS = dict(
-      num_timesteps=NUM_TIMESTEPS,
-      num_evals=NUM_EVALS,
-      reward_scaling=1.0,
-      episode_length=EPISODE_LENGTH,
-      normalize_observations=True,
-      action_repeat=1,
-      unroll_length=20,
-      num_minibatches=32,
-      num_updates_per_batch=4,
-      discounting=0.99,
-      learning_rate=3e-4,
-      # Lower entropy so the residual policy can shrink its exploration toward a
-      # small residual as it learns (the zero-init std is softplus(0)=0.69; a
-      # high entropy cost would pin it there, keeping the residual large).
-      entropy_cost=1e-3,
-      num_envs=NUM_ENVS,
-      batch_size=256,
-      max_grad_norm=1.0,
+      leg_only_actions=False,  # 8 azioni: offset gambe e velocità residuale delle ruote.
+      num_timesteps=NUM_TIMESTEPS,  # Numero totale di transizioni dell'environment.
+      num_evals=NUM_EVALS,  # Numero di valutazioni durante il training.
+      reward_scaling=1.0,  # Moltiplicatore delle reward usato per return e value target.
+      episode_length=EPISODE_LENGTH,  # Step massimi prima del reset dell'episodio.
+      normalize_observations=True,  # Normalizza le obs con media e varianza correnti.
+      action_repeat=1,  # Step dell'environment eseguiti per ogni azione della policy.
+      unroll_length=20,  # Step consecutivi per environment in ogni segmento di rollout.
+      num_minibatches=32,  # Suddivisioni del batch per ogni epoca di ottimizzazione.
+      num_updates_per_batch=2,  # Epoche di ottimizzazione su ogni batch raccolto.
+      discounting=0.99,  # Gamma: fattore di sconto delle reward future.
+      # La baseline ad azione zero è già quasi ottima nel task a regime:
+      # update piccoli evitano che PPO se ne allontani alla prima epoca.
+      learning_rate=1e-5,  # Learning rate Adam condiviso da actor e value network.
+      # Adaptive KL unilaterale: riduce il LR se l'update è troppo grande,
+      # senza superare il valore massimo conservativo.
+      learning_rate_schedule=LRSchedule.ADAPTIVE_KL,  # Riduce il LR quando il KL è troppo alto.
+      #desired_kl=0.01,  # KL desiderato per update; usato dalla schedule adaptive KL.
+      learning_rate_schedule_min_lr=1e-6,  # Limite inferiore del learning rate adattivo.
+      learning_rate_schedule_max_lr=1e-5,  # Limite superiore del learning rate adattivo.
+      entropy_cost=0.0,  # Peso del bonus di entropia; zero non incentiva maggiore varianza.
+      num_envs=NUM_ENVS,  # Environment paralleli per raccogliere i rollout PPO.
+      batch_size=256,  # Campioni raggruppati in ogni batch dell'ottimizzatore PPO.
+      max_grad_norm=1.0,  # Soglia di clipping della norma globale del gradiente.
       network_factory=dict(
-            policy_hidden_layer_sizes=(512, 256, 128),
-            value_hidden_layer_sizes=(512, 256, 128),
-            policy_obs_key="state",
-            value_obs_key="privileged_state",
+            activation=linen.elu,  # Attivazione dei layer nascosti di actor e critic.
+            policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,  # Layer nascosti dell'actor.
+            value_hidden_layer_sizes=CRITIC_HIDDEN_LAYER_SIZES,  # Layer nascosti del critic.
+            policy_obs_key="state",  # Parte dell'osservazione visibile all'actor.
+            value_obs_key="privileged_state",  # Informazioni privilegiate visibili al critic.
         ),
-      num_resets_per_eval=10,
-      seed = 0,
-    deterministic_eval = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
+      num_resets_per_eval=1,  # Episodi completi ripetuti per ogni valutazione.
+      seed=0,  # Seed per inizializzazione, rollout e aggiornamenti.
+      deterministic_eval=DETERMINISTIC_EVAL,  # Usa il modo della policy durante l'eval.
   )
-
 
 print(f"PPO_PARAMS: \n{PPO_PARAMS}")
 
+# SAC usato nello studio Tita. Questo blocco si modifica come PPO_PARAMS.
+# RPL usa DDPG/HER e non definisce reward_scaling=10: rete, learning rate,
+# update per blocco e prior sull'azione restano scelte esplicite dello studio.
 SAC_PARAMS = dict(
-    num_timesteps          = NUM_TIMESTEPS,
-    num_evals              = NUM_EVALS,
-    reward_scaling         = 1.0,
-    episode_length         = EPISODE_LENGTH,
-    normalize_observations = True,
-    action_repeat          = 1,
-    discounting            = 0.997,
-    learning_rate          = 3e-4,
-    num_envs               = NUM_ENVS,          # SAC off-policy: molti meno env di PPO
-    batch_size             = 256,
-    grad_updates_per_step  = 32,
-    min_replay_size        = EPISODE_LENGTH,
-    max_replay_size        = EPISODE_LENGTH*NUM_ENVS,
-    seed                   = 0,
-    deterministic_eval     = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
+    num_timesteps=NUM_TIMESTEPS,  # Transizioni totali inserite nel replay buffer.
+    num_evals=NUM_EVALS,  # Numero di valutazioni durante il training.
+    episode_length=EPISODE_LENGTH,  # Step massimi prima del reset dell'episodio.
+    num_envs=10,  # Collector paralleli; deve dividere update_every_transitions.
+    seed=0,  # Seed JAX e del campionamento dal replay buffer.
+    deterministic_eval=DETERMINISTIC_EVAL,  # Usa il modo dell'actor durante l'eval.
+    # num_eval_envs omesso: usa DEFAULT_NUM_EVAL_ENVS letto dalla firma Brax.
+    num_resets_per_eval=1,  # Episodi completi per ogni environment di valutazione.
+    leg_only_actions=False,  # 8 azioni come PPO: gambe e ruote, per un confronto controllato.
+    # SAC può terminare automaticamente il warm-up perché actor e critic hanno
+    # optimizer separati. CRITIC_WARMUP è l'interruttore condiviso con PPO.
+    burn_in_min_blocks=20,  # Blocchi critic-only minimi prima dello sblocco dell'actor.
+    burn_in_max_blocks=200,  # Sblocco forzato dell'actor se il critic non converge prima.
+    burn_in_window=10,  # Blocchi per finestra usati nel confronto delle stime Q.
+    burn_in_rel_tol=0.01,  # Variazione relativa di Q sotto cui il critic è stabile.
+    burn_in_explore_std=0.1,  # Rumore extra sulle azioni nei rollout esplorativi del warm-up.
+    burn_in_on_restore=False,  # Ripete il warm-up caricando un learner SAC esistente.
+    actor_learning_rate=1e-4,  # Learning rate Adam della policy SAC.
+    critic_learning_rate=1e-3,  # Learning rate Adam delle due reti Q.
+    alpha_learning_rate=1e-3,  # Learning rate Adam della temperatura di entropia alpha.
+    batch_size=512,  # Transizioni campionate dal replay per ogni gradient update.
+    reward_scaling=1.0,  # Scala naturale: le reward Tita producono già target Q di ordine unitario.
+    discounting=0.99,  # Gamma usato nei target di Bellman.
+    initial_alpha=0.1,  # Valore iniziale della temperatura di entropia.
+    tau=0.005,  # Coefficiente Polyak per il soft update delle target Q.
+    replay_capacity=1_000_000,  # Numero massimo di transizioni conservate nel replay.
+    update_every_transitions=1000,  # Nuove transizioni raccolte prima di ogni blocco update.
+    updates_per_block=64,  # Gradient update eseguiti dopo ogni blocco di raccolta.
+    init_std=INIT_STD,  # Deviazione standard iniziale dell'actor prima della tanh.
+    network_factory=dict(
+        policy_hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,  # Layer nascosti dell'actor SAC.
+        critic_hidden_layer_sizes=CRITIC_HIDDEN_LAYER_SIZES,  # Layer nascosti delle reti Q.
+        activation=linen.elu,  # Attivazione dei layer nascosti di actor e reti Q.
+        distribution_type=DISTRIBUTION_TYPE,  # Famiglia della distribuzione della policy.
+    ),
+    # Decadimento opzionale dopo lo sblocco dell'actor SAC dal critic warm-up.
+    zero_action_prior_final=None,  # Peso finale del prior; None mantiene il costo globale.
+    prior_decay_steps=0,  # Transizioni usate per interpolare verso il peso finale.
 )
 
 print(f"SAC_PARAMS: \n{SAC_PARAMS}")
@@ -204,9 +248,31 @@ print(f"SAC_PARAMS: \n{SAC_PARAMS}")
 #  Environment factories
 # ─────────────────────────────────────────────────────────────────────────────
 
+class SACStateWrapper(Wrapper):
+    """Actor and critic share the current joystick state, with no study augmentation."""
+    @property
+    def observation_size(self):
+        return int(np.prod(self.env.observation_size["state"]))
+
+    def _get_obs(self, data, info, action):
+        return self.env._get_obs(data, info, action)["state"].astype(jnp.float32)
+
+    def reset(self, rng):
+        state = self.env.reset(rng)
+        return state.replace(obs=state.obs["state"].astype(jnp.float32))
+
+    def step(self, state, action):
+        state = self.env.step(state, action)
+        return state.replace(obs=state.obs["state"].astype(jnp.float32))
+
+
 def make_envs(
     env_name: str = "Go1JoystickFlatTerrain",
     reward_scale_overrides: dict | None = None,
+    fixed_target: list | None = None,
+    obstacle_mode: str | None = None,
+    obstacle_height: float | None = None,
+    terrain_overlay: str | None = None,
 ):
     """Return (env, eval_env, wrap_fn) for a MuJoCo Playground env.
 
@@ -224,34 +290,50 @@ def make_envs(
     print(f"  [INFO] mujoco_playground loaded from: {mujoco_playground.__file__}")
     print(f"  [INFO] mujoco_playground._src.wrapper loaded from: {pg_wrap.__module__} -> {sys.modules[pg_wrap.__module__].__file__}")
 
-    config_overrides = None
+    config_overrides = {}
+    if env_name.startswith("TitaJoystick") and "E2E" not in env_name:
+        config_overrides["leg_only_actions"] = ALGO_PARAMS["leg_only_actions"]
+    if fixed_target is not None:
+        if not env_name.startswith("TitaJoystick") or "E2E" in env_name:
+            raise ValueError("--train-cmd currently supports the MPC Tita environment")
+        config_overrides["command_config.fixed_target"] = fixed_target
+    if obstacle_mode is not None:
+        if not env_name.startswith("TitaJoystick") or "E2E" in env_name:
+            raise ValueError("--obstacle currently supports the MPC Tita environment")
+        config_overrides["sparse_obstacles.enabled"] = True
+        config_overrides["sparse_obstacles.mode"] = obstacle_mode
+        if obstacle_height is not None:
+            if obstacle_height <= 0:
+                raise ValueError("--obstacle-height must be positive")
+            config_overrides["sparse_obstacles.height"] = obstacle_height
+    elif obstacle_height is not None:
+        raise ValueError("--obstacle-height requires --obstacle")
+    if terrain_overlay is not None:
+        if env_name != "TitaJoystickFlatTerrain":
+            raise ValueError("--terrain-overlay currently uses TitaJoystickFlatTerrain")
+        if terrain_overlay != "rough":
+            raise ValueError("Supported terrain overlay: rough")
+        terrain_xml = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "data", "tita", "scene_rough.xml"))
+        if not os.path.isfile(terrain_xml):
+            raise FileNotFoundError(terrain_xml)
+        if obstacle_mode is not None:
+            raise ValueError("Use either --terrain-overlay or --obstacle, not both")
+        config_overrides["sparse_obstacles.enabled"] = True
+        config_overrides["sparse_obstacles.mode"] = "terrain_overlay"
+        config_overrides["sparse_obstacles.terrain_xml"] = terrain_xml
+        print(f"  [INFO] Rough XML overlaid on flat task: {terrain_xml}")
     if reward_scale_overrides:
-        config_overrides = {
+        config_overrides.update({
             f"reward_config.scales.{k}": v for k, v in reward_scale_overrides.items()
-        }
+        })
         print(f"  [INFO] reward_config.scales overrides: {reward_scale_overrides}")
 
     env      = registry.load(env_name, config_overrides=config_overrides)
     eval_env = registry.load(env_name, config_overrides=config_overrides)
 
     if ALGO == "sac":
-        class SACStateWrapper(Wrapper):
-            """Expose only the regular state observation to SAC."""
-
-            @property
-            def observation_size(self):
-                return int(np.prod(self.env.observation_size["state"]))
-
-            def reset(self, rng):
-                state = self.env.reset(rng)
-                return state.replace(obs=state.obs["state"])
-
-            def step(self, state, action):
-                state = self.env.step(state, action)
-                return state.replace(obs=state.obs["state"])
-
-        env = SACStateWrapper(env)
-        eval_env = SACStateWrapper(eval_env)
+        env, eval_env = SACStateWrapper(env), SACStateWrapper(eval_env)
 
     return env, eval_env, pg_wrap
 
@@ -333,6 +415,21 @@ def progress(num_steps, metrics):
     total_loss = metrics.get("training/total_loss")
     policy_loss = metrics.get("training/policy_loss")
     v_loss = metrics.get("training/v_loss")
+    nn_action_mean_l2 = metrics.get("training/nn_action_mean_l2")
+    nn_action_prior_loss = metrics.get("training/nn_action_prior_loss")
+    nn_action_abs_max = metrics.get("training/nn_action_abs_max")
+    nn_action_means = [
+        metrics.get(f"training/nn_action_mean_{i}") for i in range(8)
+    ]
+    nn_action_rms = [
+        metrics.get(f"training/nn_action_rms_{i}") for i in range(8)
+    ]
+    policy_obs_norm_rms = metrics.get("training/policy_obs_norm_rms")
+    policy_obs_norm_abs_max = metrics.get("training/policy_obs_norm_abs_max")
+    policy_obs_norm_clip_fraction = metrics.get(
+        "training/policy_obs_norm_clip_fraction"
+    )
+    critic_warmup_active = metrics.get("training/critic_warmup_active")
 
     std_mean_data.append(std_mean)
     std_min_data.append(std_min)
@@ -413,6 +510,31 @@ def progress(num_steps, metrics):
     clock_time = times[-1].strftime("%H:%M:%S")
     std_str = f"{std_mean:.4f}" if std_mean is not None else "n/a"
     kl_str = f"{kl_mean:.4f}" if kl_mean is not None else "n/a"
+    nn_action_str = (
+        f"{nn_action_mean_l2:.6f} (loss={nn_action_prior_loss:.6f})"
+        if nn_action_mean_l2 is not None and nn_action_prior_loss is not None
+        else "n/a"
+    )
+    def _format_joint_values(values):
+        present = [value for value in values if value is not None]
+        return (
+            "[" + ", ".join(f"{float(value):+.4f}" for value in present) + "]"
+            if present else "n/a"
+        )
+
+    action_mean_str = _format_joint_values(nn_action_means)
+    action_rms_str = _format_joint_values(nn_action_rms)
+    action_max_str = (
+        f"{float(nn_action_abs_max):.4f}"
+        if nn_action_abs_max is not None else "n/a"
+    )
+    obs_norm_str = (
+        f"rms={float(policy_obs_norm_rms):.3f}, "
+        f"max={float(policy_obs_norm_abs_max):.3f}, "
+        f"clip={100.0 * float(policy_obs_norm_clip_fraction):.3f}%"
+        if policy_obs_norm_rms is not None
+        else "n/a"
+    )
     per_step_str = (
         f"{mean_reward_per_step:+.4f} ± {std_reward_per_step:.4f}"
         if mean_reward_per_step is not None else "n/a"
@@ -424,6 +546,12 @@ def progress(num_steps, metrics):
         #f"\n\treward/step = {per_step_str}"
         f"\n\tstd = {std_str}"
         f"\n\tkl = {kl_str}"
+        f"\n\tnn action L2 = {nn_action_str}"
+        f"\n\taction mean = {action_mean_str}"
+        f"\n\taction rms  = {action_rms_str}"
+        f"\n\taction |max| = {action_max_str}"
+        f"\n\tnormalized policy obs: {obs_norm_str}"
+        f"\n\tcritic warmup = {critic_warmup_active if critic_warmup_active is not None else 'n/a'}"
         f"\n\telapsed {elapsed_m:02d}:{elapsed_s:02d}"
         f"\n\ttime {clock_time}"
         "\n-" + "-" * 30
@@ -441,12 +569,23 @@ def progress(num_steps, metrics):
                 "mean_reward_per_step", "std_reward_per_step", "avg_episode_length",
                 "policy_std_mean", "policy_std_min", "policy_std_max",
                 "entropy_loss", "kl_mean", "total_loss", "policy_loss", "v_loss",
+                "nn_action_mean_l2", "nn_action_prior_loss",
+                *[f"nn_action_mean_{i}" for i in range(8)],
+                *[f"nn_action_rms_{i}" for i in range(8)],
+                "nn_action_abs_max", "policy_obs_norm_rms",
+                "policy_obs_norm_abs_max", "policy_obs_norm_clip_fraction",
+                "critic_warmup_active",
             ])
         writer.writerow([
             num_steps, y_data[-1], y_dataerr[-1],
             mean_reward_per_step, std_reward_per_step, avg_ep_len,
             std_mean, std_min, std_max,
             entropy_loss, kl_mean, total_loss, policy_loss, v_loss,
+            nn_action_mean_l2, nn_action_prior_loss,
+            *nn_action_means, *nn_action_rms,
+            nn_action_abs_max, policy_obs_norm_rms,
+            policy_obs_norm_abs_max, policy_obs_norm_clip_fraction,
+            critic_warmup_active,
         ])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -459,34 +598,28 @@ ALGO_PARAMS = SAC_PARAMS if ALGO == "sac" else PPO_PARAMS  # sovrascritto in mai
 #def make_train_fn(algo: str):
 #    if algo == "sac":
 #        return functools.partial(sac.train, **SAC_PARAMS, progress_fn=progress)
-#    return functools.partial(ppo.train, **PPO_PARAMS, progress_fn=progress)
+#    return functools.partial(ppo.train, **{k: v for k, v in PPO_PARAMS.items() if k != "leg_only_actions"}, progress_fn=progress)
 
-def make_train_fn(algo: str):
-    train_callable = sac.train if algo == "sac" else ppo.train
-    params = SAC_PARAMS if algo == "sac" else PPO_PARAMS
+def make_train_fn(algo: str, progress_fn=progress, params_override=None):
+    if algo == "sac":
+        raise ValueError("SAC is dispatched through run_sac_training with SAC_PARAMS")
+    train_callable = ppo.train
+    params = dict(params_override or (SAC_PARAMS if algo == "sac" else PPO_PARAMS))
 
     sig = inspect.signature(train_callable)
-    print("\n" + "=" * 70)
-    print(f"  Opzioni disponibili di {algo}.train")
-    print("=" * 70)
-    for name, p in sig.parameters.items():
-        if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-            continue  # salta *args / **kwargs
-        default = "(nessun default)" if p.default is inspect.Parameter.empty else p.default
-        if name in params:
-            print(f"  [PASSATO] {name:28s} = {params[name]!r}   (default: {default!r})")
-        else:
-            print(f"            {name:28s}   default: {default!r}")
 
     # chiavi che passi ma che train.train NON accetta (verrebbero rifiutate)
-    unknown = [k for k in params if k not in sig.parameters]
+    unknown = [k for k in params if k not in sig.parameters and k != "leg_only_actions"]
     if unknown:
         print(f"\n  [ATTENZIONE] chiavi in {algo.upper()}_PARAMS non accettate da {algo}.train: {unknown}")
     print("=" * 70 + "\n")
 
-    if algo == "sac":
-        return functools.partial(sac.train, **SAC_PARAMS, progress_fn=progress)
-    return functools.partial(ppo.train, **PPO_PARAMS, progress_fn=progress)
+    return functools.partial(
+        ppo.train,
+        **{k: v for k, v in params.items() if k != "leg_only_actions"},
+        progress_fn=progress_fn,
+    )
+
 
 def save_params(params, ckpt_dir: str, suffix: str = "final"):
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -514,7 +647,7 @@ def _parse_load_suffix(load_arg: str) -> str:
     return base or "best"
 
 def load_params(ckpt_dir: str, suffix: str = "best"):
-    # prefer best checkpoint, fall back to final
+    # Load the requested selection, falling back to the completed/interrupted run.
     pkl_path = None
     for s in (suffix, "final"):
         p = os.path.join(ckpt_dir, f"params_{s}.pkl")
@@ -569,7 +702,8 @@ def _list_dir_names(path: str) -> list[str]:
 def _resolve_load(env_base_dir: str, load_arg: str):
     """Resolve a --load argument to (run_dir, suffix).
 
-    load_arg may be a checkpoint suffix ('best'/'final'/'crash'), in which
+    load_arg may be a checkpoint suffix ('best', 'best_return', 'latest',
+    'final', 'interrupted', or 'crash'), in which
     case the latest timestamped run under env_base_dir is used; a run
     timestamp/prefix matched under env_base_dir; a name of a run saved
     under env_base_dir/saved/; or an explicit relative path such as
@@ -577,10 +711,17 @@ def _resolve_load(env_base_dir: str, load_arg: str):
     (legacy flat layout, no per-run subfolder) if no run subfolders exist.
     """
     run_dirs = _list_run_dirs(env_base_dir)
-    is_suffix = load_arg in ("best", "final", "crash")
+    is_suffix = load_arg in {
+        "best", "best_return", "latest",
+        "final", "interrupted", "crash",
+    }
     suffix = load_arg if is_suffix else "best"
 
     if not is_suffix:
+        # Permit transfer/fine-tuning from another task's run directory,
+        # e.g. the flat/single-left checkpoint when starting rough terrain.
+        if os.path.isabs(load_arg) and os.path.isdir(load_arg):
+            return os.path.abspath(load_arg), "best"
         direct_dir = os.path.join(env_base_dir, load_arg)
         saved_dir = os.path.join(env_base_dir, "saved", load_arg)
 
@@ -641,7 +782,7 @@ def run_viewer_rollout(
     print("  Rollout viewer" + (" with loaded policy" if inference_fn else " with zero action"))
     print("=" * 60)
 
-    episode_length = PPO_PARAMS["episode_length"]
+    episode_length = ALGO_PARAMS["episode_length"]
 
     # cuSolver crashes on single-instance MJX; run a batch and show env 0 in viewer.
     # Batch size must be large enough to avoid cuSolver internal errors (GPU batched LU/Cholesky).
@@ -1084,7 +1225,7 @@ def run_viewer_rollout(
 
 
 def _build_fresh_networks(env, zero_init_output_layer: bool = False):
-    """Return a ppo_networks with random hidden layers and zero-init output layer."""
+    """Build PPO or SAC networks from the selected network_factory config."""
     if DISTRIBUTION_TYPE == "tanh_normal":
         param_size = 2 * env.action_size
     elif DISTRIBUTION_TYPE == "normal":
@@ -1134,28 +1275,27 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
                 running_statistics.normalize, max_abs_value=10.0),
             distribution_type=DISTRIBUTION_TYPE,
             **ALGO_PARAMS["network_factory"],
-            #activation=linen.elu,
             policy_network_kernel_init_fn=_policy_kernel_init_factory,
             #init_noise_std=INIT_STD
         )
-    else:
-        networks = sac_networks.make_sac_networks(
+        if zero_init_output_layer and DISTRIBUTION_TYPE == "tanh_normal":
+            networks = initialize_residual(networks, env.action_size, std=INIT_STD)
+    elif ALGO == "sac":
+        networks = make_sac_networks(
             observation_size=env.observation_size,
             action_size=env.action_size,
-            hidden_layer_sizes=POLICY_HIDDEN_LAYER_SIZES,
-            # Clip the NORMALIZED observation to +-10. Without this a near-constant
-            # obs component (e.g. a contact force at ~const during normal walking,
-            # so tiny running std) that JUMPS at a divergence produces
-            # (jump)/(tiny_std) = a huge normalized value -> NaN in the networks.
-            # brax's own locomotion configs set max_abs_value; it was omitted here
-            # and was the cause of the training NaNs in the violent step regime.
             preprocess_observations_fn=functools.partial(
                 running_statistics.normalize, max_abs_value=10.0),
-            distribution_type=DISTRIBUTION_TYPE,
-            activation=linen.elu,
-            policy_network_kernel_init_fn=(lambda init_kwargs: _policy_kernel_init_factory(**init_kwargs)),
-            init_noise_std=INIT_STD
+            **ALGO_PARAMS["network_factory"],
         )
+        if zero_init_output_layer:
+            # Brax's tanh-normal head needs explicit initialization of mean AND
+            # std.  With the flag disabled, retain Brax's default random head.
+            networks = initialize_residual(
+                networks, env.action_size, std=INIT_STD
+            )
+    else:
+        raise ValueError(f"Unsupported algorithm: {ALGO}")
 
     self_test = False
     if self_test:
@@ -1281,6 +1421,168 @@ def _build_fresh_networks(env, zero_init_output_layer: bool = False):
     return networks
 
 
+def _install_training_signal_handlers():
+    """Turn SIGINT/SIGTERM into a catchable stop request and report its name."""
+    received = {"signum": None}
+    previous = {}
+
+    def _handler(signum, _frame):
+        received["signum"] = signum
+        raise KeyboardInterrupt
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        previous[sig] = signal.getsignal(sig)
+        signal.signal(sig, _handler)
+    return received, previous
+
+
+def _restore_training_signal_handlers(previous):
+    for sig, handler in previous.items():
+        signal.signal(sig, handler)
+
+
+def _signal_name(received):
+    signum = received.get("signum")
+    return signal.Signals(signum).name if signum is not None else "KeyboardInterrupt"
+
+
+def run_sac_training(env, eval_env, ckpt_dir, resume_dir=None, resume_suffix="best"):
+    from pathlib import Path
+    import sac_training
+    out = Path(ckpt_dir)
+    cfg = dict(SAC_PARAMS)
+    num_eval_envs = cfg.get("num_eval_envs", DEFAULT_NUM_EVAL_ENVS)
+    for module_path in (sac_training.__file__,
+                        os.path.join(os.path.dirname(__file__), "algorithm_initialization.py")):
+        save_source_files(module_path, ckpt_dir)
+    factory_config = cfg["network_factory"]
+    serialized_cfg = dict(cfg, network_factory=dict(
+        factory_config, activation=factory_config["activation"].__name__))
+    metadata = dict(algorithm="sac", parameters=serialized_cfg,
+                    zero_init_output_layer=ZERO_INIT_OUTPUT_LAYER,
+                    loss_nn_action=LOSS_NN_ACTION,
+                    loss_nn_action_cost=LOSS_NN_ACTION_COST,
+                    critic_warmup=CRITIC_WARMUP,
+                    observation_size=env.observation_size,
+                    action_size=env.action_size,
+                    num_eval_envs=num_eval_envs,
+                    policy_hidden_layer_sizes=list(factory_config["policy_hidden_layer_sizes"]),
+                    critic_hidden_layer_sizes=list(factory_config["critic_hidden_layer_sizes"]),
+                    activation=factory_config["activation"].__name__,
+                    observation="joystick state", normalize_observations=True,
+                    resume_mode="weights only; replay and optimizers restart")
+    (out / "sac_config.json").write_text(json.dumps(metadata, indent=2))
+    (out / "environment_config.json").write_text(json.dumps(env._config.to_dict(), indent=2))
+    restore = None
+    if resume_dir:
+        path = Path(resume_dir) / f"learner_{resume_suffix}.pkl"
+        if not path.exists():
+            raise FileNotFoundError(f"SAC warm start requires its matching learner checkpoint: {path}")
+        old_meta = json.loads((Path(resume_dir) / "sac_config.json").read_text())
+        if (old_meta['observation_size'], old_meta['action_size']) != (env.observation_size, env.action_size):
+            raise ValueError("Checkpoint observation/action dimensions differ from the current environment")
+        with path.open("rb") as f: restore = pickle.load(f)
+    eval_reset = jax.jit(jax.vmap(eval_env.reset))
+    eval_step = jax.jit(jax.vmap(eval_env.step))
+    best_return = -float("inf")
+    latest = None
+
+    def checkpoint(step, make_policy, params, learner):
+        nonlocal best_return, latest
+        latest = (params, learner)
+        policy = jax.jit(make_policy(params, deterministic=cfg['deterministic_eval']))
+        episode_returns, episode_lengths = [], []
+        for episode in range(cfg['num_resets_per_eval']):
+            reset_key = jax.random.fold_in(jax.random.PRNGKey(cfg['seed'] + 100), episode)
+            state = eval_reset(jax.random.split(reset_key, num_eval_envs))
+            alive = np.ones(num_eval_envs, dtype=bool)
+            returns = np.zeros(num_eval_envs); lengths = np.zeros(num_eval_envs)
+            key = jax.random.fold_in(jax.random.PRNGKey(cfg['seed'] + 101), episode)
+            for _ in range(cfg['episode_length']):
+                key, action_key = jax.random.split(key)
+                action, _ = policy(state.obs, action_key)
+                state = eval_step(state, action)
+                reward, done = jax.device_get((state.reward, state.done))
+                returns += np.where(alive, reward, 0.); lengths += alive
+                alive &= ~np.asarray(done, dtype=bool)
+                if not alive.any(): break
+            episode_returns.append(returns); episode_lengths.append(lengths)
+        returns, lengths = np.concatenate(episode_returns), np.concatenate(episode_lengths)
+        if not np.isfinite(returns).all():
+            raise FloatingPointError("Nonfinite SAC evaluation return")
+        metrics = {'eval/episode_reward': float(returns.mean()),
+                   'eval/episode_reward_std': float(returns.std()),
+                   'eval/avg_episode_length': float(lengths.mean()),
+                   'eval/num_episodes': int(len(returns))}
+        progress(step, metrics)
+        save_params(params, ckpt_dir, "latest")
+        save_params(params, ckpt_dir, "final")
+        (out / "latest.json").write_text(json.dumps({"step": int(step)}, indent=2))
+        with (out / "learner_latest.pkl").open("wb") as f:
+            pickle.dump(jax.device_get(learner), f)
+        with (out / "learner_final.pkl").open("wb") as f: pickle.dump(jax.device_get(learner), f)
+        record = dict(
+            step=int(step), episode_reward=metrics['eval/episode_reward'],
+            episode_reward_std=metrics['eval/episode_reward_std'],
+            avg_episode_length=float(lengths.mean()),
+            num_episodes=int(len(returns)),
+        )
+        if metrics['eval/episode_reward'] > best_return:
+            best_return = metrics['eval/episode_reward']
+            save_params(params, ckpt_dir, "best_return")
+            with (out / "learner_best_return.pkl").open("wb") as f:
+                pickle.dump(jax.device_get(learner), f)
+            (out / "best_return.json").write_text(json.dumps(record, indent=2))
+            save_params(params, ckpt_dir, "best")
+            with (out / "learner_best.pkl").open("wb") as f:
+                pickle.dump(jax.device_get(learner), f)
+            (out / "best.json").write_text(json.dumps(
+                {"criterion": "episode_return", **record}, indent=2))
+
+    train_options = {k: v for k, v in cfg.items()
+                     if k not in ('num_evals', 'deterministic_eval', 'num_eval_envs', 'num_resets_per_eval', 'leg_only_actions', 'network_factory')}
+    train_options['critic_burn_in'] = CRITIC_WARMUP
+    train_options['zero_action_prior'] = (
+        LOSS_NN_ACTION_COST if LOSS_NN_ACTION else 0.0
+    )
+    if not LOSS_NN_ACTION:
+        train_options['zero_action_prior_final'] = None
+    if cfg['num_evals'] < 1 or num_eval_envs < 1 or cfg['num_resets_per_eval'] < 1:
+        raise ValueError("SAC num_evals, num_eval_envs and num_resets_per_eval must be positive")
+    train_options['eval_every'] = max(cfg['update_every_transitions'],
+        int(np.ceil(cfg['num_timesteps'] / cfg['num_evals'] / cfg['update_every_transitions'])) * cfg['update_every_transitions'])
+    built_networks = _build_fresh_networks(env, zero_init_output_layer=ZERO_INIT_OUTPUT_LAYER)
+    selected_network_factory = lambda *args, **kwargs: built_networks
+    received_signal, previous_handlers = _install_training_signal_handlers()
+    try:
+        make_policy, params, learner = sac_training.train(
+            env, output=ckpt_dir, callback=checkpoint, restore=restore,
+            network_factory=selected_network_factory, **train_options)
+    except KeyboardInterrupt:
+        if latest is not None:
+            save_params(latest[0], ckpt_dir, "interrupted")
+            save_params(latest[0], ckpt_dir, "final")
+            with (out / "learner_interrupted.pkl").open("wb") as f:
+                pickle.dump(jax.device_get(latest[1]), f)
+            (out / "interrupted.json").write_text(json.dumps({
+                "signal": _signal_name(received_signal),
+                "checkpoint": "params_interrupted.pkl",
+            }, indent=2))
+            print(f"[INTERRUPT] SAC weights saved after {_signal_name(received_signal)}.")
+            return None, latest[0]
+        print(f"[INTERRUPT] {_signal_name(received_signal)} received before SAC exposed weights.")
+        return None, None
+    except Exception:
+        if latest is not None:
+            save_params(latest[0], ckpt_dir, "crash")
+            with (out / "learner_crash.pkl").open("wb") as f:
+                pickle.dump(jax.device_get(latest[1]), f)
+        raise
+    finally:
+        _restore_training_signal_handlers(previous_handlers)
+    return make_policy, params
+
+
 def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
               resume_dir: str | None = None, resume_suffix: str = "best",
               env_name: str = "Go1JoystickFlatTerrain", algo: str = "ppo"):
@@ -1290,6 +1592,9 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
     REWARD_LOG_FILE = os.path.join(ckpt_dir, "reward_log.txt")
     METRICS_LOG_FILE = os.path.join(ckpt_dir, "metrics_log.csv")
     save_tita_env_files(env_name, ckpt_dir)
+    if (env._config.sparse_obstacles.enabled
+            and env._config.sparse_obstacles.mode == "terrain_overlay"):
+        save_source_files(env._config.sparse_obstacles.terrain_xml, ckpt_dir)
 
     if algo == "ppo":
         policy_obs_key = ALGO_PARAMS["network_factory"]["policy_obs_key"]
@@ -1307,8 +1612,17 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         f"  GPU name:    : "
         "  \n--- network ---",
         f"  distribution : {DISTRIBUTION_TYPE}",
-        f"  hidden layers: {POLICY_HIDDEN_LAYER_SIZES}",
+        f"  policy hidden layers: {ALGO_PARAMS['network_factory']['policy_hidden_layer_sizes']}",
+        f"  critic hidden layers: {ALGO_PARAMS['network_factory']['value_hidden_layer_sizes'] if algo == 'ppo' else ALGO_PARAMS['network_factory']['critic_hidden_layer_sizes']}",
         f"  entropy cost : {ALGO_PARAMS.get('entropy_cost', 'N/A')}",
+        f"  zero output init   : {ZERO_INIT_OUTPUT_LAYER}",
+        f"  initial policy std : {INIT_STD}",
+        f"  NN-action prior    : {LOSS_NN_ACTION}",
+        f"  NN-action cost     : {LOSS_NN_ACTION_COST}",
+        f"  critic warmup      : {CRITIC_WARMUP}",
+        f"  PPO warmup steps   : {PPO_CRITIC_WARMUP_TIMESTEPS if algo == 'ppo' and CRITIC_WARMUP else 0}",
+        f"  PPO warmup restore : {PPO_CRITIC_WARMUP_ON_RESTORE if algo == 'ppo' else 'n/a'}",
+        f"  eval environments  : {ALGO_PARAMS.get('num_eval_envs', DEFAULT_NUM_EVAL_ENVS)}",
         f"  policy obs   : {policy_obs_key}",
         f"  value obs    : {value_obs_key if algo == 'ppo' else '(shared)'}",
         f"  policy net shape: {env.observation_size[policy_obs_key] if algo == 'ppo' else env.observation_size}",
@@ -1335,6 +1649,9 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
         _f.write(env_config_block + "\n")
 
 
+    if algo == "sac":
+        return run_sac_training(env, eval_env, ckpt_dir, resume_dir, resume_suffix)
+
     restore_params = None
     built_networks = _build_fresh_networks(env, zero_init_output_layer=ZERO_INIT_OUTPUT_LAYER)
     selected_network_factory = lambda *args, **kwargs: built_networks
@@ -1346,6 +1663,28 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
             print("  Starting training from random initialization.")
         else:
             print(f"  Initializing training from checkpoint in '{resume_dir}'.")
+            # Fresh Brax normalizers are initialized as float64 while
+            # jax_enable_x64 is on. Older/restored checkpoints may contain
+            # float32 statistics; the first update then promotes them to
+            # float64, which makes PPO's lax.scan carry types inconsistent.
+            # Cast only the running statistics (not policy/value weights or
+            # the integer count) so restored outputs remain numerically equal.
+            try:
+                normalizer, policy, value = restore_params
+                cast_stats = lambda tree: jax.tree_util.tree_map(
+                    lambda x: jnp.asarray(x, dtype=jnp.float64), tree
+                )
+                normalizer = normalizer.replace(
+                    mean=cast_stats(normalizer.mean),
+                    std=cast_stats(normalizer.std),
+                    summed_variance=cast_stats(normalizer.summed_variance),
+                )
+                restore_params = (normalizer, policy, value)
+                print("  [INFO] Restored observation-normalizer stats cast to float64.")
+            except (AttributeError, TypeError, ValueError):
+                # Preserve compatibility with nonstandard/legacy checkpoint
+                # layouts; Brax will report any unsupported format itself.
+                pass
     else:
         print("  Fresh training.")
     
@@ -1405,38 +1744,204 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
 
     latest_params = restore_params
     latest_step = 0
-    best_reward = -float("inf")
+    best_return = -float("inf")
+    print("  [checkpoint selection] best=highest deterministic eval return")
+
+    def _progress_and_checkpoint(current_step, metrics):
+        """Bind deterministic eval return to the parameters just evaluated."""
+        nonlocal best_return
+        progress(current_step, metrics)
+        reward = float(metrics["eval/episode_reward"])
+        step = int(current_step)
+
+        # policy_params_fn runs immediately before this evaluation, so
+        # latest_params is exactly the policy that produced `reward`.
+        if latest_params is None:
+            return
+
+        eval_record = {
+            "step": step,
+            "episode_reward": reward,
+            "avg_episode_length": float(
+                metrics.get("eval/avg_episode_length", 0.0)
+            ),
+        }
+
+        if reward > best_return:
+            best_return = reward
+            save_params(latest_params, ckpt_dir, suffix="best_return")
+            save_params(latest_params, ckpt_dir, suffix="best")
+            with open(os.path.join(ckpt_dir, "best_return.json"), "w") as f:
+                json.dump(eval_record, f, indent=2)
+            with open(os.path.join(ckpt_dir, "best.json"), "w") as f:
+                json.dump({"criterion": "episode_return", **eval_record}, f, indent=2)
 
     def _policy_params_cb(current_step, _make_policy, cb_params):
-        nonlocal latest_params, latest_step, best_reward
+        nonlocal latest_params, latest_step, best_return
         latest_params = cb_params
         latest_step = int(current_step)
-        if y_data and y_data[-1] > best_reward:
-            best_reward = y_data[-1]
+        # This callback precedes evaluation.  Always persist it as latest;
+        # `_progress_and_checkpoint` selects best only after seeing its reward.
+        save_params(cb_params, ckpt_dir, suffix="latest")
+        with open(os.path.join(ckpt_dir, "latest.json"), "w") as f:
+            json.dump({"step": latest_step}, f, indent=2)
+        # Brax evaluates step 0 immediately before exposing its parameters.
+        # Bind that return to the exact initial zero-output policy.
+        if latest_step == 0 and y_data:
+            initial_reward = float(y_data[-1])
+            best_return = initial_reward
+            initial_record = {
+                "criterion": "episode_return",
+                "step": 0,
+                "episode_reward": initial_reward,
+            }
+            save_params(cb_params, ckpt_dir, suffix="best_return")
             save_params(cb_params, ckpt_dir, suffix="best")
+            for filename in ("best_return.json", "best.json"):
+                with open(os.path.join(ckpt_dir, filename), "w") as f:
+                    json.dump(initial_record, f, indent=2)
 
-    train_fn = make_train_fn(algo)
-    train_kwargs = dict(
+    base_train_kwargs = dict(
         environment=env,
         eval_env=eval_env,
         wrap_env_fn=wrap_env_fn,
         network_factory=selected_network_factory,
-        restore_params=restore_params,
-        policy_params_fn=_policy_params_cb,
     )
 
-    accepted = inspect.signature(train_fn.func).parameters
-    dropped = [k for k in train_kwargs if k not in accepted]
+    accepted = inspect.signature(ppo.train).parameters
+    dropped = [k for k in base_train_kwargs if k not in accepted]
     if dropped:
         print(f"  [WARN] {algo}.train does not support: {dropped} — ignored.")
-    train_kwargs = {k: v for k, v in train_kwargs.items() if k in accepted}
+    base_train_kwargs = {
+        k: v for k, v in base_train_kwargs.items() if k in accepted
+    }
 
+    def _run_ppo_phase(
+        phase_params, phase_restore, step_offset, critic_warmup, label
+    ):
+        """Runs one Brax PPO phase with globally monotonic callback steps."""
+        def phase_progress(current_step, metrics):
+            _progress_and_checkpoint(step_offset + int(current_step), metrics)
+
+        def phase_policy_params(current_step, make_policy, cb_params):
+            _policy_params_cb(
+                step_offset + int(current_step), make_policy, cb_params
+            )
+
+        restore_ppo_loss()
+        if LOSS_NN_ACTION or critic_warmup:
+            install_configured_ppo_loss(
+                LOSS_NN_ACTION, LOSS_NN_ACTION_COST, critic_warmup
+            )
+        print(
+            f"  [PPO phase] {label}: critic_warmup={critic_warmup}, "
+            f"action_prior={LOSS_NN_ACTION}, "
+            f"requested_steps={phase_params['num_timesteps']:,}"
+        )
+        train_fn = make_train_fn(
+            algo,
+            progress_fn=phase_progress,
+            params_override=phase_params,
+        )
+        return train_fn(
+            **base_train_kwargs,
+            restore_params=phase_restore,
+            policy_params_fn=phase_policy_params,
+        )
+
+    received_signal, previous_handlers = _install_training_signal_handlers()
+    if LOSS_NN_ACTION:
+        print(
+            "  [PPO loss] zero-action network prior enabled: "
+            f"cost={LOSS_NN_ACTION_COST:g}"
+        )
     try:
-        make_inference_fn, params, _ = train_fn(**train_kwargs)
+        run_critic_warmup = CRITIC_WARMUP and (
+            restore_params is None or PPO_CRITIC_WARMUP_ON_RESTORE
+        )
+        if CRITIC_WARMUP and restore_params is not None and not run_critic_warmup:
+            print(
+                "  [PPO warmup] skipped on restore: updating the observation "
+                "normalizer would change the loaded policy even with frozen "
+                "actor weights"
+            )
+        if run_critic_warmup:
+            total_steps = int(PPO_PARAMS["num_timesteps"])
+            requested_warmup = min(
+                int(PPO_CRITIC_WARMUP_TIMESTEPS), total_steps
+            )
+            print(
+                "  [PPO warmup] phase 1: actor frozen; value network and "
+                "observation normalizer train"
+            )
+            warmup_params = dict(PPO_PARAMS)
+            warmup_params.update(
+                num_timesteps=requested_warmup,
+                # Brax needs one post-initial-eval epoch; two evals make the
+                # warm-up boundary explicit and checkpointable.
+                num_evals=2,
+            )
+            make_inference_fn, params, _ = _run_ppo_phase(
+                warmup_params,
+                restore_params,
+                step_offset=0,
+                critic_warmup=True,
+                label="critic warm-up",
+            )
+            warmup_actual_steps = latest_step
+            save_params(params, ckpt_dir, suffix="warmup")
+            with open(os.path.join(ckpt_dir, "warmup.json"), "w") as f:
+                json.dump(
+                    {
+                        "requested_steps": requested_warmup,
+                        "actual_steps": warmup_actual_steps,
+                        "actor_frozen": True,
+                    },
+                    f,
+                    indent=2,
+                )
+            remaining_steps = max(0, total_steps - warmup_actual_steps)
+            print(
+                "[PPO critic warmup] finished: "
+                f"{warmup_actual_steps:,} steps. Actor unlocked; continuing "
+                "with the standard Brax PPO gradients plus the configured "
+                "action prior."
+            )
+            if remaining_steps:
+                training_params = dict(PPO_PARAMS)
+                training_params.update(
+                    num_timesteps=remaining_steps,
+                    # Avoid replaying the exact warm-up PRNG stream after the
+                    # second Brax train call reinitializes its optimizer.
+                    seed=int(PPO_PARAMS["seed"]) + 1,
+                )
+                make_inference_fn, params, _ = _run_ppo_phase(
+                    training_params,
+                    params,
+                    step_offset=warmup_actual_steps,
+                    critic_warmup=False,
+                    label="actor + value",
+                )
+        else:
+            make_inference_fn, params, _ = _run_ppo_phase(
+                dict(PPO_PARAMS),
+                restore_params,
+                step_offset=0,
+                critic_warmup=False,
+                label="actor + value",
+            )
     except KeyboardInterrupt:
-        print("\n[INTERRUPT] Ctrl+C received: stopping training and saving available weights...")
+        stop_name = _signal_name(received_signal)
+        print(f"\n[INTERRUPT] {stop_name} received: saving available weights...")
         if latest_params is not None:
+            save_params(latest_params, ckpt_dir, suffix="interrupted")
             save_params(latest_params, ckpt_dir, suffix="final")
+            with open(os.path.join(ckpt_dir, "interrupted.json"), "w") as f:
+                json.dump({
+                    "signal": stop_name,
+                    "step": latest_step,
+                    "checkpoint": "params_interrupted.pkl",
+                }, f, indent=2)
             print(f"[INTERRUPT] Checkpoint saved at step ~{latest_step:,}.")
         else:
             print("[INTERRUPT] No parameters available to save.")
@@ -1451,6 +1956,9 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
             print("[ERROR] No parameters available to save.")
         print(f"[INFO] Saved training info in {os.path.abspath(ckpt_dir)}")
         raise
+    finally:
+        restore_ppo_loss()
+        _restore_training_signal_handlers(previous_handlers)
 
     if len(times) > 1:
         print(f"\nTime to jit:   {times[1] - times[0]}")
@@ -1477,8 +1985,11 @@ def main():
     parser.add_argument("--load", nargs="?", const="best", default=None, metavar="RUN_OR_SUFFIX",
                         help="Load checkpoint weights. Checkpoints are stored per-run under "
                              "<ckpt-dir>/<name>/<run_timestamp>/. Bare '--load' loads the latest "
-                             "run's best checkpoint; '--load <run_timestamp>' loads that specific "
-                             "run (exact or prefix match); '--load crash'/'final' loads that "
+                             "run's best checkpoint; suffixes include best, best_return, "
+                             "latest, final, interrupted and crash; "
+                             "'--load <run_timestamp>' loads that specific "
+                             "run (exact or prefix match); an absolute run directory loads "
+                             "a checkpoint from another task; '--load crash'/'final' loads that "
                              "suffix from the latest run.")
     parser.add_argument("--zero", action="store_true", help="Force zero actions (ignore policy network)")
     parser.add_argument("--headless", action="store_true", help="Eval rollout without opening the MuJoCo viewer")
@@ -1502,6 +2013,17 @@ def main():
                         help="Override num_envs (e.g. 256 for a fast smoke run)")
     parser.add_argument("--num-evals", type=int, default=None,
                         help="Override num_evals")
+    parser.add_argument("--train-cmd", nargs=2, type=float, default=None, metavar=("VX", "WZ"),
+                        help="Fixed Tita target for training/evaluation; keeps the zero-start command LPF")
+    parser.add_argument(
+        "--obstacle", choices=("single_left", "double", "multi"), default=None,
+        help="Enable the selected fixed Tita obstacle layout. Omit for flat terrain.")
+    parser.add_argument(
+        "--terrain-overlay", choices=("rough",), default=None,
+        help="Overlay terrain geoms from the project's rough XML on Tita flat terrain.")
+    parser.add_argument(
+        "--obstacle-height", type=float, default=None, metavar="METERS",
+        help="Height for single_left/double (default: environment config, 0.015 m).")
     parser.add_argument("--seed", type=int, default=None, help="Override RNG seed")
     parser.add_argument(
         "--reward-override", type=str, default=None, metavar="JSON_PATH",
@@ -1547,7 +2069,14 @@ def main():
     if args.reward_override:
         with open(args.reward_override) as f:
             reward_scale_overrides = json.load(f)
-    env, eval_env, wrap_fn = make_envs(env_name=env_name, reward_scale_overrides=reward_scale_overrides)
+    env, eval_env, wrap_fn = make_envs(
+        env_name=env_name,
+        reward_scale_overrides=reward_scale_overrides,
+        fixed_target=args.train_cmd,
+        obstacle_mode=args.obstacle,
+        obstacle_height=args.obstacle_height,
+        terrain_overlay=args.terrain_overlay,
+    )
     env_base_dir = os.path.join(args.ckpt_dir, env_name)
 
 
@@ -1789,4 +2318,3 @@ if __name__ == "__main__":
     #gpu_python_process_cleanup()
     
     main()
-
