@@ -1,0 +1,51 @@
+PPO_PARAMS: 
+{'num_timesteps': 20000000, 'num_evals': 10, 'reward_scaling': 1.0, 'episode_length': 1000, 'normalize_observations': True, 'action_repeat': 1, 'unroll_length': 20, 'num_minibatches': 32, 'num_updates_per_batch': 4, 'discounting': 0.99, 'learning_rate': 0.0003, 'entropy_cost': 0.001, 'num_envs': 1024, 'batch_size': 256, 'max_grad_norm': 1.0, 'network_factory': {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}, 'num_resets_per_eval': 10, 'seed': 0, 'deterministic_eval': True}
+SAC_PARAMS: 
+{'num_timesteps': 2000896, 'num_evals': 20, 'eval_episode_length': 2000, 'episode_length': 5000, 'batch_size': 512, 'actor_learning_rate': 0.001, 'critic_learning_rate': 0.001, 'alpha_learning_rate': 0.001, 'reward_scaling': 10.0, 'discounting': 0.99, 'initial_alpha': 0.1, 'update_every_transitions': 1024, 'updates_per_block': 64, 'num_envs': 256, 'replay_capacity': 1000000, 'tau': 0.005, 'init_std': 0.1, 'critic_burn_in': False, 'num_eval_envs': 10, 'seed': 0, 'deterministic_eval': True}
+  [config] num_timesteps=2000896 num_envs=256 num_evals=20 seed=0
+[WARN] No DISPLAY detected: forcing --headless mode (no viewer)
+  [INFO] mujoco_playground loaded from: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/__init__.py
+  [INFO] mujoco_playground._src.wrapper loaded from: mujoco_playground._src.wrapper -> /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/wrapper.py
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+  [INFO] Copied files to '/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_154549/files_save/tita'
+  [INFO] Copied files to '/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/train_srbd.py' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_154549/files_save'
+  [INFO] Copied files to '/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/sac_training.py' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_154549/files_save'
+  [INFO] Copied files to '/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/algorithm_initialization.py' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_154549/files_save'
+============================================================
+  SAC Training  —  TitaJoystickFlatTerrain
+  obs size 65  action size 6
+  num_timesteps            : 2000896
+  num_evals                : 20
+  eval_episode_length      : 2000
+  episode_length           : 5000
+  batch_size               : 512
+  actor_learning_rate      : 0.0001
+  critic_learning_rate     : 0.001
+  alpha_learning_rate      : 0.001
+  reward_scaling           : 10.0
+  discounting              : 0.99
+  initial_alpha            : 0.1
+  update_every_transitions : 1024
+  updates_per_block        : 64
+  num_envs                 : 256
+  replay_capacity          : 1000000
+  tau                      : 0.005
+  init_std                 : 0.1
+  critic_burn_in           : True
+  num_eval_envs            : 10
+  seed                     : 0
+  deterministic_eval       : True
+  zero_action_prior        : 0.1
+============================================================
+[SAC critic warmup] started: actor, alpha and their optimizer states are frozen; min_blocks=20, max_blocks=200, window=10, rel_tol=0.01
+  eval#0 
+	num_steps =            0
+	reward = -0.009 ± 0.001
+	std = n/a
+	kl = n/a
+	elapsed 02:22
+	time 15:48:11
+-------------------------------

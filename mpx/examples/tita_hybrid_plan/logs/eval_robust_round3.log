@@ -1,0 +1,37 @@
+PPO_PARAMS: 
+{'num_timesteps': 20000000, 'num_evals': 10, 'reward_scaling': 1.0, 'episode_length': 1000, 'normalize_observations': True, 'action_repeat': 1, 'unroll_length': 20, 'num_minibatches': 32, 'num_updates_per_batch': 4, 'discounting': 0.99, 'learning_rate': 0.0003, 'entropy_cost': 0.001, 'num_envs': 1024, 'batch_size': 256, 'max_grad_norm': 1.0, 'network_factory': {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}, 'num_resets_per_eval': 10, 'seed': 0, 'deterministic_eval': True}
+SAC_PARAMS: 
+{'num_timesteps': 2000896, 'num_evals': 20, 'eval_episode_length': 2000, 'episode_length': 5000, 'batch_size': 512, 'actor_learning_rate': 0.001, 'critic_learning_rate': 0.001, 'alpha_learning_rate': 0.001, 'reward_scaling': 10.0, 'discounting': 0.99, 'initial_alpha': 0.1, 'update_every_transitions': 1024, 'updates_per_block': 64, 'num_envs': 256, 'replay_capacity': 1000000, 'tau': 0.005, 'init_std': 0.1, 'critic_burn_in': False, 'num_eval_envs': 10, 'seed': 0, 'deterministic_eval': True}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+  [INFO] Resolving --load argument: 20261018_210643
+  [INFO] Checkpoint directory: /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643
+  Loading checkpoint: /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643/params_best.pkl
+  [INFO] brax default kernel init: <function lecun_uniform at 0x769d002287c0>
+  [build_eval_inference_fn] loaded /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643 suffix=best
+[hrc] flat: {'episodes': 40, 'falls': 0, 'fall_rate': 0.0, 'mean_time_to_fall_s': None, 'mean_abs_vx_err': 0.07973315124017899, 'mean_abs_wz_err': 0.09890478570558679, 'residual_ratio': 0.12814385445213144, 'falls_per_command': {'+0.5,+0.0': 0, '+1.0,+0.0': 0, '+1.5,+0.0': 0, '+2.0,+0.0': 0, '+1.0,+0.5': 0, '+1.0,-0.8': 0, '+2.0,+0.8': 0, '-1.0,+0.0': 0}}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+  [INFO] Resolving --load argument: 20261018_210643
+  [INFO] Checkpoint directory: /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643
+  Loading checkpoint: /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643/params_best.pkl
+  [INFO] brax default kernel init: <function lecun_uniform at 0x769d002287c0>
+  [build_eval_inference_fn] loaded /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643 suffix=best
+[hrc] rough: {'episodes': 16, 'falls': 3, 'fall_rate': 0.1875, 'mean_time_to_fall_s': 5.083333333333333, 'mean_abs_vx_err': 0.09754303569910172, 'mean_abs_wz_err': 0.36580118719725446, 'residual_ratio': 0.1075897877034922, 'falls_per_command': {'+0.5,+0.0': 0, '+1.0,+0.0': 1, '+1.5,+0.0': 0, '+2.0,+0.0': 1, '+1.0,+0.5': 0, '+1.0,-0.8': 0, '+2.0,+0.8': 0, '-1.0,+0.0': 1}}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_perlin.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+  [INFO] Resolving --load argument: 20261018_210643
+  [INFO] Checkpoint directory: /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643
+  Loading checkpoint: /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643/params_best.pkl
+  [INFO] brax default kernel init: <function lecun_uniform at 0x769d002287c0>
+  [build_eval_inference_fn] loaded /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643 suffix=best
+[hrc] perlin: {'episodes': 40, 'falls': 0, 'fall_rate': 0.0, 'mean_time_to_fall_s': None, 'mean_abs_vx_err': 0.07616554015839001, 'mean_abs_wz_err': 0.3024768815958022, 'residual_ratio': 0.143878985258738, 'falls_per_command': {'+0.5,+0.0': 0, '+1.0,+0.0': 0, '+1.5,+0.0': 0, '+2.0,+0.0': 0, '+1.0,+0.5': 0, '+1.0,-0.8': 0, '+2.0,+0.8': 0, '-1.0,+0.0': 0}}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_tilt10.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+  [INFO] Resolving --load argument: 20261018_210643
+  [INFO] Checkpoint directory: /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643
+  Loading checkpoint: /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643/params_best.pkl
+  [INFO] brax default kernel init: <function lecun_uniform at 0x769d002287c0>
+  [build_eval_inference_fn] loaded /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_210643 suffix=best
+[hrc] slope10: {'episodes': 40, 'falls': 16, 'fall_rate': 0.4, 'mean_time_to_fall_s': 3.230625, 'mean_abs_vx_err': 0.1677726217323622, 'mean_abs_wz_err': 0.3761268350042888, 'residual_ratio': 0.17477894528421084, 'falls_per_command': {'+0.2,+0.0': 2, '+0.5,+0.0': 1, '+0.8,+0.0': 4, '+1.0,+0.0': 3, '-0.2,+0.0': 3, '-0.5,+0.0': 1, '-1.0,+0.0': 0, '+0.0,+0.0': 2}}
+DONE

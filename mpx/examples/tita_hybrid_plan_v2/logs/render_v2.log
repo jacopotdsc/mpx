@@ -1,0 +1,17 @@
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[v2] rendered 00_flat_vx+1.0_wz+0.0
+[v2] rendered 01_flat_vx+2.0_wz+0.8
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[v2] rendered 10_rough_vx+1.0_wz+0.0
+[v2] rendered 11_rough_vx+2.0_wz+0.8
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_perlin.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[v2] rendered 20_perlin_vx+1.0_wz+0.0
+[v2] rendered 21_perlin_vx+1.0_wz-0.8
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_tilt10.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[v2] rendered 30_flat_tilt10_vx+0.5_wz+0.0
+[v2] rendered 31_flat_tilt10_vx-0.5_wz+0.0
+[v2] written /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/tita_hybrid_plan_v2/videos/tita_hybrid_plan_v2_mpc_vs_residual.mp4 (95 s, 8 esperimenti)

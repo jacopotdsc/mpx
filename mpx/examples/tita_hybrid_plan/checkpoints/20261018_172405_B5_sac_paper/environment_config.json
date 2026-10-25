@@ -1,0 +1,131 @@
+{
+  "action_repeat": 1,
+  "command_config": {
+    "a_max": 0.5,
+    "distance": [
+      1.0,
+      4.0
+    ],
+    "external_reference": false,
+    "h": [
+      0.4,
+      0.4
+    ],
+    "names": [
+      "vx",
+      "wz"
+    ],
+    "v_max": 0.5
+  },
+  "ctrl_dt": 0.01,
+  "episode_length": 5000,
+  "impl": "jax",
+  "naconmax": 32768,
+  "njmax": 40,
+  "noise_config": {
+    "level": 0.0,
+    "scales": {
+      "gravity": 0.05,
+      "gyro": 0.2,
+      "joint_mpc_pos": 0.01,
+      "joint_mpc_vel": 0.1,
+      "joint_pos": 0.01,
+      "joint_vel": 0.1,
+      "linvel": 0.1
+    }
+  },
+  "nominal_pd": {
+    "Kd": [
+      10.0,
+      12.0,
+      15.0,
+      0.0,
+      10.0,
+      12.0,
+      15.0,
+      0.0
+    ],
+    "Kp": [
+      35.0,
+      85.0,
+      75.0,
+      0.0,
+      35.0,
+      85.0,
+      75.0,
+      0.0
+    ],
+    "mode": "posture"
+  },
+  "pert_config": {
+    "enable": false,
+    "kick_durations": [
+      0.05,
+      0.2
+    ],
+    "kick_wait_times": [
+      1.0,
+      3.0
+    ],
+    "velocity_kick": [
+      0.0,
+      3.0
+    ]
+  },
+  "push_config": {
+    "duration": 0.1,
+    "forces": [],
+    "times": []
+  },
+  "randomize_reset": 0.0,
+  "residual_config": {
+    "action_lpf": 0.0,
+    "enabled": true,
+    "motor_ids": [
+      1,
+      2,
+      3,
+      5,
+      6,
+      7
+    ],
+    "tau_max": [
+      5.0,
+      5.0,
+      2.0,
+      5.0,
+      5.0,
+      2.0
+    ]
+  },
+  "reward_config": {
+    "base_height_target": 0.4,
+    "only_positive_rewards": false,
+    "scales": {
+      "balance_pos": 1.0,
+      "balance_vel": 1.0,
+      "cog_height": 1.0,
+      "dof_pos_limits": -1.0,
+      "pendulum_ang_vel": 1.0,
+      "pitch": 1.0,
+      "roll": 1.0,
+      "termination": -500.0,
+      "yaw": 1.0
+    }
+  },
+  "sim_dt": 0.002,
+  "soft_joint_pos_limit_factor": 0.95,
+  "terrain_config": {
+    "lane_y": [
+      0.0,
+      3.0,
+      -3.0
+    ],
+    "lanes": [
+      0,
+      1,
+      2
+    ],
+    "scene": "slopes"
+  }
+}

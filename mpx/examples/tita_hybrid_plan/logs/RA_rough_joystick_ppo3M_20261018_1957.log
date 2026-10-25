@@ -1,0 +1,323 @@
+PPO_PARAMS: 
+{'num_timesteps': 20000000, 'num_evals': 10, 'reward_scaling': 1.0, 'episode_length': 1000, 'normalize_observations': True, 'action_repeat': 1, 'unroll_length': 20, 'num_minibatches': 32, 'num_updates_per_batch': 4, 'discounting': 0.99, 'learning_rate': 0.0003, 'entropy_cost': 0.001, 'num_envs': 1024, 'batch_size': 256, 'max_grad_norm': 1.0, 'network_factory': {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}, 'num_resets_per_eval': 10, 'seed': 0, 'deterministic_eval': True}
+SAC_PARAMS: 
+{'num_timesteps': 2000896, 'num_evals': 20, 'eval_episode_length': 2000, 'episode_length': 5000, 'batch_size': 512, 'actor_learning_rate': 0.001, 'critic_learning_rate': 0.001, 'alpha_learning_rate': 0.001, 'reward_scaling': 10.0, 'discounting': 0.99, 'initial_alpha': 0.1, 'update_every_transitions': 1024, 'updates_per_block': 64, 'num_envs': 256, 'replay_capacity': 1000000, 'tau': 0.005, 'init_std': 0.1, 'critic_burn_in': False, 'num_eval_envs': 10, 'seed': 0, 'deterministic_eval': True}
+  [config] num_timesteps=3000000 num_envs=1024 num_evals=3 seed=0
+[WARN] No DISPLAY detected: forcing --headless mode (no viewer)
+  [INFO] mujoco_playground loaded from: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/__init__.py
+  [INFO] mujoco_playground._src.wrapper loaded from: mujoco_playground._src.wrapper -> /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/wrapper.py
+  [INFO] env config overrides: {'terrain_config.scene': 'rough_sparse', 'randomize_reset': 1.0, 'command_config.mode': 'joystick', 'episode_length': 1000}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough_sparse.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough_sparse.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+  [INFO] Copied files to '/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_195719/files_save/tita'
+  [INFO] Copied files to '/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/train_srbd.py' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_195719/files_save'
+============================================================
+  PPO Training  —  TitaJoystickFlatTerrain
+  date         : 20261018_195719
+  JAX backend  : gpu
+  devices      : [CudaDevice(id=0)]
+  GPU name:    :   
+--- network ---
+  distribution : tanh_normal
+  hidden layers: (512, 256, 128)
+  entropy cost : 0.001
+  policy obs   : state
+  value obs    : privileged_state
+  policy net shape: (65,)
+  value net shape : (116,)
+  obs size     : {'privileged_state': (116,), 'state': (65,)}
+  action size  : 6
+  --- PPO params ---
+  num_timesteps            : 3000000
+  num_evals                : 3
+  reward_scaling           : 1.0
+  episode_length           : 1000
+  normalize_observations   : True
+  action_repeat            : 1
+  unroll_length            : 20
+  num_minibatches          : 32
+  num_updates_per_batch    : 4
+  discounting              : 0.99
+  learning_rate            : 0.0003
+  entropy_cost             : 0.001
+  num_envs                 : 1024
+  batch_size               : 256
+  max_grad_norm            : 1.0
+  network_factory          : {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}
+  num_resets_per_eval      : 10
+  seed                     : 0
+  deterministic_eval       : True
+============================================================
+
+--- environment config ---
+action_repeat: 1
+command_config:
+  a:
+  - 2.5
+  - 0.8
+  a_learned:
+  - 2.0
+  - 0.6
+  a_max: 0.5
+  b:
+  - 0.75
+  - 0.75
+  command_lpf: 0.02
+  distance:
+  - 1.0
+  - 4.0
+  external_reference: false
+  h:
+  - 0.4
+  - 0.4
+  mode: joystick
+  names:
+  - vx
+  - wz
+  p_extend: 0.2
+  v_max: 0.5
+ctrl_dt: 0.01
+episode_length: 1000
+impl: jax
+naconmax: 32768
+njmax: 40
+noise_config:
+  level: 0.0
+  scales:
+    gravity: 0.05
+    gyro: 0.2
+    joint_mpc_pos: 0.01
+    joint_mpc_vel: 0.1
+    joint_pos: 0.01
+    joint_vel: 0.1
+    linvel: 0.1
+nominal_pd:
+  Kd:
+  - 10.0
+  - 12.0
+  - 15.0
+  - 0.0
+  - 10.0
+  - 12.0
+  - 15.0
+  - 0.0
+  Kp:
+  - 35.0
+  - 85.0
+  - 75.0
+  - 0.0
+  - 35.0
+  - 85.0
+  - 75.0
+  - 0.0
+  mode: posture
+pert_config:
+  enable: false
+  kick_durations:
+  - 0.05
+  - 0.2
+  kick_wait_times:
+  - 1.0
+  - 3.0
+  velocity_kick:
+  - 0.0
+  - 3.0
+push_config:
+  duration: 0.1
+  forces: []
+  times: []
+randomize_reset: 1.0
+residual_config:
+  action_lpf: 0.0
+  enabled: true
+  motor_ids:
+  - 1
+  - 2
+  - 3
+  - 5
+  - 6
+  - 7
+  tau_max:
+  - 5.0
+  - 5.0
+  - 2.0
+  - 5.0
+  - 5.0
+  - 2.0
+reward_config:
+  base_height_target: 0.4
+  only_positive_rewards: false
+  scales:
+    balance_pos: 1.0
+    balance_vel: 1.0
+    cog_height: 1.0
+    dof_pos_limits: -1.0
+    pendulum_ang_vel: 1.0
+    pitch: 1.0
+    roll: 1.0
+    termination: -500.0
+    yaw: 1.0
+sim_dt: 0.002
+soft_joint_pos_limit_factor: 0.95
+terrain_config:
+  lane_y:
+  - 0.0
+  - 3.0
+  - -3.0
+  lanes:
+  - 0
+  - 1
+  - 2
+  region_centre:
+  - - -15.0
+    - 0.0
+  - - 0.0
+    - 0.0
+  - - 0.0
+    - 3.0
+  - - 0.0
+    - -3.0
+  - - 25.0
+    - 0.0
+  - - 45.0
+    - 0.0
+  region_random_yaw:
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  - 1.0
+  region_spread:
+  - 0.5
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.5
+  - 0.5
+  region_weight:
+  - 0.2
+  - 0.1
+  - 0.1
+  - 0.1
+  - 0.25
+  - 0.25
+  scene: rough_sparse
+
+============================================================
+
+  [INFO] brax default kernel init: <function lecun_uniform at 0x7ed825544c20>
+  Fresh training.
+  [network params shown from: FRESH INIT]
+  actor (policy) param shapes:
+    params/hidden_0/bias                         : (512,)          (512)  norm=0.000e+00
+    params/hidden_0/kernel                       : (65, 512)       (33,280)  norm=2.268e+01
+    params/hidden_1/bias                         : (256,)          (256)  norm=0.000e+00
+    params/hidden_1/kernel                       : (512, 256)      (131,072)  norm=1.599e+01
+    params/hidden_2/bias                         : (128,)          (128)  norm=0.000e+00
+    params/hidden_2/kernel                       : (256, 128)      (32,768)  norm=1.134e+01
+    params/hidden_3/bias                         : (12,)           (12)  norm=0.000e+00
+    params/hidden_3/kernel                       : (128, 12)       (1,536)  norm=0.000e+00
+    TOTAL scalars                                :                 (199,564)
+  critic (value) param shapes:
+    params/hidden_0/bias                         : (512,)          (512)  norm=0.000e+00
+    params/hidden_0/kernel                       : (116, 512)      (59,392)  norm=2.269e+01
+    params/hidden_1/bias                         : (256,)          (256)  norm=0.000e+00
+    params/hidden_1/kernel                       : (512, 256)      (131,072)  norm=1.599e+01
+    params/hidden_2/bias                         : (128,)          (128)  norm=0.000e+00
+    params/hidden_2/kernel                       : (256, 128)      (32,768)  norm=1.134e+01
+    params/hidden_3/bias                         : (1,)            (1)  norm=0.000e+00
+    params/hidden_3/kernel                       : (128, 1)        (128)  norm=9.634e-01
+    TOTAL scalars                                :                 (224,257)
+    Distribution_type: tanh_normal
+    Activation (read from policy_network module): silu
+  policy output-kernel init norms: min=0.000e+00, max=0.000e+00, count=1
+Start: 2026-10-18 19:57:26
+
+======================================================================
+  Opzioni disponibili di ppo.train
+======================================================================
+            environment                    default: '(nessun default)'
+  [PASSATO] num_timesteps                = 3000000   (default: '(nessun default)')
+            max_devices_per_host           default: None
+            wrap_env                       default: True
+            vision                         default: False
+            augment_pixels                 default: False
+  [PASSATO] num_envs                     = 1024   (default: 1)
+  [PASSATO] episode_length               = 1000   (default: None)
+  [PASSATO] action_repeat                = 1   (default: 1)
+            wrap_env_fn                    default: None
+            randomization_fn               default: None
+  [PASSATO] learning_rate                = 0.0003   (default: 0.0001)
+  [PASSATO] entropy_cost                 = 0.001   (default: 0.0001)
+  [PASSATO] discounting                  = 0.99   (default: 0.9)
+  [PASSATO] unroll_length                = 20   (default: 10)
+  [PASSATO] batch_size                   = 256   (default: 32)
+  [PASSATO] num_minibatches              = 32   (default: 16)
+  [PASSATO] num_updates_per_batch        = 4   (default: 2)
+  [PASSATO] num_resets_per_eval          = 10   (default: 0)
+  [PASSATO] normalize_observations       = True   (default: False)
+            normalize_observations_std_eps   default: 0.0
+            normalize_observations_mode    default: 'welford'
+            normalize_until_count          default: None
+  [PASSATO] reward_scaling               = 1.0   (default: 1.0)
+            clipping_epsilon               default: 0.3
+            clipping_epsilon_value         default: None
+            gae_lambda                     default: 0.95
+  [PASSATO] max_grad_norm                = 1.0   (default: None)
+            normalize_advantage            default: True
+            vf_loss_coefficient            default: 0.5
+            bootstrap_on_timeout           default: False
+            use_distributional_critic      default: False
+            desired_kl                     default: 0.01
+            learning_rate_schedule         default: None
+            learning_rate_schedule_min_lr   default: 1e-05
+            learning_rate_schedule_max_lr   default: 0.01
+  [PASSATO] network_factory              = {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}   (default: <function make_ppo_networks at 0x7ed7ce6b4ea0>)
+  [PASSATO] seed                         = 0   (default: 0)
+            use_pmap_on_reset              default: True
+  [PASSATO] num_evals                    = 3   (default: 1)
+            eval_env                       default: None
+            num_eval_envs                  default: 128
+  [PASSATO] deterministic_eval           = True   (default: False)
+            log_training_metrics           default: False
+            training_metrics_steps         default: None
+            progress_fn                    default: <function <lambda> at 0x7ed7caef9800>
+            policy_params_fn               default: <function <lambda> at 0x7ed7caef98a0>
+            save_checkpoint_path           default: None
+            restore_checkpoint_path        default: None
+            restore_params                 default: None
+            restore_value_fn               default: True
+            run_evals                      default: True
+======================================================================
+
+  eval#0 
+	num_steps =            0
+	reward = -3.938 ± 2.319
+	std = n/a
+	kl = n/a
+	elapsed 03:51
+	time 20:01:10
+-------------------------------
+  eval#1 
+	num_steps =    1,638,400
+	reward = -2.912 ± 2.538
+	std = 0.6322
+	kl = 0.0119
+	elapsed 28:16
+	time 20:25:36
+-------------------------------
+  eval#2 
+	num_steps =    3,276,800
+	reward = -1.720 ± 2.330
+	std = 0.5824
+	kl = 0.0130
+	elapsed 43:20
+	time 20:40:40
+-------------------------------
+
+Time to jit:   0:03:51.253026
+Time to train: 0:39:29.676800
+[INFO] Saved training info in /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_195719

@@ -1,0 +1,111 @@
+PPO_PARAMS: 
+{'num_timesteps': 20000000, 'num_evals': 10, 'reward_scaling': 1.0, 'episode_length': 1000, 'normalize_observations': True, 'action_repeat': 1, 'unroll_length': 20, 'num_minibatches': 32, 'num_updates_per_batch': 4, 'discounting': 0.99, 'learning_rate': 0.0003, 'entropy_cost': 0.001, 'num_envs': 1024, 'batch_size': 256, 'max_grad_norm': 1.0, 'network_factory': {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}, 'num_resets_per_eval': 10, 'seed': 0, 'deterministic_eval': True}
+SAC_PARAMS: 
+{'num_timesteps': 2000896, 'num_evals': 20, 'eval_episode_length': 2000, 'episode_length': 5000, 'batch_size': 512, 'actor_learning_rate': 0.001, 'critic_learning_rate': 0.001, 'alpha_learning_rate': 0.001, 'reward_scaling': 10.0, 'discounting': 0.99, 'initial_alpha': 0.1, 'update_every_transitions': 1024, 'updates_per_block': 64, 'num_envs': 256, 'replay_capacity': 1000000, 'tau': 0.005, 'init_std': 0.1, 'critic_burn_in': False, 'num_eval_envs': 10, 'seed': 0, 'deterministic_eval': True}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_slopes.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_slopes.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E1 0deg MPC: {'x_w': 0.0466845702384539, 'v': 0.03653721904706831, 'theta_p': 0.017723283958614507, 'z_c': 0.0004146609452260907, 'beta': 0.023951344022087036, 'final_x_err': 0.011833146882028966, 'fell': False, 'steps': 2500}
+E1 0deg HRC: {'x_w': 0.18052173909528246, 'v': 0.07052345462196914, 'theta_p': 0.01779143358463917, 'z_c': 0.0016641813733196138, 'beta': 0.022876704390981818, 'final_x_err': -0.21121069573484386, 'fell': False, 'steps': 2500}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_slopes.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_slopes.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E1 5deg MPC: {'x_w': 0.47610166699593504, 'v': 0.056112828944732705, 'theta_p': 0.015469524348752584, 'z_c': 0.0012473904194927347, 'beta': 0.017464976178380387, 'final_x_err': 0.8546049294439952, 'fell': False, 'steps': 2500}
+E1 5deg HRC: {'x_w': 0.6166505491850859, 'v': 0.22210544802447454, 'theta_p': 0.1348358662202025, 'z_c': 0.013229240726681394, 'beta': 0.15302872203282664, 'final_x_err': -0.8373837530825754, 'fell': True, 'steps': 868}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_slopes.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_slopes.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E1 10deg MPC: {'x_w': 1.0128541747635345, 'v': 0.09935395985158657, 'theta_p': 0.01892900760775214, 'z_c': 0.003062634826236582, 'beta': 0.04319794350541218, 'final_x_err': 1.8027742898696584, 'fell': False, 'steps': 2500}
+E1 10deg HRC: {'x_w': 0.4841283190612367, 'v': 0.1470193180844855, 'theta_p': 0.037253807523956385, 'z_c': 0.0056152634684530234, 'beta': 0.058363990627958724, 'final_x_err': -0.12825523792229498, 'fell': False, 'steps': 2500}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E2 MPC: {'x_w': 0.04434802991827773, 'v': 0.03491750157426015, 'theta_p': 0.014291699411593417, 'z_c': 0.0004017432766462305, 'beta': 0.021018590108242953, 'final_x_err': -0.04886046144263689, 'fell': False, 'steps': 4500, 'push12_max_dx': 0.011445355055997197, 'push12_recovery_s': 0.5300000000000011, 'push20_max_dx': 0.031381605430151005, 'push20_recovery_s': 0.5599999999999987, 'push32_max_dx': 0.06794019172078514, 'push32_recovery_s': nan}
+E2 HRC: {'x_w': 0.1938672082934672, 'v': 0.05883638740535492, 'theta_p': 0.013700304447083369, 'z_c': 0.0014468302265317492, 'beta': 0.018068012500266392, 'final_x_err': -0.1929938798094346, 'fell': False, 'steps': 4500, 'push12_max_dx': 0.24062231509235898, 'push12_recovery_s': nan, 'push20_max_dx': 0.28158501369268807, 'push20_recovery_s': nan, 'push32_max_dx': 0.31819005448198956, 'push32_recovery_s': nan}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E3 poly5 MPC: {'x_w': 0.05692005305293219, 'v': 0.0518903886833778, 'theta_p': 0.028103672097482626, 'z_c': 0.00041575825250772655, 'beta': 0.032285604236143094, 'final_x_err': 0.006892247830767362, 'fell': False, 'steps': 2900}
+E3 poly5 HRC: {'x_w': 1.5420299073813986, 'v': 0.9934841289314187, 'theta_p': 0.16541482336785587, 'z_c': 0.018181388964355075, 'beta': 0.16488785653039395, 'final_x_err': -3.52258915601324, 'fell': True, 'steps': 1944}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_flat.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E3 multi_target MPC: {'x_w': 0.21540510554715667, 'v': 0.38024357478052273, 'theta_p': 0.173008608413757, 'z_c': 0.005174137613543831, 'beta': 0.17157618256877108, 'final_x_err': -0.019795614892434088, 'fell': False, 'steps': 1500}
+E3 multi_target HRC: {'x_w': 0.3006779425196689, 'v': 0.5097862966623594, 'theta_p': 0.17470524887172495, 'z_c': 0.007371751145914092, 'beta': 0.19264203097433721, 'final_x_err': -0.16862176245813698, 'fell': False, 'steps': 1500}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D2.5_v0.5_MPC: fell=False t_end=20.00 x_rmse=2.255
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D2.5_v0.5_HRC: fell=False t_end=20.00 x_rmse=1.179
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D2.5_v1.0_MPC: fell=False t_end=20.00 x_rmse=0.398
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D2.5_v1.0_HRC: fell=False t_end=20.00 x_rmse=1.702
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D2.5_v1.5_MPC: fell=False t_end=20.00 x_rmse=0.142
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D2.5_v1.5_HRC: fell=False t_end=20.00 x_rmse=1.419
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D4.0_v0.5_MPC: fell=False t_end=20.00 x_rmse=2.339
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D4.0_v0.5_HRC: fell=False t_end=20.00 x_rmse=1.814
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D4.0_v1.0_MPC: fell=True t_end=4.74 x_rmse=0.673
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D4.0_v1.0_HRC: fell=True t_end=4.51 x_rmse=2.365
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D4.0_v1.5_MPC: fell=False t_end=20.00 x_rmse=0.640
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+E5_rough_D4.0_v1.5_HRC: fell=False t_end=20.00 x_rmse=3.134
+E5 rough MPC: 1/6 falls
+E5 rough HRC: 1/6 falls
+| Scenario | Controller | x_w | v | theta_p | z_c | beta | final x err | fell |
+|---|---|---|---|---|---|---|---|---|
+| E1_0deg | MPC | 0.0467 | 0.0365 | 0.0177 | 0.0004 | 0.0240 | 0.0118 | False |
+| E1_0deg | HRC | 0.1805 | 0.0705 | 0.0178 | 0.0017 | 0.0229 | -0.2112 | False |
+| E1_5deg | MPC | 0.4761 | 0.0561 | 0.0155 | 0.0012 | 0.0175 | 0.8546 | False |
+| E1_5deg | HRC | 0.6167 | 0.2221 | 0.1348 | 0.0132 | 0.1530 | -0.8374 | True |
+| E1_10deg | MPC | 1.0129 | 0.0994 | 0.0189 | 0.0031 | 0.0432 | 1.8028 | False |
+| E1_10deg | HRC | 0.4841 | 0.1470 | 0.0373 | 0.0056 | 0.0584 | -0.1283 | False |
+| E2 | MPC | 0.0443 | 0.0349 | 0.0143 | 0.0004 | 0.0210 | -0.0489 | False |
+| E2 | HRC | 0.1939 | 0.0588 | 0.0137 | 0.0014 | 0.0181 | -0.1930 | False |
+| E3_poly5 | MPC | 0.0569 | 0.0519 | 0.0281 | 0.0004 | 0.0323 | 0.0069 | False |
+| E3_poly5 | HRC | 1.5420 | 0.9935 | 0.1654 | 0.0182 | 0.1649 | -3.5226 | True |
+| E3_multi_target | MPC | 0.2154 | 0.3802 | 0.1730 | 0.0052 | 0.1716 | -0.0198 | False |
+| E3_multi_target | HRC | 0.3007 | 0.5098 | 0.1747 | 0.0074 | 0.1926 | -0.1686 | False |
+| E5_rough_D2.5_v0.5 | MPC | 2.2549 | 0.2714 | 0.0741 | 0.0060 | 0.0765 | -2.6134 | False |
+| E5_rough_D2.5_v0.5 | HRC | 1.1794 | 0.2341 | 0.0513 | 0.0049 | 0.0586 | -2.1014 | False |
+| E5_rough_D2.5_v1.0 | MPC | 0.3976 | 0.2626 | 0.0754 | 0.0069 | 0.0724 | 0.4584 | False |
+| E5_rough_D2.5_v1.0 | HRC | 1.7023 | 0.2676 | 0.0593 | 0.0041 | 0.0587 | -0.7979 | False |
+| E5_rough_D2.5_v1.5 | MPC | 0.1418 | 0.2180 | 0.0741 | 0.0048 | 0.0729 | 0.0494 | False |
+| E5_rough_D2.5_v1.5 | HRC | 1.4194 | 0.3641 | 0.0969 | 0.0061 | 0.1060 | -2.0136 | False |
+| E5_rough_D4.0_v0.5 | MPC | 2.3388 | 0.2864 | 0.0733 | 0.0066 | 0.0729 | -3.0157 | False |
+| E5_rough_D4.0_v0.5 | HRC | 1.8141 | 0.2153 | 0.0643 | 0.0044 | 0.0734 | -2.3538 | False |
+| E5_rough_D4.0_v1.0 | MPC | 0.6731 | 1.5057 | 0.3374 | 0.0386 | 0.3603 | -0.9923 | True |
+| E5_rough_D4.0_v1.0 | HRC | 2.3653 | 1.3580 | 0.2878 | 0.0337 | 0.3245 | -5.6148 | True |
+| E5_rough_D4.0_v1.5 | MPC | 0.6400 | 0.3284 | 0.0943 | 0.0115 | 0.0958 | 0.7244 | False |
+| E5_rough_D4.0_v1.5 | HRC | 3.1340 | 0.2790 | 0.0807 | 0.0056 | 0.0800 | -3.4951 | False |
+
+Paper Tab. I (Task 1): BMC / HRC
+- 0 deg: BMC [0.2475, 0.0533, 0.0157, 0.0168, 0.0065]  HRC [0.0134, 0.0119, 0.0106, 0.0032, 0.0057]
+- 5 deg: BMC [0.1397, 0.04, 0.0177, 0.0167, 0.0064]  HRC [0.0401, 0.0099, 0.0114, 0.0015, 0.0042]
+- 10 deg: BMC [0.3436, 0.0619, 0.0461, 0.017, 0.0106]  HRC [0.0366, 0.0086, 0.0289, 0.0012, 0.0103]

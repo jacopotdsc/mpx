@@ -1,0 +1,40 @@
+{
+  "algorithm": "sac",
+  "parameters": {
+    "num_timesteps": 2000896,
+    "num_evals": 20,
+    "eval_episode_length": 2000,
+    "episode_length": 5000,
+    "batch_size": 512,
+    "actor_learning_rate": 0.001,
+    "critic_learning_rate": 0.001,
+    "alpha_learning_rate": 0.001,
+    "reward_scaling": 10.0,
+    "discounting": 0.99,
+    "initial_alpha": 0.1,
+    "update_every_transitions": 1024,
+    "updates_per_block": 64,
+    "num_envs": 256,
+    "replay_capacity": 1000000,
+    "tau": 0.005,
+    "init_std": 0.1,
+    "critic_burn_in": false,
+    "num_eval_envs": 10,
+    "seed": 0,
+    "deterministic_eval": true
+  },
+  "env_name": "TitaJoystickFlatTerrain",
+  "observation_size": 65,
+  "action_size": 6,
+  "policy_hidden_layer_sizes": [
+    1024,
+    512
+  ],
+  "critic_hidden_layer_sizes": [
+    1024,
+    512
+  ],
+  "activation": "tanh",
+  "observation": "obs['state']",
+  "resume_mode": "weights only; replay and optimizers restart"
+}

@@ -1,3 +1,4 @@
+import os
 import jax
 from jax import numpy as jnp
 from functools import partial
@@ -506,8 +507,18 @@ def reference_generator_dfcip_online(
     # ============================================================
     # Fixed future-reference quantities
     # ============================================================
-    z_com_ref = 0.4
-    z_contact_ref = 0.0
+    # Default: hold the nominal CoM height 0.4 m above the currently measured
+    # contact midpoint. For the flat-terrain ablation, assume the ground stays
+    # at world z=0 and hold an absolute CoM height of 0.4 m.
+    if os.environ.get("TITA_MPC_FLAT_Z_REFERENCE", "0") == "1":
+        z_contact_ref = jnp.zeros_like(x0[8])
+        z_com_ref = jnp.asarray(0.4, dtype=x0.dtype)
+    elif os.environ.get("TITA_MPC_FIXED_ZCOM_REFERENCE", "0") == "1":
+        z_contact_ref = x0[8]
+        z_com_ref = jnp.asarray(0.4, dtype=x0.dtype)
+    else:
+        z_contact_ref = x0[8]
+        z_com_ref = z_contact_ref + 0.4
     vcom_z_ref = 0.0
     vcz_ref = 0.0
 

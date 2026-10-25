@@ -1,0 +1,38 @@
+14:30:43 other_gpu_procs=0 free_count=1
+14:31:43 other_gpu_procs=0 free_count=2
+14:32:43 other_gpu_procs=0 free_count=3
+14:33:44 other_gpu_procs=0 free_count=4
+14:34:44 other_gpu_procs=0 free_count=5
+14:35:44 other_gpu_procs=0 free_count=6
+14:37:00 other_gpu_procs=0 mean_util=62 free_count=1
+14:38:00 other_gpu_procs=0 mean_util=65 free_count=2
+14:39:00 other_gpu_procs=0 mean_util=65 free_count=3
+14:40:01 other_gpu_procs=0 mean_util=65 free_count=4
+14:41:01 other_gpu_procs=0 mean_util=54 free_count=5
+14:42:01 other_gpu_procs=0 mean_util=0 free_count=6
+14:43:01 other_gpu_procs=0 mean_util=0 free_count=7
+14:44:02 other_gpu_procs=0 mean_util=0 free_count=8
+14:45:02 other_gpu_procs=0 mean_util=0 free_count=9
+14:46:02 other_gpu_procs=0 mean_util=0 free_count=10
+14:47:02 other_gpu_procs=0 mean_util=0 free_count=11
+14:48:03 other_gpu_procs=0 mean_util=0 free_count=12
+14:49:03 other_gpu_procs=0 mean_util=0 free_count=13
+14:50:03 other_gpu_procs=0 mean_util=0 free_count=14
+14:51:03 other_gpu_procs=0 mean_util=0 free_count=15
+14:52:04 other_gpu_procs=0 mean_util=0 free_count=16
+14:53:04 other_gpu_procs=0 mean_util=0 free_count=17
+14:54:04 other_gpu_procs=0 mean_util=0 free_count=18
+14:55:05 other_gpu_procs=0 mean_util=0 free_count=19
+14:56:05 other_gpu_procs=0 mean_util=0 free_count=20
+14:57:05 other_gpu_procs=0 mean_util=0 free_count=21
+14:58:05 other_gpu_procs=0 mean_util=0 free_count=22
+14:59:06 other_gpu_procs=0 mean_util=0 free_count=23
+15:00:06 other_gpu_procs=0 mean_util=0 free_count=24
+15:01:06 other_gpu_procs=0 mean_util=0 free_count=25
+15:02:06 other_gpu_procs=0 mean_util=0 free_count=26
+15:03:07 other_gpu_procs=0 mean_util=0 free_count=27
+15:04:07 other_gpu_procs=0 mean_util=0 free_count=28
+15:05:07 other_gpu_procs=0 mean_util=0 free_count=29
+15:06:07 other_gpu_procs=0 mean_util=0 free_count=30
+15:06:07 launching
+15:06:23 launched: 1463387 1463786 1464184 

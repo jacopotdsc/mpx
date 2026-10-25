@@ -1,0 +1,78 @@
+{
+  "flat": {
+    "episodes": 40,
+    "falls": 0,
+    "fall_rate": 0.0,
+    "mean_time_to_fall_s": null,
+    "mean_abs_vx_err": 0.031849767086628795,
+    "mean_abs_wz_err": 0.024559620855234655,
+    "residual_ratio": 0.0,
+    "falls_per_command": {
+      "+0.5,+0.0": 0,
+      "+1.0,+0.0": 0,
+      "+1.5,+0.0": 0,
+      "+2.0,+0.0": 0,
+      "+1.0,+0.5": 0,
+      "+1.0,-0.8": 0,
+      "+2.0,+0.8": 0,
+      "-1.0,+0.0": 0
+    }
+  },
+  "rough": {
+    "episodes": 16,
+    "falls": 12,
+    "fall_rate": 0.75,
+    "mean_time_to_fall_s": 5.025833333333333,
+    "mean_abs_vx_err": NaN,
+    "mean_abs_wz_err": NaN,
+    "residual_ratio": 0.0,
+    "falls_per_command": {
+      "+0.5,+0.0": 0,
+      "+1.0,+0.0": 2,
+      "+1.5,+0.0": 1,
+      "+2.0,+0.0": 2,
+      "+1.0,+0.5": 1,
+      "+1.0,-0.8": 2,
+      "+2.0,+0.8": 2,
+      "-1.0,+0.0": 2
+    }
+  },
+  "perlin": {
+    "episodes": 40,
+    "falls": 2,
+    "fall_rate": 0.05,
+    "mean_time_to_fall_s": 6.385,
+    "mean_abs_vx_err": NaN,
+    "mean_abs_wz_err": NaN,
+    "residual_ratio": 0.0,
+    "falls_per_command": {
+      "+0.5,+0.0": 0,
+      "+1.0,+0.0": 1,
+      "+1.5,+0.0": 0,
+      "+2.0,+0.0": 0,
+      "+1.0,+0.5": 0,
+      "+1.0,-0.8": 1,
+      "+2.0,+0.8": 0,
+      "-1.0,+0.0": 0
+    }
+  },
+  "slope10": {
+    "episodes": 40,
+    "falls": 35,
+    "fall_rate": 0.875,
+    "mean_time_to_fall_s": 2.3974285714285712,
+    "mean_abs_vx_err": NaN,
+    "mean_abs_wz_err": NaN,
+    "residual_ratio": 0.0,
+    "falls_per_command": {
+      "+0.5,+0.0": 5,
+      "+1.0,+0.0": 5,
+      "+1.5,+0.0": 5,
+      "+2.0,+0.0": 5,
+      "+1.0,+0.5": 4,
+      "+1.0,-0.8": 2,
+      "+2.0,+0.8": 4,
+      "-1.0,+0.0": 5
+    }
+  }
+}

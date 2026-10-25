@@ -66,6 +66,7 @@ import re
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import subprocess
 import os
@@ -180,22 +181,32 @@ PPO_PARAMS = dict(
 
 print(f"PPO_PARAMS: \n{PPO_PARAMS}")
 
+# SAC del paper HRC (Zhang et al., ACIRS 2025, Sec. III-E), eseguito da
+# sac_training.train (residual_tita_v2). Rete: actor/critic 1024-512 tanh con
+# uscita residua inizializzata a zero (sac_training.make_network).
 SAC_PARAMS = dict(
-    num_timesteps          = NUM_TIMESTEPS,
-    num_evals              = NUM_EVALS,
-    reward_scaling         = 1.0,
-    episode_length         = EPISODE_LENGTH,
-    normalize_observations = True,
-    action_repeat          = 1,
-    discounting            = 0.997,
-    learning_rate          = 3e-4,
-    num_envs               = NUM_ENVS,          # SAC off-policy: molti meno env di PPO
-    batch_size             = 256,
-    grad_updates_per_step  = 32,
-    min_replay_size        = EPISODE_LENGTH,
-    max_replay_size        = EPISODE_LENGTH*NUM_ENVS,
-    seed                   = 0,
-    deterministic_eval     = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
+    num_timesteps            = 2_000_896,  # 40 epoche, ~2M campioni (multiplo di 1024)
+    num_evals                = 20,         # una eval ogni 2 epoche (~100k): l'eval costa
+    eval_episode_length      = 2000,       # 20 s: il task (<= 4 m a 0.5 m/s) si chiude in ~10 s
+    episode_length           = 5000,       # "a iteration of maximum 5000 steps"
+    batch_size               = 512,
+    actor_learning_rate      = 1e-3,       # paper: un solo lr, 1e-3
+    critic_learning_rate     = 1e-3,
+    alpha_learning_rate      = 1e-3,
+    reward_scaling           = 10.0,
+    discounting              = 0.99,
+    initial_alpha            = 0.1,
+    update_every_transitions = 1024,       # "updated every 1000 steps" (multiplo di num_envs)
+    # Non specificati dal paper (vedi tita_hybrid_plan/MEMORY.md).
+    updates_per_block        = 64,
+    num_envs                 = 256,        # ~1.5 episodi da 5000 step per env su 2M
+    replay_capacity          = 1_000_000,
+    tau                      = 0.005,
+    init_std                 = 0.1,
+    critic_burn_in           = False,
+    num_eval_envs            = 10,
+    seed                     = 0,
+    deterministic_eval       = DETERMINISTIC_EVAL, # eval usa la media della policy, non un sample rumoroso
 )
 
 print(f"SAC_PARAMS: \n{SAC_PARAMS}")
@@ -207,6 +218,7 @@ print(f"SAC_PARAMS: \n{SAC_PARAMS}")
 def make_envs(
     env_name: str = "Go1JoystickFlatTerrain",
     reward_scale_overrides: dict | None = None,
+    env_overrides: dict | None = None,
 ):
     """Return (env, eval_env, wrap_fn) for a MuJoCo Playground env.
 
@@ -230,6 +242,10 @@ def make_envs(
             f"reward_config.scales.{k}": v for k, v in reward_scale_overrides.items()
         }
         print(f"  [INFO] reward_config.scales overrides: {reward_scale_overrides}")
+    if env_overrides:
+        # Flattened config keys, e.g. {"terrain_config.scene": "slopes"}.
+        config_overrides = {**(config_overrides or {}), **env_overrides}
+        print(f"  [INFO] env config overrides: {env_overrides}")
 
     env      = registry.load(env_name, config_overrides=config_overrides)
     eval_env = registry.load(env_name, config_overrides=config_overrides)
@@ -1460,6 +1476,136 @@ def run_train(env, eval_env, wrap_env_fn, ckpt_dir: str,
     print(f"[INFO] Saved training info in {os.path.abspath(ckpt_dir)}")
     return make_inference_fn, params
 
+def run_sac_training(env, eval_env, ckpt_dir: str, resume_dir: str | None = None,
+                     resume_suffix: str = "best", env_name: str = "TitaJoystickFlatTerrain"):
+    """SAC (paper HRC) through sac_training.train, ported from residual_tita_v2.
+
+    Eval: num_eval_envs deterministic episodes of episode_length steps, run as a
+    single jitted scan. Saves params_{latest,best,final}.pkl (brax format,
+    (normalizer, policy)) and the full learner for resuming.
+    """
+    global REWARD_LOG_FILE, METRICS_LOG_FILE, CKPT_DIR
+    import sac_training
+    out = Path(ckpt_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    CKPT_DIR = ckpt_dir
+    REWARD_LOG_FILE = os.path.join(ckpt_dir, "reward_log.txt")
+    METRICS_LOG_FILE = os.path.join(ckpt_dir, "metrics_log.csv")
+    save_tita_env_files(env_name, ckpt_dir)
+    for module_path in (sac_training.__file__,
+                        os.path.join(os.path.dirname(__file__), "algorithm_initialization.py")):
+        save_source_files(module_path, ckpt_dir)
+
+    cfg = dict(SAC_PARAMS)
+    (out / "sac_config.json").write_text(json.dumps(dict(
+        algorithm="sac", parameters=cfg, env_name=env_name,
+        observation_size=env.observation_size, action_size=env.action_size,
+        policy_hidden_layer_sizes=[1024, 512], critic_hidden_layer_sizes=[1024, 512],
+        activation="tanh", observation="obs['state']",
+        resume_mode="weights only; replay and optimizers restart"), indent=2, default=str))
+    (out / "environment_config.json").write_text(json.dumps(env._config.to_dict(), indent=2, default=str))
+    print("=" * 60)
+    print(f"  SAC Training  —  {env_name}")
+    print(f"  obs size {env.observation_size}  action size {env.action_size}")
+    for k, v in cfg.items():
+        print(f"  {k:25s}: {v}")
+    print("=" * 60)
+
+    restore = None
+    if resume_dir:
+        path = Path(resume_dir) / f"learner_{resume_suffix}.pkl"
+        if not path.exists():
+            raise FileNotFoundError(f"SAC warm start requires its learner checkpoint: {path}")
+        with path.open("rb") as f:
+            restore = pickle.load(f)
+
+    num_eval_envs = cfg["num_eval_envs"]
+    episode_length = cfg["eval_episode_length"]
+    eval_fn = None
+    best_return = -float("inf")
+    latest = None
+
+    def make_eval_fn(make_policy):
+        @jax.jit
+        def run(params, key):
+            policy = make_policy(params, deterministic=cfg["deterministic_eval"])
+            state = jax.vmap(eval_env.reset)(jax.random.split(key, num_eval_envs))
+
+            def body(carry, _):
+                state, alive, key = carry
+                key, action_key = jax.random.split(key)
+                action, _ = policy(state.obs, action_key)
+                state = jax.vmap(eval_env.step)(state, action)
+                # where, not *: after a fall the errors can be NaN and NaN*0 = NaN.
+                out = (state.reward * alive, alive,
+                       jnp.where(alive[:, None] > 0, jnp.abs(state.info["task_errors"]), 0.0))
+                alive = alive * (1.0 - state.done)
+                return (state, alive, key), out
+
+            init = (state, jnp.ones(num_eval_envs), key)
+            _, (rewards, alive, abs_err) = jax.lax.scan(body, init, None, length=episode_length)
+            lengths = alive.sum(axis=0)
+            mean_abs_err = abs_err.sum(axis=(0, 1)) / jnp.maximum(lengths.sum(), 1.0)
+            return rewards.sum(axis=0), lengths, mean_abs_err
+        return run
+
+    def checkpoint(step, make_policy, params, learner):
+        nonlocal eval_fn, best_return, latest
+        latest = (params, learner)
+        if eval_fn is None:
+            eval_fn = make_eval_fn(make_policy)
+        returns, lengths, mean_abs_err = jax.device_get(
+            eval_fn(params, jax.random.PRNGKey(cfg["seed"] + 100)))
+        if not np.isfinite(returns).all():
+            raise FloatingPointError("Nonfinite SAC evaluation return")
+        metrics = {"eval/episode_reward": float(returns.mean()),
+                   "eval/episode_reward_std": float(returns.std()),
+                   "eval/avg_episode_length": float(lengths.mean())}
+        for name, value in zip(eval_env._TASK_ERROR_NAMES, mean_abs_err):
+            metrics[f"eval/mean_abs_{name}"] = float(value)
+        progress(step, metrics)
+        record = dict(step=int(step), **metrics)
+        with (out / "eval.jsonl").open("a") as f:
+            f.write(json.dumps(record) + "\n")
+        save_params(params, ckpt_dir, "latest")
+        if step > 0:
+            with (out / "learner_latest.pkl").open("wb") as f:
+                pickle.dump(jax.device_get(learner), f)
+        if metrics["eval/episode_reward"] > best_return:
+            best_return = metrics["eval/episode_reward"]
+            save_params(params, ckpt_dir, "best")
+            if step > 0:
+                with (out / "learner_best.pkl").open("wb") as f:
+                    pickle.dump(jax.device_get(learner), f)
+            (out / "best.json").write_text(json.dumps(record, indent=2))
+
+    train_options = {k: v for k, v in cfg.items()
+                     if k not in ("num_evals", "deterministic_eval", "num_eval_envs",
+                                  "eval_episode_length")}
+    train_options["eval_every"] = max(
+        cfg["update_every_transitions"],
+        int(np.ceil(cfg["num_timesteps"] / cfg["num_evals"] / cfg["update_every_transitions"]))
+        * cfg["update_every_transitions"])
+    try:
+        make_policy, params, learner = sac_training.train(
+            env, output=ckpt_dir, callback=checkpoint, restore=restore, **train_options)
+    except KeyboardInterrupt:
+        if latest is not None:
+            save_params(latest[0], ckpt_dir, "final")
+            with (out / "learner_interrupted.pkl").open("wb") as f:
+                pickle.dump(jax.device_get(latest[1]), f)
+            print("[INTERRUPT] SAC weights saved.")
+        return None, latest[0] if latest else None
+    except Exception:
+        if latest is not None:
+            save_params(latest[0], ckpt_dir, "crash")
+        raise
+    save_params(params, ckpt_dir, "final")
+    with (out / "learner_final.pkl").open("wb") as f:
+        pickle.dump(jax.device_get(learner), f)
+    print(f"[INFO] Saved training info in {os.path.abspath(ckpt_dir)}")
+    return make_policy, params
+
 def main():
 
     parser = argparse.ArgumentParser()
@@ -1509,6 +1655,13 @@ def main():
              "config.reward_config.scales. Only the listed terms are changed; "
              "everything else in the env config stays at its default. Used by "
              "analysis_training's reward-effects study.")
+    parser.add_argument(
+        "--sac-override", type=str, default=None, metavar="JSON",
+        help="JSON dict merged into SAC_PARAMS, e.g. '{\"critic_burn_in\": true}'.")
+    parser.add_argument(
+        "--env-override", type=str, default=None, metavar="JSON",
+        help="JSON dict of flattened env-config overrides applied to env and "
+             "eval_env, e.g. '{\"terrain_config.scene\": \"slopes\"}'.")
 
     args = parser.parse_args()
 
@@ -1526,6 +1679,8 @@ def main():
         ALGO_PARAMS["num_evals"] = args.num_evals
     if args.seed is not None:
         ALGO_PARAMS["seed"] = args.seed
+    if args.sac_override:
+        SAC_PARAMS.update(json.loads(args.sac_override))
     print(f"  [config] num_timesteps={ALGO_PARAMS['num_timesteps']} "
           f"num_envs={ALGO_PARAMS['num_envs']} num_evals={ALGO_PARAMS['num_evals']} "
           f"seed={ALGO_PARAMS['seed']}")
@@ -1547,7 +1702,9 @@ def main():
     if args.reward_override:
         with open(args.reward_override) as f:
             reward_scale_overrides = json.load(f)
-    env, eval_env, wrap_fn = make_envs(env_name=env_name, reward_scale_overrides=reward_scale_overrides)
+    env_overrides = json.loads(args.env_override) if args.env_override else None
+    env, eval_env, wrap_fn = make_envs(env_name=env_name, reward_scale_overrides=reward_scale_overrides,
+                                       env_overrides=env_overrides)
     env_base_dir = os.path.join(args.ckpt_dir, env_name)
 
 
@@ -1557,9 +1714,14 @@ def main():
             _resolve_load(env_base_dir, args.load) if args.load else (None, "best")
         )
         ckpt_dir = os.path.join(env_base_dir, SCRIPT_START_TIME)
-        run_train(env, eval_env, wrap_fn, ckpt_dir,
-                  resume_dir=resume_dir, resume_suffix=resume_suffix,
-                  env_name=env_name, algo=ALGO)
+        if ALGO == "sac":
+            run_sac_training(env, eval_env, ckpt_dir,
+                             resume_dir=resume_dir, resume_suffix=resume_suffix,
+                             env_name=env_name)
+        else:
+            run_train(env, eval_env, wrap_fn, ckpt_dir,
+                      resume_dir=resume_dir, resume_suffix=resume_suffix,
+                      env_name=env_name, algo=ALGO)
         return
 
     print("=" * 60)

@@ -1,0 +1,214 @@
+PPO_PARAMS: 
+{'num_timesteps': 20000000, 'num_evals': 10, 'reward_scaling': 1.0, 'episode_length': 1000, 'normalize_observations': True, 'action_repeat': 1, 'unroll_length': 20, 'num_minibatches': 32, 'num_updates_per_batch': 4, 'discounting': 0.99, 'learning_rate': 0.0003, 'entropy_cost': 0.001, 'num_envs': 1024, 'batch_size': 256, 'max_grad_norm': 1.0, 'network_factory': {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}, 'num_resets_per_eval': 10, 'seed': 0, 'deterministic_eval': True}
+SAC_PARAMS: 
+{'num_timesteps': 2000896, 'num_evals': 20, 'eval_episode_length': 2000, 'episode_length': 5000, 'batch_size': 512, 'actor_learning_rate': 0.001, 'critic_learning_rate': 0.001, 'alpha_learning_rate': 0.001, 'reward_scaling': 10.0, 'discounting': 0.99, 'initial_alpha': 0.1, 'update_every_transitions': 1024, 'updates_per_block': 64, 'num_envs': 256, 'replay_capacity': 1000000, 'tau': 0.005, 'init_std': 0.1, 'critic_burn_in': False, 'num_eval_envs': 10, 'seed': 0, 'deterministic_eval': True}
+  [config] num_timesteps=2000896 num_envs=256 num_evals=20 seed=0
+[WARN] No DISPLAY detected: forcing --headless mode (no viewer)
+  [INFO] mujoco_playground loaded from: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/__init__.py
+  [INFO] mujoco_playground._src.wrapper loaded from: mujoco_playground._src.wrapper -> /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/wrapper.py
+  [INFO] env config overrides: {'terrain_config.scene': 'slopes'}
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_slopes.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+[TitaEnv] loading xml: /home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita/xmls/scene_slopes.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+  [INFO] Copied files to '/home/jacopo/miniconda3/envs/mjpl/lib/python3.11/site-packages/mujoco_playground/mujoco_playground/_src/locomotion/tita' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_172405/files_save/tita'
+  [INFO] Copied files to '/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/train_srbd.py' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_172405/files_save'
+  [INFO] Copied files to '/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/sac_training.py' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_172405/files_save'
+  [INFO] Copied files to '/home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/algorithm_initialization.py' -> 'checkpoints/TitaJoystickFlatTerrain/20261018_172405/files_save'
+============================================================
+  SAC Training  —  TitaJoystickFlatTerrain
+  obs size 65  action size 6
+  num_timesteps            : 2000896
+  num_evals                : 20
+  eval_episode_length      : 2000
+  episode_length           : 5000
+  batch_size               : 512
+  actor_learning_rate      : 0.001
+  critic_learning_rate     : 0.001
+  alpha_learning_rate      : 0.001
+  reward_scaling           : 10.0
+  discounting              : 0.99
+  initial_alpha            : 0.1
+  update_every_transitions : 1024
+  updates_per_block        : 64
+  num_envs                 : 256
+  replay_capacity          : 1000000
+  tau                      : 0.005
+  init_std                 : 0.1
+  critic_burn_in           : False
+  num_eval_envs            : 10
+  seed                     : 0
+  deterministic_eval       : True
+============================================================
+  eval#0 
+	num_steps =            0
+	reward = -0.257 ± 0.281
+	std = n/a
+	kl = n/a
+	elapsed 00:57
+	time 17:25:02
+-------------------------------
+  eval#1 
+	num_steps =      100,352
+	reward = -3.381 ± 2.328
+	std = n/a
+	kl = n/a
+	elapsed 03:19
+	time 17:27:24
+-------------------------------
+  eval#2 
+	num_steps =      200,704
+	reward = -4.890 ± 1.553
+	std = n/a
+	kl = n/a
+	elapsed 05:31
+	time 17:29:36
+-------------------------------
+  eval#3 
+	num_steps =      301,056
+	reward = -4.695 ± 2.026
+	std = n/a
+	kl = n/a
+	elapsed 07:42
+	time 17:31:47
+-------------------------------
+  eval#4 
+	num_steps =      401,408
+	reward = -4.739 ± 1.627
+	std = n/a
+	kl = n/a
+	elapsed 09:51
+	time 17:33:56
+-------------------------------
+  eval#5 
+	num_steps =      501,760
+	reward = -4.676 ± 1.376
+	std = n/a
+	kl = n/a
+	elapsed 12:02
+	time 17:36:07
+-------------------------------
+  eval#6 
+	num_steps =      602,112
+	reward = -2.996 ± 2.269
+	std = n/a
+	kl = n/a
+	elapsed 14:11
+	time 17:38:16
+-------------------------------
+{"steps": 640000, "action_prior_loss": 0.0, "actor_base_loss": 5.823995862284944, "actor_loss": 5.823995862284944, "alpha": 0.005704202689230442, "alpha_loss": -0.005383308705180511, "critic_loss": 0.21147395486233786, "mean_action_l2": 0.51595664987539, "q_pi": -5.7627719048447315, "zero_action_prior": 0.0, "critic_burn_in": 0.0, "burn_in_rel_change": NaN}
+  eval#7 
+	num_steps =      702,464
+	reward = -3.486 ± 2.166
+	std = n/a
+	kl = n/a
+	elapsed 16:19
+	time 17:40:24
+-------------------------------
+  eval#8 
+	num_steps =      802,816
+	reward = -5.765 ± 0.400
+	std = n/a
+	kl = n/a
+	elapsed 18:33
+	time 17:42:38
+-------------------------------
+  eval#9 
+	num_steps =      903,168
+	reward = -4.308 ± 2.000
+	std = n/a
+	kl = n/a
+	elapsed 20:40
+	time 17:44:45
+-------------------------------
+  eval#10
+	num_steps =    1,003,520
+	reward = -3.387 ± 3.445
+	std = n/a
+	kl = n/a
+	elapsed 22:24
+	time 17:46:30
+-------------------------------
+  eval#11
+	num_steps =    1,103,872
+	reward = -3.195 ± 2.507
+	std = n/a
+	kl = n/a
+	elapsed 24:16
+	time 17:48:21
+-------------------------------
+  eval#12
+	num_steps =    1,204,224
+	reward = -2.591 ± 2.210
+	std = n/a
+	kl = n/a
+	elapsed 26:20
+	time 17:50:25
+-------------------------------
+{"steps": 1280000, "action_prior_loss": 0.0, "actor_base_loss": 6.390851479044596, "actor_loss": 6.390851479044596, "alpha": 0.002505482407286763, "alpha_loss": 0.0005496382752785476, "critic_loss": 0.16658769074064822, "mean_action_l2": 0.42621392342902764, "q_pi": -6.339238630940958, "zero_action_prior": 0.0, "critic_burn_in": 0.0, "burn_in_rel_change": NaN}
+  eval#13
+	num_steps =    1,304,576
+	reward = -5.406 ± 1.253
+	std = n/a
+	kl = n/a
+	elapsed 28:26
+	time 17:52:31
+-------------------------------
+  eval#14
+	num_steps =    1,404,928
+	reward = -5.572 ± 1.839
+	std = n/a
+	kl = n/a
+	elapsed 30:25
+	time 17:54:30
+-------------------------------
+  eval#15
+	num_steps =    1,505,280
+	reward = -1.970 ± 2.786
+	std = n/a
+	kl = n/a
+	elapsed 32:27
+	time 17:56:32
+-------------------------------
+  eval#16
+	num_steps =    1,605,632
+	reward = -1.619 ± 1.595
+	std = n/a
+	kl = n/a
+	elapsed 34:08
+	time 17:58:13
+-------------------------------
+  eval#17
+	num_steps =    1,705,984
+	reward = -1.003 ± 1.493
+	std = n/a
+	kl = n/a
+	elapsed 36:11
+	time 18:00:16
+-------------------------------
+  eval#18
+	num_steps =    1,806,336
+	reward = -3.012 ± 2.666
+	std = n/a
+	kl = n/a
+	elapsed 38:17
+	time 18:02:22
+-------------------------------
+  eval#19
+	num_steps =    1,906,688
+	reward = -0.910 ± 1.583
+	std = n/a
+	kl = n/a
+	elapsed 40:07
+	time 18:04:12
+-------------------------------
+{"steps": 1920000, "action_prior_loss": 0.0, "actor_base_loss": 5.732605423629656, "actor_loss": 5.732605423629656, "alpha": 0.002081385115161538, "alpha_loss": 0.0005290575037694229, "critic_loss": 0.039281056120981254, "mean_action_l2": 0.37987092141413836, "q_pi": -5.714569825777954, "zero_action_prior": 0.0, "critic_burn_in": 0.0, "burn_in_rel_change": NaN}
+  eval#20
+	num_steps =    2,000,896
+	reward = -1.491 ± 1.685
+	std = n/a
+	kl = n/a
+	elapsed 41:44
+	time 18:05:49
+-------------------------------
+[INFO] Saved training info in /home/jacopo/Desktop/repo_rl/tita_rl/test/mpx/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20261018_172405

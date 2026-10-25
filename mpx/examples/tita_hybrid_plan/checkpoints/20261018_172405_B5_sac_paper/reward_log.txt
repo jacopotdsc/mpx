@@ -1,0 +1,168 @@
+  eval#0 
+	num_steps =            0
+	reward = -0.257 ± 0.281
+	std = n/a
+	kl = n/a
+	elapsed 00:57
+	time 17:25:02
+-------------------------------
+  eval#1 
+	num_steps =      100,352
+	reward = -3.381 ± 2.328
+	std = n/a
+	kl = n/a
+	elapsed 03:19
+	time 17:27:24
+-------------------------------
+  eval#2 
+	num_steps =      200,704
+	reward = -4.890 ± 1.553
+	std = n/a
+	kl = n/a
+	elapsed 05:31
+	time 17:29:36
+-------------------------------
+  eval#3 
+	num_steps =      301,056
+	reward = -4.695 ± 2.026
+	std = n/a
+	kl = n/a
+	elapsed 07:42
+	time 17:31:47
+-------------------------------
+  eval#4 
+	num_steps =      401,408
+	reward = -4.739 ± 1.627
+	std = n/a
+	kl = n/a
+	elapsed 09:51
+	time 17:33:56
+-------------------------------
+  eval#5 
+	num_steps =      501,760
+	reward = -4.676 ± 1.376
+	std = n/a
+	kl = n/a
+	elapsed 12:02
+	time 17:36:07
+-------------------------------
+  eval#6 
+	num_steps =      602,112
+	reward = -2.996 ± 2.269
+	std = n/a
+	kl = n/a
+	elapsed 14:11
+	time 17:38:16
+-------------------------------
+  eval#7 
+	num_steps =      702,464
+	reward = -3.486 ± 2.166
+	std = n/a
+	kl = n/a
+	elapsed 16:19
+	time 17:40:24
+-------------------------------
+  eval#8 
+	num_steps =      802,816
+	reward = -5.765 ± 0.400
+	std = n/a
+	kl = n/a
+	elapsed 18:33
+	time 17:42:38
+-------------------------------
+  eval#9 
+	num_steps =      903,168
+	reward = -4.308 ± 2.000
+	std = n/a
+	kl = n/a
+	elapsed 20:40
+	time 17:44:45
+-------------------------------
+  eval#10
+	num_steps =    1,003,520
+	reward = -3.387 ± 3.445
+	std = n/a
+	kl = n/a
+	elapsed 22:24
+	time 17:46:30
+-------------------------------
+  eval#11
+	num_steps =    1,103,872
+	reward = -3.195 ± 2.507
+	std = n/a
+	kl = n/a
+	elapsed 24:16
+	time 17:48:21
+-------------------------------
+  eval#12
+	num_steps =    1,204,224
+	reward = -2.591 ± 2.210
+	std = n/a
+	kl = n/a
+	elapsed 26:20
+	time 17:50:25
+-------------------------------
+  eval#13
+	num_steps =    1,304,576
+	reward = -5.406 ± 1.253
+	std = n/a
+	kl = n/a
+	elapsed 28:26
+	time 17:52:31
+-------------------------------
+  eval#14
+	num_steps =    1,404,928
+	reward = -5.572 ± 1.839
+	std = n/a
+	kl = n/a
+	elapsed 30:25
+	time 17:54:30
+-------------------------------
+  eval#15
+	num_steps =    1,505,280
+	reward = -1.970 ± 2.786
+	std = n/a
+	kl = n/a
+	elapsed 32:27
+	time 17:56:32
+-------------------------------
+  eval#16
+	num_steps =    1,605,632
+	reward = -1.619 ± 1.595
+	std = n/a
+	kl = n/a
+	elapsed 34:08
+	time 17:58:13
+-------------------------------
+  eval#17
+	num_steps =    1,705,984
+	reward = -1.003 ± 1.493
+	std = n/a
+	kl = n/a
+	elapsed 36:11
+	time 18:00:16
+-------------------------------
+  eval#18
+	num_steps =    1,806,336
+	reward = -3.012 ± 2.666
+	std = n/a
+	kl = n/a
+	elapsed 38:17
+	time 18:02:22
+-------------------------------
+  eval#19
+	num_steps =    1,906,688
+	reward = -0.910 ± 1.583
+	std = n/a
+	kl = n/a
+	elapsed 40:07
+	time 18:04:12
+-------------------------------
+  eval#20
+	num_steps =    2,000,896
+	reward = -1.491 ± 1.685
+	std = n/a
+	kl = n/a
+	elapsed 41:44
+	time 18:05:49
+-------------------------------

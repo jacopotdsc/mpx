@@ -1,0 +1,13 @@
+{
+  "step": 0,
+  "eval/episode_reward": -0.25695100860996073,
+  "eval/episode_reward_std": 0.28141955173533695,
+  "eval/avg_episode_length": 2000.0,
+  "eval/mean_abs_x_err": 0.29966231385398623,
+  "eval/mean_abs_v_err": 0.04658235138925271,
+  "eval/mean_abs_theta_p_dot": 0.022665906640075898,
+  "eval/mean_abs_z_err": 0.0012808099813606613,
+  "eval/mean_abs_roll": 5.3664904442807005e-05,
+  "eval/mean_abs_pitch": 0.024834276395163328,
+  "eval/mean_abs_yaw": 0.0003004932151477957
+}

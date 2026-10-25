@@ -1,0 +1,12 @@
+PPO_PARAMS: 
+{'num_timesteps': 20000000, 'num_evals': 10, 'reward_scaling': 1.0, 'episode_length': 1000, 'normalize_observations': True, 'action_repeat': 1, 'unroll_length': 20, 'num_minibatches': 32, 'num_updates_per_batch': 4, 'discounting': 0.99, 'learning_rate': 0.0003, 'entropy_cost': 0.001, 'num_envs': 1024, 'batch_size': 256, 'max_grad_norm': 1.0, 'network_factory': {'policy_hidden_layer_sizes': (512, 256, 128), 'value_hidden_layer_sizes': (512, 256, 128), 'policy_obs_key': 'state', 'value_obs_key': 'privileged_state'}, 'num_resets_per_eval': 10, 'seed': 0, 'deterministic_eval': True}
+SAC_PARAMS: 
+{'num_timesteps': 20000000, 'num_evals': 10, 'reward_scaling': 1.0, 'episode_length': 1000, 'normalize_observations': True, 'action_repeat': 1, 'discounting': 0.997, 'learning_rate': 0.0003, 'num_envs': 1024, 'batch_size': 256, 'grad_updates_per_step': 32, 'min_replay_size': 1000, 'max_replay_size': 1024000, 'seed': 0, 'deterministic_eval': True}
+[TitaEnv] loading xml: /tmp/claude-1006/-home-jacopo-Desktop-repo-rl/3ae987d4-0134-434c-8d88-b632e654231e/scratchpad/mjpg_orig/mujoco_playground/_src/locomotion/tita/xmls/scene_rough.xml
+[MPC/WBC timing] sim 500 Hz (dt_sim 0.0020 s) | MPC 100 Hz: dt_mpc 0.01 s, N 50, horizon 0.50 s, update every 5 sim steps = 1 MPC node(s), 1 FDDP iteration(s) per update | WBC 100 Hz: dt_wbc 0.0100 s, every 5 sim steps | WBC reference lookahead 0.0 s
+  [INFO] Resolving --load argument: 20260918_124502
+  [INFO] Checkpoint directory: /tmp/claude-1006/-home-jacopo-Desktop-repo-rl/3ae987d4-0134-434c-8d88-b632e654231e/scratchpad/mpx_v1/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20260918_124502
+  Loading checkpoint: /tmp/claude-1006/-home-jacopo-Desktop-repo-rl/3ae987d4-0134-434c-8d88-b632e654231e/scratchpad/mpx_v1/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20260918_124502/params_best.pkl
+  [INFO] brax default kernel init: <function lecun_uniform at 0x768909550f40>
+  [build_eval_inference_fn] loaded /tmp/claude-1006/-home-jacopo-Desktop-repo-rl/3ae987d4-0134-434c-8d88-b632e654231e/scratchpad/mpx_v1/mpx/examples/checkpoints/TitaJoystickFlatTerrain/20260918_124502 suffix=best
+[v1] rough: {'episodes': 40, 'falls': 6, 'fall_rate': 0.15, 'mean_time_to_fall_s': 5.9783333333333335, 'mean_abs_vx_err': 0.07082810476317497, 'mean_abs_wz_err': 0.14868728356144104, 'residual_ratio': 0.16506311514602923, 'falls_per_command': {'+0.5,+0.0': 0, '+1.0,+0.0': 0, '+1.5,+0.0': 1, '+2.0,+0.0': 1, '+1.0,+0.5': 0, '+1.0,-0.8': 0, '+2.0,+0.8': 4, '-1.0,+0.0': 0}}
